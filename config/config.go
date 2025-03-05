@@ -8,8 +8,8 @@ var (
 
 type Config struct {
     // 已有配置
-    ScanTimeout int    `json:"scanTimeout"` // 扫描超时时间(秒)
-    MediaDir    string `json:"mediaDir"`    // 监控目录路径
+    ScanTimeout     int      `json:"scanTimeout"`     // 扫描超时时间(秒)
+    MediaDir        string   `json:"mediaDir"`        // 监控目录路径
     
     // 新增配置项
     WorkerPoolSize  int      `json:"workerPoolSize"`  // 并发工作协程数
@@ -17,4 +17,5 @@ type Config struct {
     VideoExtensions []string `json:"videoExtensions"` // 视频格式列表
     ExcludeDirs     []string `json:"excludeDirs"`     // 要排除的目录
     WatchInterval   int      `json:"watchInterval"`   // 文件监控轮询间隔(秒)
+    DBPath          string   `json:"dbPath"`          // 数据库文件路径
 }
