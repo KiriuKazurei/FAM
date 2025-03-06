@@ -1,13 +1,11 @@
-package core
+package file
 
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 
 	"github.com/dsoprea/go-exif/v3"
-	"github.com/dsoprea/go-exif/v3/exifcommon"
 	"github.com/dsoprea/go-exif/v3/exiftag"
 	"golang.org/x/image/tiff"
 )
