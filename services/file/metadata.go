@@ -23,7 +23,6 @@ func ExtractExif(filePath string) (*ImageMetadata, error) {
 	}
 	defer file.Close()
 
-	// 直接从文件流解析EXIF（避免内存问题）
 	exifData, err := exif.Decode(file)
 	if err != nil {
 		return nil, fmt.Errorf("无法提取 EXIF 数据: %w", err)
@@ -34,7 +33,7 @@ func ExtractExif(filePath string) (*ImageMetadata, error) {
 		ExifData: make(map[string]string),
 	}
 
-	ti := exifData.RootIfd()
+	ti := exifData.RootIfd() // 修复方法调用
 	err = ti.Walk(imd.collectExifData)
 	if err != nil {
 		return nil, fmt.Errorf("无法遍历 EXIF 数据: %w", err)
@@ -91,7 +90,8 @@ func ProcessRAW(filePath string) (*ImageMetadata, error) {
 		ExifData: make(map[string]string),
 	}
 
-	ti := exifData.RootIfd()
+	// 替换RootIfd()为字段访问
+	ti := exifData.RootIFD()
 	err = ti.Walk(imd.collectExifData)
 	if err != nil {
 		return nil, fmt.Errorf("无法遍历 EXIF 数据: %w", err)

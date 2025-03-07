@@ -74,7 +74,13 @@ func safeScan(path string) (result []MediaFile, err error) {
 	defer cancel()
 
 	resultChan := make(chan []MediaFile)
-	go func() { resultChan <- scanDir(path) }()
+	go func() {
+		res, err := scanDir(path)
+		if err != nil {
+			log.Printf("扫描目录 %s 失败: %v", path, err)
+		}
+		resultChan <- res
+	}()
 
 	select {
 	case <-ctx.Done():
