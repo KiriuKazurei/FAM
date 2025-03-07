@@ -1,0 +1,23 @@
+syntax = "proto3";
+option go_package = "./proto";
+package gateway;
+
+service FileService {
+    rpc ListFiles (ListFilesRequest) returns (ListFilesResponse);
+    rpc UpdateTags (UpdateTagsRequest) returns (UpdateTagsResponse);
+}
+
+message ListFilesRequest {}
+
+message ListFilesResponse {
+    repeated string files = 1;
+}
+
+message UpdateTagsRequest {
+    string file_id = 1;
+    repeated string tags = 2;
+}
+
+message UpdateTagsResponse {
+    string message = 1;
+}

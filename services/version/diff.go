@@ -1,7 +1,7 @@
 package version
 
 import (
-	"bytes"
+	// "bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"

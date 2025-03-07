@@ -1,6 +1,7 @@
 package version
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,9 +10,9 @@ import (
 
 // Snapshot represents a snapshot of the file system at a given point in time
 type Snapshot struct {
-	ID          string          `json:"id"`
-	GeneratedAt time.Time       `json:"generated_at"`
-	Files       []FileVersion   `json:"files"`
+	ID          string            `json:"id"`
+	GeneratedAt time.Time         `json:"generated_at"`
+	Files       []FileVersion     `json:"files"`
 	Comments    map[string]string `json:"comments"`
 }
 

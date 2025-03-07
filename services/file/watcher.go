@@ -5,7 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"./config"
+	"global_config/config"
+
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -64,9 +65,9 @@ func (fw *FileWatcher) Start() error {
 // @param path: 需要检测的完整文件路径
 // @return bool: true表示是媒体文件，false表示不支持的类型
 func isMediaFile(path string) bool {
-	ext := filepath.Ext(path)
-	for _, ext := range config.MediaExtensions {
-		if strings.EqualFold(ext, ext) {
+	ext := filepath.Ext(path)                          // 保留原始扩展名变量
+	for _, extConfig := range config.MediaExtensions { // 重命名循环变量
+		if strings.EqualFold(ext, extConfig) { // 比较原始扩展名与配置扩展名
 			return true
 		}
 	}

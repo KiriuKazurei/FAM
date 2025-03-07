@@ -10,7 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"./config" // 配置文件
+	"global_config/config" // 配置文件
+
 	"github.com/fsnotify/fsnotify"
 )
 
