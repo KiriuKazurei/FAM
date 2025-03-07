@@ -6,6 +6,7 @@ import (
 	"net"
 
 	pb "proto"
+	// TODO 回去记得装插件，差了protocol本体，对应的proto文件是没法用的
 
 	grpc "google.golang.org/grpc"
 )
