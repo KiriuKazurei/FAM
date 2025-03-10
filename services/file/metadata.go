@@ -2,6 +2,7 @@ package file
 
 import (
 	"fmt"
+	"github.com/superboomer/metadata/exif/exiftag"
 
 	"os"
 
@@ -33,7 +34,7 @@ func ExtractExif(filePath string) (*ImageMetadata, error) {
 		ExifData: make(map[string]string),
 	}
 
-	ti := exifData.RootIfd() // 修复方法调用
+	ti := exifData.Root()
 	err = ti.Walk(imd.collectExifData)
 	if err != nil {
 		return nil, fmt.Errorf("无法遍历 EXIF 数据: %w", err)

@@ -1,8 +1,6 @@
 package com.fam.services.file.metadata;
 
 import com.fam.services.file.scanner.FileScannerService;
-import com.fam.services.file.ai.local_infer.LocalInferenceService;
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -16,6 +14,7 @@ import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
 import org.libraw.LibRaw;
 import org.libraw.LibRawException;
+
 
 // TODO
 public class MetadataExtractor {
