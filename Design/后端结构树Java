@@ -1,0 +1,84 @@
+# 后端整体结构树（Java实现）
+
+## 根包结构
+com.fileauto.manage  
+├── domain/            # 领域模型层
+├── service/           # 业务服务层
+├── repository/        # 数据访问层
+├── gateway/           # 网关层
+└── config/            # 配置层
+
+## 核心模块详细结构
+
+### 1. 文件管理域 (file)
+com.fileauto.manage.service.file  
+├── scanner/  
+│   ├── FileScannerService.java   // 文件扫描服务
+│   └── DirectoryWalker.java      // 目录遍历器
+│   
+├── watcher/  
+│   ├── FileWatcherService.java   // 文件监控服务
+│   └── EventDispatcher.java      // 事件分发器
+│   
+└── metadata/  
+    ├── MetadataExtractor.java    // 元数据提取器
+    ├── ExifParser.java           // EXIF解析器
+    └── RawProcessor.java         // RAW格式处理器
+
+### 2. 标签管理域 (tag)
+com.fileauto.manage.service.tag  
+├── storage/  
+│   ├── TagRepository.java        // 标签仓储接口
+│   └── JpaTagRepository.java     // JPA实现
+│   
+├── search/  
+│   ├── ElasticsearchService.java // 搜索服务
+│   └── QueryBuilder.java         // 查询构建器
+│   
+└── priority/  
+    ├── TagPriorityManager.java   // 优先级管理器
+    └── ConflictResolver.java     // 冲突解决器
+
+### 3. AI处理域 (ai)
+com.fileauto.manage.service.ai  
+├── loader/  
+│   ├── ModelLoader.java          // 模型加载器
+│   └── ONNXModelManager.java     // ONNX模型管理
+│   
+├── local_infer/  
+│   ├── LocalInferenceService.java// 本地推理服务
+│   └── TensorConverter.java      // 张量转换器
+│   
+└── cache/  
+    ├── LRUCache.java             // LRU缓存策略
+    └── InferenceResultCache.java // 推理结果缓存
+
+### 4. 版本控制域 (version)
+com.fileauto.manage.service.version  
+├── snapshot/  
+│   ├── SnapshotService.java      // 快照服务
+│   └── ContentAddressableStore.java // 内容寻址存储
+│   
+└── diff/  
+    ├── DiffAnalyzer.java         // 差异分析器
+    └── BinaryComparator.java     // 二进制比较工具
+
+### 5. 网关层 (gateway)
+com.fileauto.manage.gateway  
+├── rest/  
+│   ├── FileRestController.java   // 文件REST控制器
+│   └── TagController.java        // 标签REST接口
+│   
+├── rpc/  
+│   ├── GrpcService.java          // gRPC服务实现
+│   └── ProtoMapper.java          // 协议映射器
+│   
+└── event/  
+    ├── EventPublisher.java       // 事件发布器
+    └── KafkaProducerAdapter.java // Kafka适配器
+
+### 6. 配置层 (config)
+com.fileauto.manage.config  
+├── FileStorageConfig.java        // 文件存储配置
+├── ElasticsearchConfig.java      // 搜索配置
+└── AIFrameworkConfig.java        // AI框架配置

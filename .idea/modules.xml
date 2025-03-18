@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/FileAutoManage(FAM).iml" filepath="$PROJECT_DIR$/.idea/FileAutoManage(FAM).iml" />
+      <module fileurl="file://$PROJECT_DIR$/FAM.iml" filepath="$PROJECT_DIR$/FAM.iml" />
     </modules>
   </component>
 </project>

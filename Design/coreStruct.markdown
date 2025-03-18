@@ -6,7 +6,7 @@ core/
 ├── hardware/             # 硬件检测模块
 │   ├── detector.cpp      # 硬件能力检测实现
 │   ├── detector.h        # 检测接口声明
-│   └── thresholds.json   # 硬件阈值配置
+│   └── thresholds.jso // 替换RootIfd()为字段访问
 ├── logging/              # 日志系统
 │   ├── logger.ts         # 日志核心实现
 │   ├── formatter.ts      # 日志格式化器
