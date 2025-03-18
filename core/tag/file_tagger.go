@@ -79,3 +79,8 @@ func isValidTag(tag string) bool {
 	// 示例规则：不允许特殊字符且长度不超过32字符
 	return len(tag) <= 32 && !regexp.MustCompile(`[^a-zA-Z0-9_\- ]`).MatchString(tag)
 }
+
+func DeleteTags() {
+	// TODO
+
+}
