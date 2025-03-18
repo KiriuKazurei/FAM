@@ -6,7 +6,7 @@ import (
 
 	"os"
 
-	"github.com/superboomer/metadata/exif"
+	"github.com/dsoprea/go-exif/v3"
 	// "golang.org/x/image/tiff"
 )
 
