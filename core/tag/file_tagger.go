@@ -1,12 +1,11 @@
 package tag
 
 import (
+	"core/config"
 	"fmt"
 	"gorm.io/driver/sqlite"
 	"regexp"
 	"time"
-
-	"core/config"
 
 	_ "gorm.io/driver/sqlite" // 确保 SQLite 驱动已导入
 	"gorm.io/gorm"            // 确保已导入 GORM
@@ -23,11 +22,11 @@ import (
 // 该函数目前是一个占位实现，实际的标签添加逻辑尚未实现。
 // 在未来的开发中，可以扩展此函数以支持真实的标签写入功能（例如通过 EXIF 工具或数据库存储）。
 
-// 标签存储模型（需在初始化时创建表结构）
+// 标签存储模型（优化存储能力）
 type TagEntry struct {
 	ID        int       `gorm:"primaryKey"`
-	FilePath  string    `gorm:"index;not null"` // 文件路径
-	Tag       string    `gorm:"not null"`       // 标签内容
+	FilePath  string    `gorm:"index;not null;type:text"`   // 强制使用TEXT类型
+	Tag       string    `gorm:"type:varchar(255);not null"` // 增加到255字符
 	Source    string    `gorm:"default:'manual'"`
 	CreatedAt time.Time `gorm:"autoCreateTime"`
 }
@@ -35,10 +34,12 @@ type TagEntry struct {
 // 数据库连接单例
 var db *gorm.DB
 
+// 在file_tagger.go的init函数中修改为：
 func init() {
 	// 从配置加载数据库路径（需对接core/config模块）
-	dbPath := core_config.Get("database.path", "tags.db") // 调整为实际包名和方法
+	dbPath := core_config.Get("database.path", "tags.db") // 使用修正后的Get方法
 	db, _ = gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	db.Exec("PRAGMA encoding = 'UTF-8';")
 	db.AutoMigrate(&TagEntry{})
 }
 
@@ -74,13 +75,47 @@ func AddTags(filePath string, tags []string) (string, error) {
 	return fmt.Sprintf("Added %d tags to %s", len(tags), filePath), nil
 }
 
-// 辅助函数：标签格式验证
+// DeleteTags 根据文件路径删除指定标签（或全部标签）
+// 参数:
+// - filePath: 需要删除标签的文件路径 (string)
+// - tags: 需要删除的标签列表 ([]string)，留空则删除所有标签
+// 返回值:
+// - string: 操作结果信息
+// - error: 错误信息（如果有的话）
+func DeleteTags(filePath string, tags []string) (string, error) {
+	var result *gorm.DB
+	var err error
+
+	// 根据参数选择删除条件
+	if len(tags) > 0 {
+		// 删除指定标签
+		result = db.Where("file_path = ? AND tag IN (?)", filePath, tags).Delete(&TagEntry{})
+	} else {
+		// 删除所有标签（该文件的所有记录）
+		result = db.Where("file_path = ?", filePath).Delete(&TagEntry{})
+	}
+
+	if err = result.Error; err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Deleted %d tags for %s", result.RowsAffected, filePath), nil
+}
+
+// 优化后的标签格式验证函数（支持中文及常用符号）
 func isValidTag(tag string) bool {
-	// 示例规则：不允许特殊字符且长度不超过32字符
-	return len(tag) <= 32 && !regexp.MustCompile(`[^a-zA-Z0-9_\- ]`).MatchString(tag)
+	// 允许中文、字母、数字、空格及常用标点（如：、。！？）
+	return len(tag) <= 64 &&
+		regexp.MustCompile(`^[a-zA-Z0-9\u4e00-\u9fa5 ！？，。、]+$`).MatchString(tag)
 }
 
-func DeleteTags() {
-	// TODO
-
-}
+//// 可选的标签净化处理（在存储前执行）
+//func sanitizeTag(tag string) string {
+//	// 移除连续空格并两端修剪
+//	return strings.Join(
+//		strings.FieldsFunc(tag, func(r rune) bool {
+//			return !unicode.IsSpace(r)
+//		}),
+//		" ",
+//	)
+//}

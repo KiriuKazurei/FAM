@@ -7,22 +7,17 @@ import (
 )
 
 type Config struct {
-	// The path to the directory where the files are stored
-	FilesDir string `json:"files_dir"`
-	// The path to the directory where the tags are stored
-	TagsDir string `json:"tags_dir"`
-	// The path to the directory where the logs are stored
-	LogsDir string `json:"logs_dir"`
-	// The path to the directory where the config is stored
-	ConfigDir string `json:"config_dir"`
-	// The path to the directory where the templates are stored
+	DatabasePath string `json:"database_path"` // 新增数据库路径字段
+	FilesDir     string `json:"files_dir"`
+	TagsDir      string `json:"tags_dir"`
+	LogsDir      string `json:"logs_dir"`
+	ConfigDir    string `json:"config_dir"`
 	TemplatesDir string `json:"templates_dir"`
 }
 
 var configData Config
 
 func init() {
-	// 假设配置文件路径为 "config.json"
 	configFilePath := "config.json"
 	data, err := ioutil.ReadFile(configFilePath)
 	if err != nil {
@@ -33,10 +28,10 @@ func init() {
 	}
 }
 
-func Get(path string, databasePath string) string {
+func Get(path string, defaultValue string) string {
 	switch path {
 	case "database.path":
-		return databasePath
+		return configData.DatabasePath // 从配置中读取
 	case "files_dir":
 		return configData.FilesDir
 	case "tags_dir":
@@ -48,6 +43,6 @@ func Get(path string, databasePath string) string {
 	case "templates_dir":
 		return configData.TemplatesDir
 	default:
-		return ""
+		return defaultValue // 使用默认值
 	}
 }

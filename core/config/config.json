@@ -1,0 +1,5 @@
+{
+    "database_path": "tags.db",
+    "files_dir": "...",
+    "logs_dir": "..."
+}
