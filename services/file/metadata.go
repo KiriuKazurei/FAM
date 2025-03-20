@@ -1,129 +1,34 @@
-package file
-
-import (
-	"fmt"
-	"github.com/superboomer/metadata/exif/exiftag"
-
-	"os"
-
-	"github.com/dsoprea/go-exif/v3"
-	// "golang.org/x/image/tiff"
-)
-
-// ImageMetadata 存储图像的元数据信息
 type ImageMetadata struct {
 	Path     string
-	ExifData map[string]string
+	Format   string
+	Width    int
+	Height   int
+	Camera   string // 相机型号（make+model）
+	RawData  map[string]interface{} `json:",omitempty"` // 原始RAW数据
+	Standard map[string]interface{} `json:",omitempty"` // 标准元数据
+	BitDepth int                    // 新增位深度字段
 }
 
-// ExtractExif 从图像文件中提取 EXIF 数据
 func ExtractExif(filePath string) (*ImageMetadata, error) {
-	file, err := os.Open(filePath)
+	metaMap, err := image.ProcessImage(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("无法打开文件: %w", err)
-	}
-	defer file.Close()
-
-	exifData, err := exif.Decode(file)
-	if err != nil {
-		return nil, fmt.Errorf("无法提取 EXIF 数据: %w", err)
+		return nil, fmt.Errorf("处理图像失败: %w", err)
 	}
 
 	imd := &ImageMetadata{
-		Path:     filePath,
-		ExifData: make(map[string]string),
+		Path:   filePath,
+		Format: filepath.Ext(filePath),
 	}
 
-	ti := exifData.Root()
-	err = ti.Walk(imd.collectExifData)
-	if err != nil {
-		return nil, fmt.Errorf("无法遍历 EXIF 数据: %w", err)
-	}
-
-	return imd, nil
-}
-
-// collectExifData 将 EXIF 数据收集到 ImageMetadata 结构中
-func (imd *ImageMetadata) collectExifData(tagId exiftag.ExifTagId, value interface{}, index int) error {
-	tagName, err := tagId.Name()
-	if err != nil {
-		return fmt.Errorf("无法获取标签名称: %w", err)
-	}
-
-	switch v := value.(type) {
-	case []byte:
-		imd.ExifData[tagName] = string(v)
-	case string:
-		imd.ExifData[tagName] = v
-	case int:
-		imd.ExifData[tagName] = fmt.Sprintf("%d", v)
-	case uint16:
-		imd.ExifData[tagName] = fmt.Sprintf("%d", v)
-	case uint32:
-		imd.ExifData[tagName] = fmt.Sprintf("%d", v)
-	case float64:
-		imd.ExifData[tagName] = fmt.Sprintf("%f", v)
-	case []float64:
-		imd.ExifData[tagName] = fmt.Sprintf("%v", v) // 处理GPS坐标等数组类型
-	default:
-		imd.ExifData[tagName] = fmt.Sprintf("%v", v)
-	}
-
-	return nil
-}
-
-// ProcessRAW 处理 RAW 格式的图像
-func ProcessRAW(filePath string) (*ImageMetadata, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("无法打开文件: %w", err)
-	}
-	defer file.Close()
-
-	// 直接解析原始文件的EXIF（跳过TIFF转换）
-	exifData, err := exif.Decode(file)
-	if err != nil {
-		return nil, fmt.Errorf("无法解析 EXIF 数据: %w", err)
-	}
-
-	imd := &ImageMetadata{
-		Path:     filePath,
-		ExifData: make(map[string]string),
-	}
-
-	// 替换RootIfd()为字段访问
-	ti := exifData.RootIFD()
-	err = ti.Walk(imd.collectExifData)
-	if err != nil {
-		return nil, fmt.Errorf("无法遍历 EXIF 数据: %w", err)
+	if stdMeta, ok := metaMap["standard_metadata"].(map[string]interface{}); ok {
+		imd.Standard = stdMeta
+		imd.Width = stdMeta["width"].(int)
+		imd.Height = stdMeta["height"].(int)
+		imd.BitDepth = stdMeta["bit_depth"].(int) // 新增位深度赋值
+	} else if rawMeta, ok := metaMap["raw_metadata"].(map[string]interface{}); ok {
+		imd.RawData = rawMeta
+		imd.Camera = fmt.Sprintf("%v %v", rawMeta["camera_make"], rawMeta["camera_model"])
 	}
 
 	return imd, nil
-}
-
-// 示例用法
-func ExampleExtractExif() {
-	imd, err := ExtractExif("example.jpg")
-	if err != nil {
-		fmt.Println("错误:", err)
-		return
-	}
-
-	fmt.Printf("文件 %s 的 EXIF 数据:\n", imd.Path)
-	for key, value := range imd.ExifData {
-		fmt.Printf("%s: %s\n", key, value)
-	}
-}
-
-func ExampleProcessRAW() {
-	imd, err := ProcessRAW("example.raw")
-	if err != nil {
-		fmt.Println("错误:", err)
-		return
-	}
-
-	fmt.Printf("文件 %s 的 EXIF 数据:\n", imd.Path)
-	for key, value := range imd.ExifData {
-		fmt.Printf("%s: %s\n", key, value)
-	}
 }

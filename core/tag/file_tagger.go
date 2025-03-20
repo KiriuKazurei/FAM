@@ -102,6 +102,21 @@ func DeleteTags(filePath string, tags []string) (string, error) {
 	return fmt.Sprintf("Deleted %d tags for %s", result.RowsAffected, filePath), nil
 }
 
+// ListTags 根据文件路径获取所有标签
+func ListTags(filePath string) ([]string, error) {
+	var tags []string
+
+	// 使用Pluck提取所有Tag字段
+	if err := db.Model(&TagEntry{}).
+		Where("file_path = ?", filePath).
+		Pluck("Tag", &tags).
+		Error; err != nil {
+		return nil, fmt.Errorf("查询标签失败: %w", err)
+	}
+
+	return tags, nil
+}
+
 // 优化后的标签格式验证函数（支持中文及常用符号）
 func isValidTag(tag string) bool {
 	// 允许中文、字母、数字、空格及常用标点（如：、。！？）
