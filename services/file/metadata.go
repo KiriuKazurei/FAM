@@ -1,9 +1,19 @@
+package file
+
+import (
+	"fmt"
+
+	"path/filepath"
+
+	image "FAM/core/imageutil"
+)
+
 type ImageMetadata struct {
 	Path     string
 	Format   string
 	Width    int
 	Height   int
-	Camera   string // 相机型号（make+model）
+	Camera   string                 // 相机型号（make+model）
 	RawData  map[string]interface{} `json:",omitempty"` // 原始RAW数据
 	Standard map[string]interface{} `json:",omitempty"` // 标准元数据
 	BitDepth int                    // 新增位深度字段

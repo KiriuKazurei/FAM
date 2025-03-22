@@ -1,11 +1,11 @@
-package image
+package imageutil
 
 import (
+	"fmt"
+	"image"
 	"os"
 	"path/filepath"
-	"fmt"
 	"strings"
-	"image"
 )
 
 // 添加libraw的CGO依赖
@@ -16,8 +16,8 @@ import (
 */
 import "C"
 import (
-	"unsafe"
 	"errors"
+	"unsafe"
 )
 
 func getRawMetadata(filePath string) (map[string]interface{}, error) {
@@ -61,7 +61,7 @@ func ProcessImage(filePath string) (map[string]interface{}, error) {
 	}
 
 	ext := filepath.Ext(filePath)
-	isRaw := isRawFormat(ext)
+	isRaw := IsRawFormat(ext)
 
 	meta := make(map[string]interface{})
 	meta["file_size"] = fileInfo.Size()
@@ -87,7 +87,7 @@ func ProcessImage(filePath string) (map[string]interface{}, error) {
 }
 
 // isRawFormat 检查文件扩展名是否为RAW格式
-func isRawFormat(ext string) bool {
+func IsRawFormat(ext string) bool {
 	// 常见RAW格式扩展名列表（小写形式）
 	rawExtensions := map[string]struct{}{
 		".cr2": {}, // Canon
@@ -119,8 +119,8 @@ func getStandardMetadata(filePath string) (map[string]interface{}, error) {
 	meta := make(map[string]interface{})
 	meta["width"] = config.Width
 	meta["height"] = config.Height
+	meta["colormodel"] = config.ColorModel
 	meta["format"] = format
-	meta["bit_depth"] = config.BitDepth // 确保位深度正确返回
 
 	return meta, nil
 }

@@ -1,12 +1,14 @@
 package imageutil
 
+// 生成略缩图的方法
+
 import "C"
+
 import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"image"
 	"image/jpeg"
 	"os"
@@ -14,29 +16,17 @@ import (
 	"sync"
 	"time"
 	"unsafe"
-)
 
-package imageutil
-
-import (
-"errors"
-"image"
-"image/jpeg"
-"os"
-"path/filepath"
-"sync"
-"time"
-
-"github.com/disintegration/imaging"
+	"github.com/disintegration/imaging"
 )
 
 // 缩略图生成配置
 type ThumbnailConfig struct {
-	MaxDimension  int     // 最大边长（像素）
-	JPEGQuality   int     // JPEG压缩质量（1-100）
-	CacheDir      string  // 缓存目录路径
-	WorkerCount   int     // 并行工作协程数
-	CacheDuration int64   // 缓存有效期（秒）
+	MaxDimension  int    // 最大边长（像素）
+	JPEGQuality   int    // JPEG压缩质量（1-100）
+	CacheDir      string // 缓存目录路径
+	WorkerCount   int    // 并行工作协程数
+	CacheDuration int64  // 缓存有效期（秒）
 }
 
 var DefaultThumbnailConfig = &ThumbnailConfig{
@@ -118,7 +108,7 @@ func (g *ThumbnailGenerator) worker() {
 			var img image.Image
 			var err error
 
-			if isRawFile(task.srcPath) {
+			if IsRawFormat(task.srcPath) {
 				img, err = generateRawThumbnail(task.srcPath, g.config.MaxDimension)
 			} else {
 				img, err = generateStandardThumbnail(task.srcPath, g.config.MaxDimension)
@@ -224,10 +214,6 @@ func (g *ThumbnailGenerator) CleanupCache() error {
 		return nil
 	})
 }
-
-
-
-
 
 // 用法
 //func main() {
