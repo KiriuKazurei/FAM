@@ -1,5 +1,4 @@
-// core/index_service.go
-package core
+package services
 
 import (
 	"database/sql"

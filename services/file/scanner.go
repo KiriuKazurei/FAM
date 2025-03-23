@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"global_config/config" // 配置文件
+	config "FAM/global_config" // 配置文件
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -122,11 +122,12 @@ func scanDir(path string) ([]MediaFile, error) {
 		}
 		// 目录故障排查
 		if info.IsDir() {
-			for _, dir := range config.ExcludeDirs {
-				if strings.Contains(p, dir) {
-					return filepath.SkipDir
-				}
+			pClean := path.Clean(p) // 标准化当前路径
+			// 检查是否在排除列表中
+			if Config.excludedDirs[pClean] {
+				return filepath.SkipDir // TODO
 			}
+			// 进一步检查父目录是否被排除（如需递归排除）
 		}
 
 		if !info.IsDir() && mediaExts[filepath.Ext(p)] {

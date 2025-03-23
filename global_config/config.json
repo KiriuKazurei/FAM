@@ -1,0 +1,5 @@
+{
+    "excludeDirs": ["/temp", "/cache", "/backup"],
+    "mediaDir": "/监控目录",
+    "workerPoolSize": 10
+}
