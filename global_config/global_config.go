@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	ScanTimeout = 30          // 默认扫描超时时间(秒)
+	ScanTimeout = 30      // 默认扫描超时时间(秒)
 	MediaDir    = "/监控目录" // 默认监控路径
 )
 
