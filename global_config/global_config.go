@@ -3,11 +3,14 @@ package global_config
 import (
 	"encoding/json"
 	"os"
+	"path"
 )
 
 var (
-	ScanTimeout = 30      // 默认扫描超时时间(秒)
+	ScanTimeout = 30          // 默认扫描超时时间(秒)
 	MediaDir    = "/监控目录" // 默认监控路径
+
+	excludedDirs = make(map[string]bool)
 )
 
 type Config struct {
@@ -42,4 +45,18 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func LoadAndInit() (*Config, error) {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	// 初始化排除目录映射
+	excludedDirs = make(map[string]bool) // 重新初始化全局变量
+	for _, dir := range cfg.ExcludeDirs {
+		cleanedDir := path.Clean(dir)
+		excludedDirs[cleanedDir] = true
+	}
+	return cfg, nil
 }

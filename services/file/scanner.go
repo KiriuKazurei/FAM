@@ -122,7 +122,7 @@ func scanDir(path string) ([]MediaFile, error) {
 		}
 		// 目录故障排查
 		if info.IsDir() {
-			pClean := path.Clean(p) // 标准化当前路径
+			pClean := path.Clean(p) // 标准化当前路径  TODO
 			// 检查是否在排除列表中
 			if Config.excludedDirs[pClean] {
 				return filepath.SkipDir // TODO
