@@ -1,11 +1,12 @@
 package tag
 
 import (
-	"core/config"
+	"FAM/core/core_config"
 	"fmt"
-	"gorm.io/driver/sqlite"
 	"regexp"
 	"time"
+
+	"gorm.io/driver/sqlite"
 
 	_ "gorm.io/driver/sqlite" // 确保 SQLite 驱动已导入
 	"gorm.io/gorm"            // 确保已导入 GORM
