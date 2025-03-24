@@ -2,7 +2,11 @@ package tag
 
 import (
 	"FAM/core/core_config"
+
+	"strings"
+
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"time"
 
@@ -116,6 +120,33 @@ func ListTags(filePath string) ([]string, error) {
 	}
 
 	return tags, nil
+}
+
+func SearchTags(tag string, searchDir string) ([]string, error) {
+	if searchDir == "" {
+		searchDir = core_config.Get("files_dir", "./")
+	}
+	// 查询数据库中所有带有该标签的文件记录
+	var entries []TagEntry
+	if err := db.Where("tag = ?", tag).Find(&entries).Error; err != nil {
+		return nil, err
+	}
+	// 过滤路径是否属于 searchDir 目录
+	cleanSearchDir := filepath.Clean(searchDir)
+	cleanSearchDirWithSlash := filepath.Join(cleanSearchDir, "") // 确保结尾有路径分隔符
+
+	var fileList []string
+	for _, entry := range entries {
+		filePath := entry.FilePath
+		cleanPath := filepath.Clean(filePath)
+
+		// 检查文件路径是否在 searchDir 下
+		if strings.HasPrefix(cleanPath, cleanSearchDirWithSlash) {
+			fileList = append(fileList, filePath)
+		}
+	}
+
+	return fileList, nil
 }
 
 // 优化后的标签格式验证函数（支持中文及常用符号）
