@@ -1,5 +1,6 @@
 {
     "excludeDirs": ["/temp", "/cache", "/backup"],
     "mediaDir": "/监控目录",
+    "mediaExtensions": [".pdf", ".docx", ".mp3"],
     "workerPoolSize": 10
 }

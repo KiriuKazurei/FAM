@@ -16,4 +16,6 @@ type Tagger interface {
 	AddTags(filePath string, tags []string) (string, error)
 	DeleteTags(filePath string, tags []string) (string, error)
 	ListTags(filePath string) ([]string, error)
+	UpdateTag(filePath string, oldTag string, newTag string, newSource string) (string, error)
+	SearchTags(tag string, searchDir string) (fileList []string) //用于搜索包含特定tag的所有图片的功能，限定搜索范围，默认为core_config.FilesDir
 }

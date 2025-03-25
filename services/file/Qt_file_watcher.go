@@ -1,20 +1,28 @@
 package file
 
+import "C"
 import (
 	"fmt"
+	"unsafe"
 
 	"github.com/fsnotify/fsnotify"
+
+	imageutil "FAM/core/imageutil"
 )
 
 type QtFileWatcher struct {
 	eventChannel chan fsnotify.Event
 	stopped      bool // 新增字段用于标记是否停止
+	thumbnailGen *imageutil.ThumbnailGenerator
 }
 
-func NewQtFileWatcher(bufferSize int) *QtFileWatcher {
+// 构造函数需要接收配置参数
+func NewQtFileWatcher(bufferSize int, config *imageutil.ThumbnailConfig) *QtFileWatcher {
+	gen := imageutil.NewThumbnailGenerator(config)
 	return &QtFileWatcher{
 		eventChannel: make(chan fsnotify.Event, bufferSize),
 		stopped:      false,
+		thumbnailGen: gen,
 	}
 }
 
@@ -47,18 +55,34 @@ func (q *QtFileWatcher) HandleEvent(event fsnotify.Event) {
 
 // processFile 触发缩略图生成和UI更新
 func (q *QtFileWatcher) processFile(path string) {
-	// 实际实现需替换以下代码
-	thumbnail := q.generateThumbnail(path)
-	q.updateUI(thumbnail)
+	resultChan := q.thumbnailGen.GetThumbnailAsync(path)
+	result := <-resultChan // 等待异步结果（需确保在goroutine中执行）
+	if result.err != nil {
+		fmt.Printf("生成缩略图失败: %v\n", result.err)
+		return
+	}
+	q.updateUI(result.thumbPath) // 传递缓存路径给UI
 }
 
 func (q *QtFileWatcher) generateThumbnail(path string) any {
-	// 实现图像处理逻辑（如调用CGO）
-	return nil // 替换为实际返回值
+	// 通过ThumbnailGenerator生成缩略图（假设已实现）
+	thumbPath, err := q.thumbnailGen.Generate(path)
+	if err != nil {
+		fmt.Printf("生成缩略图失败: %v\n", err)
+		return nil // 或返回错误对象
+	}
+	return thumbPath // 返回缩略图路径
 }
 
-func (q *QtFileWatcher) updateUI(thumbnail any) {
-	// 通过IPC或CGO通知Qt更新UI
+//	func (q *QtFileWatcher) updateUI(thumbnail any) {
+//		// 通过IPC或CGO通知Qt更新UI
+//	}
+func (q *QtFileWatcher) updateUI(thumbPath string) {
+	cPath := C.CString(thumbPath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	// 调用Qt的C接口更新UI
+	C.update_ui_thumbnail(cPath)
 }
 
 // Stop 停止事件监听

@@ -7,10 +7,10 @@ import (
 )
 
 var (
-	ScanTimeout = 30          // 默认扫描超时时间(秒)
+	ScanTimeout = 30      // 默认扫描超时时间(秒)
 	MediaDir    = "/监控目录" // 默认监控路径
 
-	excludedDirs = make(map[string]bool)
+	ExcludedDirs = make(map[string]bool)
 )
 
 type Config struct {
@@ -29,10 +29,11 @@ type Config struct {
 }
 
 var DefaultConfig = Config{
-	ExcludeDirs: []string{"/tmp", "/logs"}, // 默认排除的目录
+	ExcludeDirs:     []string{"/tmp", "/logs"},                // 默认排除的目录
+	MediaExtensions: []string{".jpg", ".png", ".mp4", ".avi"}, // 可根据需求修改默认值
 }
 
-// 加载配置文件（假设使用 JSON）
+// 加载配置文件（JSON）
 func LoadConfig() (*Config, error) {
 	file, err := os.Open("config.json")
 	if err != nil {
@@ -53,10 +54,10 @@ func LoadAndInit() (*Config, error) {
 		return nil, err
 	}
 	// 初始化排除目录映射
-	excludedDirs = make(map[string]bool) // 重新初始化全局变量
+	ExcludedDirs = make(map[string]bool) // 重新初始化全局变量
 	for _, dir := range cfg.ExcludeDirs {
 		cleanedDir := path.Clean(dir)
-		excludedDirs[cleanedDir] = true
+		ExcludedDirs[cleanedDir] = true
 	}
 	return cfg, nil
 }
