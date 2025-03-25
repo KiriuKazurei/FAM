@@ -33,7 +33,7 @@ var DefaultConfig = Config{
 	MediaExtensions: []string{".jpg", ".png", ".mp4", ".avi"}, // 可根据需求修改默认值
 }
 
-// 加载配置文件（假设使用 JSON）
+// 加载配置文件（JSON）
 func LoadConfig() (*Config, error) {
 	file, err := os.Open("config.json")
 	if err != nil {
