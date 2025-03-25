@@ -65,13 +65,18 @@ func (q *QtFileWatcher) processFile(path string) {
 }
 
 func (q *QtFileWatcher) generateThumbnail(path string) any {
-	// 实现图像处理逻辑（如调用CGO）
-	return nil // 替换为实际返回值
+	// 通过ThumbnailGenerator生成缩略图（假设已实现）
+	thumbPath, err := q.thumbnailGen.Generate(path)
+	if err != nil {
+		fmt.Printf("生成缩略图失败: %v\n", err)
+		return nil // 或返回错误对象
+	}
+	return thumbPath // 返回缩略图路径
 }
 
-func (q *QtFileWatcher) updateUI(thumbnail any) {
-	// 通过IPC或CGO通知Qt更新UI
-}
+//	func (q *QtFileWatcher) updateUI(thumbnail any) {
+//		// 通过IPC或CGO通知Qt更新UI
+//	}
 func (q *QtFileWatcher) updateUI(thumbPath string) {
 	cPath := C.CString(thumbPath)
 	defer C.free(unsafe.Pointer(cPath))
