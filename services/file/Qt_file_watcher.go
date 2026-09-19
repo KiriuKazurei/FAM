@@ -57,11 +57,11 @@ func (q *QtFileWatcher) HandleEvent(event fsnotify.Event) {
 func (q *QtFileWatcher) processFile(path string) {
 	resultChan := q.thumbnailGen.GetThumbnailAsync(path)
 	result := <-resultChan // 等待异步结果（需确保在goroutine中执行）
-	if result.err != nil {
-		fmt.Printf("生成缩略图失败: %v\n", result.err)
+	if result.Err != nil {
+		fmt.Printf("生成缩略图失败: %v\n", result.Err)
 		return
 	}
-	q.updateUI(result.thumbPath) // 传递缓存路径给UI
+	q.updateUI(result.ThumbPath) // 传递缓存路径给UI
 }
 
 func (q *QtFileWatcher) generateThumbnail(path string) any {

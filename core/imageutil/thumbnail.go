@@ -49,8 +49,8 @@ type thumbnailTask struct {
 }
 
 type thumbnailResult struct {
-	thumbPath string
-	err       error
+	ThumbPath string
+	Err       error
 }
 
 // 初始化缩略图生成器
@@ -102,7 +102,7 @@ func (g *ThumbnailGenerator) worker() {
 		// 优先检查缓存
 		cachePath := g.getCachePath(task.srcPath)
 		if g.isCacheValid(cachePath) {
-			result.thumbPath = cachePath
+			result.ThumbPath = cachePath
 		} else {
 			// 实际生成逻辑
 			var img image.Image
@@ -119,9 +119,9 @@ func (g *ThumbnailGenerator) worker() {
 			}
 
 			if err != nil {
-				result.err = err
+				result.Err = err
 			} else {
-				result.thumbPath = cachePath
+				result.ThumbPath = cachePath
 			}
 		}
 

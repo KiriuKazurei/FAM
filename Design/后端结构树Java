@@ -4,56 +4,35 @@
 com.fileauto.manage  
 ├── domain/            # 领域模型层
 ├── service/           # 业务服务层
+│   ├── file/          # 文件管理服务
+│   ├── tag/           # 标签管理服务
+│   ├── ai/            # AI处理服务
+│   └── version/       # 版本控制服务
 ├── repository/        # 数据访问层
 ├── gateway/           # 网关层
 └── config/            # 配置层
 
 ## 核心模块详细结构
 
-### 1. 文件管理域 (file)
+### 1. 文件管理服务 (file)
 com.fileauto.manage.service.file  
-├── scanner/  
-│   ├── FileScannerService.java   // 文件扫描服务
-│   └── DirectoryWalker.java      // 目录遍历器
-│   
-├── watcher/  
-│   ├── FileWatcherService.java   // 文件监控服务
-│   └── EventDispatcher.java      // 事件分发器
-│   
-└── metadata/  
-    ├── MetadataExtractor.java    // 元数据提取器
-    ├── ExifParser.java           // EXIF解析器
-    └── RawProcessor.java         // RAW格式处理器
+├── FileScannerService.java   // 文件扫描服务
+├── FileWatcherService.java   // 文件监控服务
+└── MetadataExtractor.java    // 元数据提取器
 
-### 2. 标签管理域 (tag)
+### 2. 标签管理服务 (tag)
 com.fileauto.manage.service.tag  
-├── storage/  
-│   ├── TagRepository.java        // 标签仓储接口
-│   └── JpaTagRepository.java     // JPA实现
-│   
-├── search/  
-│   ├── ElasticsearchService.java // 搜索服务
-│   └── QueryBuilder.java         // 查询构建器
-│   
-└── priority/  
-    ├── TagPriorityManager.java   // 优先级管理器
-    └── ConflictResolver.java     // 冲突解决器
+├── TagStorageService.java    // 标签存储服务
+├── TagSearchService.java     // 标签搜索服务
+└── TagPriorityService.java   // 标签优先级服务
 
-### 3. AI处理域 (ai)
+### 3. AI处理服务 (ai)
 com.fileauto.manage.service.ai  
-├── loader/  
-│   ├── ModelLoader.java          // 模型加载器
-│   └── ONNXModelManager.java     // ONNX模型管理
-│   
-├── local_infer/  
-│   ├── LocalInferenceService.java// 本地推理服务
-│   └── TensorConverter.java      // 张量转换器
-│   
-└── cache/  
-    ├── LRUCache.java             // LRU缓存策略
-    └── InferenceResultCache.java // 推理结果缓存
+├── ModelLoaderService.java   // 模型加载服务
+├── LocalInferenceService.java// 本地推理服务
+└── InferenceCacheService.java// 推理缓存服务
 
-### 4. 版本控制域 (version)
+### 4. 版本控制服务 (version)
 com.fileauto.manage.service.version  
 ├── snapshot/  
 │   ├── SnapshotService.java      // 快照服务
