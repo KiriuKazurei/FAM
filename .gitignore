@@ -1,33 +1,54 @@
-../HELP.md
+# 依赖目录 —— 此前完全没有 node_modules 规则，导致 290MB（含 199MB electron.exe）入库
+node_modules/
+
+# 构建产物（target/ 同时覆盖 Maven 与 Rust 的输出目录）
 target/
-!.mvn/wrapper/maven-wrapper.jar
-!**/src/main/**/target/
-!**/src/test/**/target/
+build/
+dist/
 
-### STS ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-.sts4-cache
+# 编译中间产物与二进制：禁止把编译结果或外部 SDK 二进制提交进仓库
+# 需要有意内置第三方二进制时（如随应用分发 Everything64.dll），
+# 在此规则之后追加形如 !third_party/**/*.dll 的例外——父目录未被排除，故可生效。
+*.class
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.a
+*.pdb
+*.ilk
+*.so
+*.dylib
 
-### IntelliJ IDEA ###
-FAM/.idea
-*.iws
+# CMake / Qt 生成物
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+.qmake.stash
+CMakeLists.txt.user
+*.pro.user
+
+# 本地运行时数据与日志（tags.db、缩略图缓存等均属运行期产物）
+*.db
+*.db-wal
+*.db-shm
+*.log
+.cache/
+
+# IDE —— 原规则写作 FAM/.idea，匹配不到仓库根的 .idea/，导致 69 个文件被跟踪
+.idea/
+.vscode/
 *.iml
+*.iws
 *.ipr
 
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
-build/
-!**/src/main/**/build/
-!**/src/test/**/build/
+# 本地配置：可能含机器相关绝对路径或凭据
+.env
+.env.*
+!.env.example
 
-### VS Code ###
-.vscode/
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
