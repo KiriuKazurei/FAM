@@ -70,6 +70,8 @@ cmake --build apps/fam-shell/build
 
 #### 文档指引
 - `docs/legacy-specs.md` —— 迁移必读，旧栈中仅存在于代码里的规格已提取于此
+- `docs/notes/` —— 重建期的问题分析记录，每篇按"描述问题 / 分析问题 / 解决方式 /
+  效果评估"四层写，含当时未解决的风险；写作约定见 `docs/notes/README.md`
 - `docs/sqlDesign.md`、`docs/代码辅助器.md` —— 仍部分适用
 - `docs/history/` —— 已作废的旧栈设计文档，仅作意图追溯，**不要按它实现**
 
