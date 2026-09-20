@@ -15,9 +15,9 @@ mod time;
 
 pub use cancel::Cancellation;
 pub use config::{
-    AppPaths, Config, ConfigError, OnMissing, DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_EXCLUDED_NAMES,
-    DEFAULT_SCAN_TIMEOUT_SECS, DEFAULT_UI_BATCH_MS, DEFAULT_WALK_THREADS, MEMORY_LIMIT_MB_MAX,
-    MEMORY_LIMIT_MB_MIN,
+    AppPaths, Config, ConfigError, OnMissing, DEFAULT_CACHE_BUDGET_MB,
+    DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_EXCLUDED_NAMES, DEFAULT_SCAN_TIMEOUT_SECS,
+    DEFAULT_UI_BATCH_MS, DEFAULT_WALK_THREADS, MEMORY_LIMIT_MB_MAX, MEMORY_LIMIT_MB_MIN,
 };
 pub use kind::{classify, classify_units, extension_of, kind_of_extension, Kind, KIND_ORDER};
 pub use list::{DirId, Item, ItemFlags, ListRequest};

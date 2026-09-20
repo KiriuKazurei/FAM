@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use fam_core::{Cancellation, Config};
+use fam_core::{Cancellation, Config, PathKey};
 use fam_svc_enumerate::list_one_level;
+use fam_svc_index::{Collection, DirIndex, Opened};
 use fam_svc_walk::{collect, WalkPolicy};
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +22,9 @@ pub enum Mode {
     Walk,
     ReadWin32,
     ReadStd,
+    /// Answering a viewport out of the cache, which is what a folder open costs once the directory
+    /// has been read. The cold read is what the other cases measure.
+    CachedViewport,
 }
 
 pub struct Case {
@@ -101,6 +105,15 @@ impl Case {
                     "one warm directory via FindFirstFileExW; floor over entries is per-entry cost",
             },
             Case {
+                id: "viewport_from_cache",
+                env_var: "FAM_BENCH_FLAT",
+                default_corpus: "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
+                iterations: 4000,
+                entry_cap: 0,
+                mode: Mode::CachedViewport,
+                note: "one scroll of a cached directory: 20 lookups plus every 60-row viewport",
+            },
+            Case {
                 id: "read_flat_std",
                 env_var: "FAM_BENCH_FLAT",
                 default_corpus: "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
@@ -160,6 +173,7 @@ impl Case {
             Mode::Walk => measure_walk(&corpus, rounds, self.entry_cap),
             Mode::ReadWin32 => measure_scan(&corpus, rounds, read_flat_win32),
             Mode::ReadStd => measure_scan(&corpus, rounds, read_flat_std),
+            Mode::CachedViewport => measure_cached_viewport(&corpus, rounds, VIEWPORT, PASSES),
         };
         samples.durations.sort_unstable();
 
@@ -251,6 +265,53 @@ fn measure_scan(corpus: &Path, rounds: usize, read: fn(&Path) -> Tally) -> Sampl
         samples.entries = tally.entries;
         samples.dirs = tally.dirs;
         samples.errors = tally.errors;
+    }
+    samples
+}
+
+/// Rows a viewport asks for; a virtualised list never materialises a whole directory.
+const VIEWPORT: usize = 60;
+/// Scroll positions per measured round. One viewport takes ~2us, which the microsecond clock the
+/// harness reports in cannot resolve well enough to gate on; twenty of them can.
+const PASSES: usize = 20;
+
+/// The cost of answering a scroll from cache: look the directory up, hand out one window of rows.
+/// The sorted view is built once outside the loop because that is what the FFI holds per open
+/// directory - rebuilding it every round would be measuring the sort, which `open_flat_dir` covers.
+fn measure_cached_viewport(
+    corpus: &Path,
+    rounds: usize,
+    viewport: usize,
+    passes: usize,
+) -> Samples {
+    let index = DirIndex::new();
+    let key = PathKey::of(corpus);
+    let Opened::Ready(snapshot) = index.open(&key, &Cancellation::new()).unwrap() else {
+        panic!("a fresh directory must read on the first open");
+    };
+    let collection = Collection::new(snapshot.table);
+    std::hint::black_box(collection.len());
+    // Warm-up pass, excluded from the statistics like every other case does.
+    std::hint::black_box(index.peek(&key).map(|snapshot| snapshot.generation));
+    std::hint::black_box(collection.fetch(0, viewport).len());
+
+    let mut samples = new_samples(rounds);
+    for _ in 0..rounds {
+        let started = Instant::now();
+        // Only the rows that reach the view are counted, so `ns/entry` is the cost of handing a
+        // row over rather than a blend of lookups and copies.
+        let mut handed = 0usize;
+        for page in 0..passes {
+            let cached = index.peek(&key).expect("cached by the open above");
+            std::hint::black_box(cached.generation);
+            handed += collection.fetch(page * viewport, viewport).len();
+        }
+        let elapsed = started.elapsed();
+        std::hint::black_box(handed);
+        samples.durations.push(elapsed.as_micros() as u64);
+        samples.total += elapsed;
+        samples.entries = handed as u64;
+        samples.dirs = 1;
     }
     samples
 }

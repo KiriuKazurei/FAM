@@ -264,6 +264,7 @@ dependencies = [
  "clap",
  "fam-core",
  "fam-svc-enumerate",
+ "fam-svc-index",
  "fam-svc-walk",
  "serde",
  "serde_json",
@@ -355,6 +356,7 @@ dependencies = [
  "log",
  "tempfile",
  "thiserror",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

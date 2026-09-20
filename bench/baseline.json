@@ -1,5 +1,5 @@
 {
-  "recorded_on": "windows x86_64, warm cache, fam-bench 0.1.0 | read_flat_* added at increment 2 (same machine, same session)",
+  "recorded_on": "windows x86_64, warm cache, fam-bench 0.1.0 | read_flat_* added at increment 2 (same machine, same session) | viewport_from_cache added at increment 3",
   "cases": {
     "open_flat_dir": {
       "id": "open_flat_dir",
@@ -84,6 +84,20 @@
       "dirs": 1,
       "errors": 0,
       "entries_per_s": 574146
+    },
+    "viewport_from_cache": {
+      "id": "viewport_from_cache",
+      "corpus": "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
+      "note": "one scroll of a cached directory: 20 lookups plus every 60-row viewport",
+      "samples": 4000,
+      "p50_us": 13,
+      "p95_us": 22,
+      "min_us": 13,
+      "max_us": 110,
+      "entries": 188,
+      "dirs": 1,
+      "errors": 0,
+      "entries_per_s": 12859932
     }
   }
 }

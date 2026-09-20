@@ -17,6 +17,10 @@ pub const DEFAULT_UI_BATCH_MS: u64 = 120;
 
 pub const MEMORY_LIMIT_MB_MIN: u32 = 100;
 pub const MEMORY_LIMIT_MB_MAX: u32 = 8192;
+/// Budget for the in-memory directory cache when `memory_limit_mb` is unset. Sized from the record
+/// layout: a `DirTable` row is 32 bytes plus its name in the UTF-16 arena, so 256 MB holds roughly
+/// 3.5M entries.
+pub const DEFAULT_CACHE_BUDGET_MB: u32 = 256;
 
 /// Directory names skipped at any depth during enumeration. Name-based exclusion is what the
 /// legacy absolute-path list never achieved (`docs/legacy-specs.md` §2.2-3).
@@ -76,6 +80,10 @@ pub struct Config {
     pub walk_threads: usize,
     pub event_queue_capacity: usize,
     pub ui_batch_ms: u64,
+    /// Ceiling on the in-memory directory cache, not a process working-set cap. The name carries
+    /// over from the legacy stack, whose setting names `docs/legacy-specs.md` §3 says are worth
+    /// preserving; the range (100-8192 MB) was inherited from a Node `env_loader` and is kept
+    /// because it brackets sensible sizes for this purpose.
     pub memory_limit_mb: Option<u32>,
 }
 
@@ -216,6 +224,11 @@ impl Config {
         Duration::from_secs(self.scan_timeout_secs)
     }
 
+    /// Bytes the directory cache may hold before whole tables start getting evicted.
+    pub fn cache_budget_bytes(&self) -> u64 {
+        u64::from(self.memory_limit_mb.unwrap_or(DEFAULT_CACHE_BUDGET_MB)) * 1024 * 1024
+    }
+
     pub fn ui_batch_window(&self) -> Duration {
         Duration::from_millis(self.ui_batch_ms)
     }
@@ -338,5 +351,22 @@ mod tests {
             ..Config::default()
         };
         within_range.validate().unwrap();
+    }
+
+    #[test]
+    fn the_cache_budget_defaults_and_honours_an_override() {
+        let megabyte = 1024 * 1024;
+        assert_eq!(
+            Config::default().cache_budget_bytes(),
+            u64::from(DEFAULT_CACHE_BUDGET_MB) * megabyte
+        );
+        assert_eq!(
+            Config {
+                memory_limit_mb: Some(1024),
+                ..Config::default()
+            }
+            .cache_budget_bytes(),
+            1024 * megabyte
+        );
     }
 }

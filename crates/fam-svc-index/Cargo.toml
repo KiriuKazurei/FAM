@@ -12,6 +12,9 @@ fam-svc-enumerate.workspace = true
 log.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 fam-svc-everything.workspace = true
 fam-svc-walk.workspace = true

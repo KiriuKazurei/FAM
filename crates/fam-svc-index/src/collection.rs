@@ -4,6 +4,7 @@ use std::sync::Arc;
 use fam_core::{Item, Kind, Order, SortKey};
 
 use crate::dir_table::DirTable;
+use crate::natural::compare_units;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedRow {
@@ -109,19 +110,25 @@ impl Collection {
     fn compare(&self, a: u32, b: u32) -> Ordering {
         let left = self.table.item(a).expect("index in range");
         let right = self.table.item(b).expect("index in range");
-        // Ordinal for now: the Explorer-compatible natural comparator (StrCmpLogicalW) arrives in
-        // increment 3 and must slot in here without changing this call shape.
         let primary = match self.sort {
-            SortKey::Name => self.table.name_of(left).cmp(self.table.name_of(right)),
+            SortKey::Name => self.by_name(left, right),
             SortKey::Size => left.size.cmp(&right.size),
             SortKey::Modified => left.mtime_ms.cmp(&right.mtime_ms),
             SortKey::Kind => left.kind.cmp(&right.kind),
         };
-        let by_name = || self.table.name_of(left).cmp(self.table.name_of(right));
+        let by_name = || self.by_name(left, right);
         match self.direction {
             Order::Ascending => primary.then_with(by_name),
             Order::Descending => primary.reverse().then_with(by_name),
         }
+    }
+
+    /// Explorer-compatible name order with an ordinal tie-break. The shell comparator ignores case,
+    /// so without the extra ordinal compare two rows could compare equal and the sort would have no
+    /// defined result.
+    fn by_name(&self, left: &Item, right: &Item) -> Ordering {
+        let (first, second) = (self.table.name_of(left), self.table.name_of(right));
+        compare_units(first, second).then_with(|| first.cmp(second))
     }
 }
 
@@ -204,5 +211,35 @@ mod tests {
 
         collection.set_filter(Vec::new(), Some(Kind::Document));
         assert_eq!(collection.len(), 1);
+    }
+
+    /// `fetch_returns_only_the_requested_window` uses zero-padded names, where ordinal and natural
+    /// order agree; this is the case that would silently regress if the comparator were dropped.
+    #[cfg(windows)]
+    #[test]
+    fn name_sort_reads_numbers_as_numbers() {
+        let collection = Collection::new(table_with(&[
+            ("file10.txt", Kind::Document, 1),
+            ("file2.txt", Kind::Document, 1),
+            ("file1.txt", Kind::Document, 1),
+            ("Chapter 3.md", Kind::Document, 1),
+            ("Chapter 30.md", Kind::Document, 1),
+        ]));
+
+        let names: Vec<String> = collection
+            .fetch(0, 10)
+            .iter()
+            .map(|row| String::from_utf16_lossy(&row.name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Chapter 3.md",
+                "Chapter 30.md",
+                "file1.txt",
+                "file2.txt",
+                "file10.txt"
+            ]
+        );
     }
 }
