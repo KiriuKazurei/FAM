@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,7 +15,13 @@ pub const DEFAULT_MAX_ENTRIES: usize = 200_000;
 pub const DEFAULT_THREADS: usize = 10;
 
 const QUEUE_POLL: Duration = Duration::from_micros(400);
-const RECV_POLL: Duration = Duration::from_millis(25);
+/// Backstop for the deadline check only. Completion is signalled by the channel going
+/// `Disconnected` once the last worker exits, so a finished walk no longer waits a full poll.
+const DEADLINE_POLL: Duration = Duration::from_millis(25);
+
+/// Queue depth per worker at which extra parallelism starts paying for itself. A flat directory
+/// queues no children at all, so opening one never creates a thread beyond the first.
+const GROW_QUEUE: usize = 4;
 
 /// Cooperative stop signal: enumeration polls it between directories and between emitted entries,
 /// which is what the legacy scan never had — its timeout only made the caller give up while the
@@ -168,7 +174,12 @@ impl WalkReport {
 
 /// Walks `policy.roots` breadth-first across worker threads and calls `on_entry` on the caller's
 /// thread for each hit. Returning `false` from `on_entry` stops the walk.
-pub fn walk<F>(policy: &WalkPolicy, cancel: &Cancellation, timeout: Duration, mut on_entry: F) -> WalkReport
+pub fn walk<F>(
+    policy: &WalkPolicy,
+    cancel: &Cancellation,
+    timeout: Duration,
+    mut on_entry: F,
+) -> WalkReport
 where
     F: FnMut(&Entry) -> bool,
 {
@@ -183,18 +194,25 @@ where
             root_errors += 1;
         }
     }
-    let (tx, rx) = mpsc::channel::<Entry>();
+
+    let max_workers = policy.threads.clamp(1, 32);
+    let seeded = seed.len();
     let shared = Arc::new(Shared {
         queue: Mutex::new(seed),
-        sender: Mutex::new(Some(tx)),
         active: AtomicUsize::new(0),
         directories: AtomicU64::new(0),
         skipped: AtomicU64::new(0),
         errors: AtomicU64::new(0),
         stop: AtomicBool::new(false),
+        spawned: AtomicUsize::new(0),
+        max_workers,
+        siblings: Mutex::new(Vec::new()),
     });
 
-    let workers = start_workers(policy, cancel, &shared);
+    let (tx, rx) = mpsc::channel::<Entry>();
+    // One worker per seeded directory, capped by the policy; more fork themselves once the queue of
+    // discovered directories backs up.
+    let workers = start_workers(policy, cancel, &shared, tx, seeded.max(1).min(max_workers));
 
     let mut report = WalkReport::default();
     loop {
@@ -206,7 +224,7 @@ where
             report.timed_out = true;
             break;
         }
-        match rx.recv_timeout(RECV_POLL) {
+        match rx.recv_timeout(DEADLINE_POLL) {
             Ok(entry) => {
                 if !on_entry(&entry) {
                     report.cancelled = true;
@@ -218,20 +236,22 @@ where
                     break;
                 }
             }
+            // Every worker holds a sender and the caller holds none, so this fires as soon as the
+            // last one exits — the walk no longer ends on a poll timeout.
+            Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {
                 if shared.idle() {
                     break;
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 
     shared.stop.store(true, Ordering::Relaxed);
+    drain_joins(&shared);
     for worker in workers {
         let _ = worker.join();
     }
-    *shared.sender.lock().expect("walk sender") = None;
 
     report.directories = shared.directories.load(Ordering::Relaxed);
     report.skipped = shared.skipped.load(Ordering::Relaxed);
@@ -240,8 +260,31 @@ where
     report
 }
 
+/// Joins self-spawned workers, including siblings that forked after the first drain, so the
+/// counters read by the caller are final.
+fn drain_joins(shared: &Shared) {
+    loop {
+        let batch: Vec<thread::JoinHandle<()>> = shared
+            .siblings
+            .lock()
+            .expect("walk sibling handles")
+            .drain(..)
+            .collect();
+        if batch.is_empty() {
+            return;
+        }
+        for handle in batch {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Convenience wrapper collecting everything into a `Vec`.
-pub fn collect(policy: &WalkPolicy, cancel: &Cancellation, timeout: Duration) -> (Vec<Entry>, WalkReport) {
+pub fn collect(
+    policy: &WalkPolicy,
+    cancel: &Cancellation,
+    timeout: Duration,
+) -> (Vec<Entry>, WalkReport) {
     let mut entries = Vec::new();
     let report = walk(policy, cancel, timeout, |entry| {
         entries.push(entry.clone());
@@ -252,17 +295,21 @@ pub fn collect(policy: &WalkPolicy, cancel: &Cancellation, timeout: Duration) ->
 
 struct Shared {
     queue: Mutex<VecDeque<PathBuf>>,
-    sender: Mutex<Option<mpsc::Sender<Entry>>>,
     active: AtomicUsize,
     directories: AtomicU64,
     skipped: AtomicU64,
     errors: AtomicU64,
     stop: AtomicBool,
+    /// Workers alive or starting, including siblings forked from inside the loop.
+    spawned: AtomicUsize,
+    max_workers: usize,
+    siblings: Mutex<Vec<thread::JoinHandle<()>>>,
 }
 
 impl Shared {
     fn idle(&self) -> bool {
-        self.active.load(Ordering::Relaxed) == 0 && self.queue.lock().expect("walk queue").is_empty()
+        self.active.load(Ordering::Relaxed) == 0
+            && self.queue.lock().expect("walk queue").is_empty()
     }
 
     fn next_dir(&self) -> Option<PathBuf> {
@@ -271,97 +318,162 @@ impl Shared {
         self.active.fetch_add(1, Ordering::Relaxed);
         Some(dir)
     }
+
+    fn push_dir(&self, path: PathBuf) -> usize {
+        let mut queue = self.queue.lock().expect("walk queue");
+        queue.push_back(path);
+        queue.len()
+    }
+
+    fn pending(&self) -> usize {
+        self.queue.lock().expect("walk queue").len()
+    }
+}
+
+/// Everything a worker needs to keep going, and to fork a sibling.
+struct Ctx {
+    shared: Arc<Shared>,
+    policy: Arc<WalkPolicy>,
+    cancel: Cancellation,
+    sender: Sender<Entry>,
 }
 
 fn start_workers(
     policy: &WalkPolicy,
     cancel: &Cancellation,
     shared: &Arc<Shared>,
+    first_sender: Sender<Entry>,
+    initial: usize,
 ) -> Vec<thread::JoinHandle<()>> {
-    let wanted = policy.threads.clamp(1, 32);
-    let policy = Arc::new(WalkPolicy {
+    let worker_policy = Arc::new(WalkPolicy {
         roots: Vec::new(),
         excluded_prefixes: policy.excluded_prefixes.clone(),
         excluded_names: policy.excluded_names.clone(),
-        threads: wanted,
+        threads: shared.max_workers,
         max_entries: policy.max_entries,
         include_directories: policy.include_directories,
     });
-    (0..wanted)
-        .map(|_| {
-            let shared = Arc::clone(shared);
-            let policy = Arc::clone(&policy);
-            let cancel = cancel.clone();
-            thread::spawn(move || worker_loop(&policy, &cancel, &shared))
+    let mut senders = vec![first_sender];
+    for _ in 1..initial.max(1) {
+        let clone = senders[0].clone();
+        senders.push(clone);
+    }
+    senders
+        .into_iter()
+        .map(|sender| {
+            shared.spawned.fetch_add(1, Ordering::Relaxed);
+            let ctx = Ctx {
+                shared: Arc::clone(shared),
+                policy: Arc::clone(&worker_policy),
+                cancel: cancel.clone(),
+                sender,
+            };
+            thread::spawn(move || worker_loop(ctx))
         })
         .collect()
 }
 
-fn worker_loop(policy: &WalkPolicy, cancel: &Cancellation, shared: &Shared) {
-    while !shared.stop.load(Ordering::Relaxed) && !cancel.is_stopped() {
-        let Some(dir) = shared.next_dir() else {
-            if shared.idle() {
+fn worker_loop(ctx: Ctx) {
+    while !ctx.shared.stop.load(Ordering::Relaxed) && !ctx.cancel.is_stopped() {
+        let Some(dir) = ctx.shared.next_dir() else {
+            if ctx.shared.idle() {
                 return;
             }
             thread::sleep(QUEUE_POLL);
             continue;
         };
-        let read = fs::read_dir(&dir);
-        match read {
+        match fs::read_dir(&dir) {
             Ok(entries) => {
                 for item in entries {
-                    if shared.stop.load(Ordering::Relaxed) || cancel.is_stopped() {
+                    if ctx.shared.stop.load(Ordering::Relaxed) || ctx.cancel.is_stopped() {
                         break;
                     }
-                    shared.handle_item(policy, item);
+                    ctx.handle_item(item);
                 }
             }
             Err(_) => {
-                shared.errors.fetch_add(1, Ordering::Relaxed);
+                ctx.shared.errors.fetch_add(1, Ordering::Relaxed);
             }
         }
-        shared.active.fetch_sub(1, Ordering::Relaxed);
+        ctx.shared.active.fetch_sub(1, Ordering::Relaxed);
+        ctx.grow_if_needed();
     }
 }
 
-impl Shared {
-    fn handle_item(&self, policy: &WalkPolicy, item: Result<fs::DirEntry, std::io::Error>) {
+impl Ctx {
+    fn handle_item(&self, item: Result<fs::DirEntry, std::io::Error>) {
         let Ok(item) = item else {
-            self.errors.fetch_add(1, Ordering::Relaxed);
+            self.shared.errors.fetch_add(1, Ordering::Relaxed);
             return;
         };
         let path = item.path();
         let file_type = match item.file_type() {
             Ok(file_type) => file_type,
             Err(_) => {
-                self.errors.fetch_add(1, Ordering::Relaxed);
+                self.shared.errors.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         };
         // Symlinked directories are reported but never descended into, which keeps cycles and
         // reparse-point storms off the walk (`follow_symlinks` is intentionally not a knob yet).
         let is_directory = file_type.is_dir();
-        if is_directory && policy.name_excluded(&path) {
-            self.skipped.fetch_add(1, Ordering::Relaxed);
+        // Both predicates allocate — an uppercase fold and a path key — so they are skipped
+        // entirely when nothing is configured to exclude.
+        if is_directory && !self.policy.excluded_names.is_empty() && self.policy.name_excluded(&path)
+        {
+            self.shared.skipped.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        if policy.prefix_excluded(&path_key(&path)) {
-            self.skipped.fetch_add(1, Ordering::Relaxed);
+        if !self.policy.excluded_prefixes.is_empty()
+            && self.policy.prefix_excluded(&path_key(&path))
+        {
+            self.shared.skipped.fetch_add(1, Ordering::Relaxed);
             return;
         }
         if is_directory {
-            self.directories.fetch_add(1, Ordering::Relaxed);
-            self.queue.lock().expect("walk queue").push_back(path.clone());
+            self.shared.directories.fetch_add(1, Ordering::Relaxed);
+            self.shared.push_dir(path.clone());
+            if !self.policy.include_directories {
+                return;
+            }
         }
-        let metadata = item.metadata().ok();
-        if is_directory && !policy.include_directories {
-            return;
+        let entry = Entry::build(path, is_directory, item.metadata().ok());
+        let _ = self.sender.send(entry);
+    }
+
+    /// Recruit up to one worker per `GROW_QUEUE` queued directories, so a wide directory reaches its
+    /// parallelism immediately while a flat one stays single-threaded.
+    fn grow_if_needed(&self) {
+        let pending = self.shared.pending();
+        let wanted = pending
+            .div_ceil(GROW_QUEUE)
+            .clamp(1, self.shared.max_workers);
+        while self.shared.spawned.load(Ordering::Relaxed) < wanted {
+            if !self.try_fork() {
+                return;
+            }
         }
-        let entry = Entry::build(path, is_directory, metadata);
-        let sender_guard = self.sender.lock().expect("walk sender");
-        if let Some(sender) = sender_guard.as_ref() {
-            let _ = sender.send(entry);
+    }
+
+    fn try_fork(&self) -> bool {
+        let previous = self.shared.spawned.fetch_add(1, Ordering::Relaxed);
+        if previous >= self.shared.max_workers {
+            self.shared.spawned.fetch_sub(1, Ordering::Relaxed);
+            return false;
         }
+        let sibling = Ctx {
+            shared: Arc::clone(&self.shared),
+            policy: Arc::clone(&self.policy),
+            cancel: self.cancel.clone(),
+            sender: self.sender.clone(),
+        };
+        let handle = thread::spawn(move || worker_loop(sibling));
+        self.shared
+            .siblings
+            .lock()
+            .expect("walk sibling handles")
+            .push(handle);
+        true
     }
 }
 
@@ -395,5 +507,40 @@ mod tests {
         assert!(policy.excludes(Path::new("D:/cache/tmp.bin")));
         assert!(!policy.excludes(Path::new("D:/proj/src/main.rs")));
         assert!(!policy.excludes(Path::new("D:/cache_sibling/x")));
+    }
+
+    #[test]
+    fn a_finished_walk_does_not_wait_for_the_poll_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("only.txt"), "x").unwrap();
+        let policy = WalkPolicy::default().rooted_at(dir.path());
+
+        let started = Instant::now();
+        let (entries, report) = collect(&policy, &Cancellation::new(), Duration::from_secs(30));
+        let elapsed = started.elapsed();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(report.emitted, 1);
+        assert!(
+            elapsed < DEADLINE_POLL,
+            "a one-entry walk took {elapsed:?}, so completion is still detected by timeout"
+        );
+    }
+
+    #[test]
+    fn deep_queues_recruit_more_workers_than_a_flat_start() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..GROW_QUEUE * 3 {
+            fs::create_dir_all(dir.path().join(format!("branch-{index:02}"))).unwrap();
+        }
+        let policy = WalkPolicy {
+            threads: 4,
+            ..WalkPolicy::default().rooted_at(dir.path())
+        };
+
+        let (_, report) = collect(&policy, &Cancellation::new(), Duration::from_secs(30));
+
+        assert_eq!(report.directories, (GROW_QUEUE * 3) as u64);
+        assert!(!report.stopped_early());
     }
 }
