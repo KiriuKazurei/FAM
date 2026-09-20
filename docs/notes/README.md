@@ -28,3 +28,5 @@
 | [partial-directory-cache.md](partial-directory-cache.md) | 1 | 被取消的目录读取会以完整表的身份长期留在缓存里，改为枚举层分别报告"读完/取消/截断"并由缓存层执行门槛 |
 | [test-name-leak.md](test-name-leak.md) | 1 | 测试辅助函数签名过窄，逼出一处 `Box::leak`，放宽签名后泄漏与传染一起消失 |
 | [per-entry-syscall-premise.md](per-entry-syscall-premise.md) | 2 | "每条目录项两次 syscall"被实测否掉（两种读者同为 1.3µs/条目），换 Win32 枚举记录买到的其实是 attrs、长路径控制权与单层原语 |
+| [row-generation-vs-load-attempt.md](row-generation-vs-load-attempt.md) | 3 | 缓存代号该描述"行"还是"尝试"：失败的刷新与放弃的读取都不该让内容看起来变了 |
+| [backoff-and-byte-accounting.md](backoff-and-byte-accounting.md) | 3 | 状态被换走时附属计数没跟着搬：退避窗口翻倍差一、tries 丢失导致不退避、失败保留行时字节漏记 |
