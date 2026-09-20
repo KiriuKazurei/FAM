@@ -1,0 +1,41 @@
+cmake_minimum_required(VERSION 3.22)
+project(fam_shell LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_INCLUDE_CURRENT_DIR ON)
+set(CMAKE_AUTOMOC ON)
+
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
+
+# The core is built by cargo:
+#   cargo +stable-x86_64-pc-windows-gnu build -p fam-ffi --target x86_64-pc-windows-gnu
+set(FAMCORE_IMPLIB "" CACHE FILEPATH "cargo import library, e.g. libfamcore.dll.a")
+set(FAMCORE_DLL "" CACHE FILEPATH "cargo famcore.dll, used at run time")
+
+if(NOT FAMCORE_IMPLIB)
+    message(FATAL_ERROR "pass -DFAMCORE_IMPLIB=<path to libfamcore.dll.a>")
+endif()
+if(NOT EXISTS "${FAMCORE_IMPLIB}")
+    message(FATAL_ERROR "import library not found: ${FAMCORE_IMPLIB}")
+endif()
+
+add_library(famcore SHARED IMPORTED)
+set_target_properties(famcore PROPERTIES
+    IMPORTED_IMPLIB "${FAMCORE_IMPLIB}"
+    IMPORTED_LOCATION "${FAMCORE_DLL}")
+
+add_executable(fam-shell WIN32
+    src/main.cpp
+    src/mainwindow.cpp
+    src/bridge.cpp
+    src/famlistmodel.cpp)
+target_include_directories(fam-shell PRIVATE include src)
+target_link_libraries(fam-shell PRIVATE Qt6::Widgets famcore)
+
+# Console target so the ABI can be verified without a display server.
+add_executable(abi-smoke
+    tools/abi_smoke.cpp
+    src/bridge.cpp)
+target_include_directories(abi-smoke PRIVATE include src)
+target_link_libraries(abi-smoke PRIVATE Qt6::Core famcore)

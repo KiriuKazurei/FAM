@@ -21,6 +21,10 @@ dist/
 *.so
 *.dylib
 
+# 有意内置的第三方 SDK 二进制，来源与校验值见 third_party/everything-sdk/README.md
+!third_party/**/*.dll
+!third_party/**/*.lib
+
 # CMake / Qt 生成物
 CMakeCache.txt
 CMakeFiles/
