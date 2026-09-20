@@ -33,7 +33,10 @@ fn one_invalid_tag_rolls_back_the_whole_call() {
         .add_tags(file, &tags(&["valid", "bad/tag"]))
         .unwrap_err();
 
-    assert!(matches!(error, StoreError::InvalidTag { .. }), "got {error:?}");
+    assert!(
+        matches!(error, StoreError::InvalidTag { .. }),
+        "got {error:?}"
+    );
     assert!(store.tags_of(file, None).unwrap().is_empty());
     assert!(!store.has_file(file).unwrap());
     assert_eq!(store.stats().unwrap().files, 0);
@@ -50,7 +53,10 @@ fn case_and_separator_variants_alias_the_same_file() {
         .tags_of(Path::new("D:/LIBRARY/BOOK.PDF"), None)
         .unwrap();
 
-    assert_eq!(aliased.iter().map(|t| t.tag.as_str()).collect::<Vec<_>>(), vec!["x"]);
+    assert_eq!(
+        aliased.iter().map(|t| t.tag.as_str()).collect::<Vec<_>>(),
+        vec!["x"]
+    );
     assert_eq!(store.stats().unwrap().files, 1);
 }
 
@@ -82,7 +88,11 @@ fn removing_by_source_only_touches_that_source() {
     store
         .add_tags(
             file,
-            &[NewTag::manual("keep"), NewTag::auto("drop-a"), NewTag::auto("drop-b")],
+            &[
+                NewTag::manual("keep"),
+                NewTag::auto("drop-a"),
+                NewTag::auto("drop-b"),
+            ],
         )
         .unwrap();
 
@@ -115,12 +125,22 @@ fn rename_reports_missing_tags_and_collisions() {
     let missing = store
         .rename_tag(file, "absent", Some("x"), None)
         .unwrap_err();
-    assert!(matches!(missing, StoreError::NotFound { .. }), "got {missing:?}");
+    assert!(
+        matches!(missing, StoreError::NotFound { .. }),
+        "got {missing:?}"
+    );
 
-    let clash = store.rename_tag(file, "draft", Some("final"), None).unwrap_err();
-    assert!(matches!(clash, StoreError::Conflict { .. }), "got {clash:?}");
+    let clash = store
+        .rename_tag(file, "draft", Some("final"), None)
+        .unwrap_err();
+    assert!(
+        matches!(clash, StoreError::Conflict { .. }),
+        "got {clash:?}"
+    );
 
-    store.rename_tag(file, "draft", Some("revised"), None).unwrap();
+    store
+        .rename_tag(file, "draft", Some("revised"), None)
+        .unwrap();
     let names: Vec<String> = store
         .tags_of(file, None)
         .unwrap()
@@ -177,7 +197,9 @@ fn search_matches_all_versus_any_tag() {
     let all = store
         .search(&SearchRequest::new(["invoice", "2026"]).match_all())
         .unwrap();
-    let any = store.search(&SearchRequest::new(["invoice", "2026"])).unwrap();
+    let any = store
+        .search(&SearchRequest::new(["invoice", "2026"]))
+        .unwrap();
 
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].path, Path::new("D:/docs/both.pdf"));
@@ -220,7 +242,9 @@ fn directory_scope_includes_the_directory_itself_when_tagged() {
         .add_tags(Path::new("D:/FAM/Docs/a.txt"), &tags(&["t"]))
         .unwrap();
 
-    let hits = store.search(&SearchRequest::new(["t"]).within(dir)).unwrap();
+    let hits = store
+        .search(&SearchRequest::new(["t"]).within(dir))
+        .unwrap();
 
     assert_eq!(hits.len(), 2);
 }
@@ -269,7 +293,10 @@ fn source_filter_scopes_matching_not_display() {
 fn empty_and_invalid_searches_are_refused() {
     let store = store();
     let error = store.search(&SearchRequest::default()).unwrap_err();
-    assert!(matches!(error, StoreError::InvalidSearch(_)), "got {error:?}");
+    assert!(
+        matches!(error, StoreError::InvalidSearch(_)),
+        "got {error:?}"
+    );
     let bad_tag = store.search(&SearchRequest::new(["bad/tag"])).unwrap_err();
     assert!(matches!(bad_tag, StoreError::InvalidTag { .. }));
 }
@@ -294,7 +321,11 @@ fn stats_split_tags_by_source() {
     store
         .add_tags(
             Path::new("D:/docs/mixed.pdf"),
-            &[NewTag::manual("m1"), NewTag::manual("m2"), NewTag::auto("a1")],
+            &[
+                NewTag::manual("m1"),
+                NewTag::manual("m2"),
+                NewTag::auto("a1"),
+            ],
         )
         .unwrap();
 
@@ -333,9 +364,7 @@ fn legacy_ai_source_spelling_still_reads_as_auto() {
     assert_eq!(Source::parse("AI").unwrap(), Source::Auto);
     let store = store();
     let file = Path::new("D:/docs/src.pdf");
-    store
-        .add_tags(file, &[NewTag::auto("generated")])
-        .unwrap();
+    store.add_tags(file, &[NewTag::auto("generated")]).unwrap();
     let record = &store.tags_of(file, None).unwrap()[0];
     assert_eq!(record.source.as_str(), "auto");
 }
@@ -346,7 +375,14 @@ fn tag_names_for_returns_display_order_per_file() {
     let first = Path::new("D:/docs/a.pdf");
     let second = Path::new("D:/docs/b.pdf");
     store
-        .add_tags(first, &[NewTag::auto("auto-tag"), NewTag::manual("zed"), NewTag::manual("alpha")])
+        .add_tags(
+            first,
+            &[
+                NewTag::auto("auto-tag"),
+                NewTag::manual("zed"),
+                NewTag::manual("alpha"),
+            ],
+        )
         .unwrap();
     store.add_tags(second, &[NewTag::manual("solo")]).unwrap();
 

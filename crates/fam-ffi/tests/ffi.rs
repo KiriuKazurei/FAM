@@ -32,7 +32,9 @@ impl Core {
         let path = CString::new(toml_path(&config)).unwrap();
         let mut err: *mut c_char = std::ptr::null_mut();
         let pointer = unsafe { fam_core_new(path.as_ptr(), &mut err) };
-        assert!(!pointer.is_null(), "core failed to start: {}", unsafe { take(err) });
+        assert!(!pointer.is_null(), "core failed to start: {}", unsafe {
+            take(err)
+        });
         Core(pointer)
     }
 
@@ -51,7 +53,9 @@ unsafe fn take(pointer: *mut c_char) -> String {
     if pointer.is_null() {
         return String::new();
     }
-    let text = std::ffi::CStr::from_ptr(pointer).to_string_lossy().into_owned();
+    let text = std::ffi::CStr::from_ptr(pointer)
+        .to_string_lossy()
+        .into_owned();
     fam_free_string(pointer);
     text
 }
@@ -78,8 +82,12 @@ impl Out {
             std::ffi::CStr::from_ptr(self.error).to_string_lossy()
         });
         assert!(!self.value.is_null(), "no result produced");
-        let payload = unsafe { std::ffi::CStr::from_ptr(self.value) }.to_str().unwrap().to_string();
-        serde_json::from_str(&payload).unwrap_or_else(|error| panic!("bad JSON {payload:?}: {error}"))
+        let payload = unsafe { std::ffi::CStr::from_ptr(self.value) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        serde_json::from_str(&payload)
+            .unwrap_or_else(|error| panic!("bad JSON {payload:?}: {error}"))
     }
 
     fn message(&self) -> String {
@@ -183,7 +191,14 @@ fn tags_round_trip_through_the_abi() {
     assert_eq!(again.ok()["present"], 1, "re-adding is idempotent");
 
     let mut listed = Out::new();
-    unsafe { fam_tag_list(h.core.handle(), file.as_ptr(), &mut listed.value, &mut listed.error) };
+    unsafe {
+        fam_tag_list(
+            h.core.handle(),
+            file.as_ptr(),
+            &mut listed.value,
+            &mut listed.error,
+        )
+    };
     let tags = listed.ok();
     assert_eq!(tags.as_array().unwrap().len(), 2);
     assert_eq!(tags[0]["source"], "manual");
@@ -223,7 +238,10 @@ fn malformed_tag_payloads_are_rejected_with_a_message() {
 
     assert_eq!(code, -1);
     assert!(out.message().contains("JSON array"), "{}", out.message());
-    assert!(out.value.is_null(), "no result should be written on failure");
+    assert!(
+        out.value.is_null(),
+        "no result should be written on failure"
+    );
 
     let mut invalid_tag = Out::new();
     unsafe {
@@ -238,7 +256,11 @@ fn malformed_tag_payloads_are_rejected_with_a_message() {
         )
     };
     assert_eq!(invalid_tag.value, std::ptr::null_mut());
-    assert!(invalid_tag.message().contains("invalid tag"), "{}", invalid_tag.message());
+    assert!(
+        invalid_tag.message().contains("invalid tag"),
+        "{}",
+        invalid_tag.message()
+    );
 }
 
 #[test]
@@ -323,7 +345,14 @@ fn stats_describe_the_open_database_and_roots() {
 fn a_view_search_resets_and_live_events_stream_as_deltas() {
     let h = harness();
     let mut err: *mut c_char = std::ptr::null_mut();
-    let token = unsafe { fam_view_new(h.core.handle(), text("name").as_ptr(), text("ascending").as_ptr(), &mut err) };
+    let token = unsafe {
+        fam_view_new(
+            h.core.handle(),
+            text("name").as_ptr(),
+            text("ascending").as_ptr(),
+            &mut err,
+        )
+    };
     assert!(token > 0, "{}", unsafe { take(err) });
 
     let mut out = Out::new();
@@ -342,9 +371,19 @@ fn a_view_search_resets_and_live_events_stream_as_deltas() {
     assert_eq!(code, 0, "{}", out.message());
     let rows = out.ok();
     assert_eq!(rows["backend"], "walk");
-    assert_eq!(rows["rows"].as_array().unwrap().len(), 2, "directory and file both match");
+    assert_eq!(
+        rows["rows"].as_array().unwrap().len(),
+        2,
+        "directory and file both match"
+    );
 
-    let watcher = unsafe { fam_watch_start(h.core.handle(), text(h.tree.to_str().unwrap()).as_ptr(), &mut err) };
+    let watcher = unsafe {
+        fam_watch_start(
+            h.core.handle(),
+            text(h.tree.to_str().unwrap()).as_ptr(),
+            &mut err,
+        )
+    };
     assert!(watcher > 0, "{}", unsafe { take(err) });
 
     fs::write(h.tree.join("late-report.txt"), "x").unwrap();
@@ -353,13 +392,19 @@ fn a_view_search_resets_and_live_events_stream_as_deltas() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline && !inserted {
         let mut drained = Out::new();
-        unsafe { fam_view_drain(h.core.handle(), token, &mut drained.value, &mut drained.error) };
+        unsafe {
+            fam_view_drain(
+                h.core.handle(),
+                token,
+                &mut drained.value,
+                &mut drained.error,
+            )
+        };
         let update = drained.ok();
-        inserted = update["deltas"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|delta| delta["type"] == "insert" && delta["row"]["name"] == "late-report.txt");
+        inserted =
+            update["deltas"].as_array().unwrap().iter().any(|delta| {
+                delta["type"] == "insert" && delta["row"]["name"] == "late-report.txt"
+            });
         if !inserted {
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -386,7 +431,11 @@ fn a_view_search_resets_and_live_events_stream_as_deltas() {
         )
     };
     assert_eq!(code, -1);
-    assert!(unknown.message().contains("unknown view token"), "{}", unknown.message());
+    assert!(
+        unknown.message().contains("unknown view token"),
+        "{}",
+        unknown.message()
+    );
 
     unsafe { fam_view_free(h.core.handle(), token) };
 }
@@ -396,7 +445,14 @@ fn bad_arguments_and_sorts_fail_cleanly() {
     let h = harness();
     let mut err: *mut c_char = std::ptr::null_mut();
 
-    let token = unsafe { fam_view_new(h.core.handle(), text("nonsense").as_ptr(), std::ptr::null(), &mut err) };
+    let token = unsafe {
+        fam_view_new(
+            h.core.handle(),
+            text("nonsense").as_ptr(),
+            std::ptr::null(),
+            &mut err,
+        )
+    };
     assert_eq!(token, 0);
     assert!(unsafe { take(err) }.contains("unknown sort key"));
 
@@ -430,7 +486,11 @@ fn bad_arguments_and_sorts_fail_cleanly() {
         )
     };
     assert_eq!(code, -1);
-    assert!(empty.message().contains("no search terms"), "{}", empty.message());
+    assert!(
+        empty.message().contains("no search terms"),
+        "{}",
+        empty.message()
+    );
 }
 
 #[test]
@@ -439,10 +499,21 @@ fn non_utf8_arguments_are_refused() {
     let raw = CString::new(vec![0xff_u8, 0xfe_u8]).unwrap();
     let mut out = Out::new();
 
-    let code = unsafe { fam_tag_list(h.core.handle(), raw.as_ptr(), &mut out.value, &mut out.error) };
+    let code = unsafe {
+        fam_tag_list(
+            h.core.handle(),
+            raw.as_ptr(),
+            &mut out.value,
+            &mut out.error,
+        )
+    };
 
     assert_eq!(code, -1);
-    assert!(out.message().contains("not valid UTF-8"), "{}", out.message());
+    assert!(
+        out.message().contains("not valid UTF-8"),
+        "{}",
+        out.message()
+    );
 }
 
 #[test]
@@ -464,7 +535,14 @@ fn search_rows_carry_their_tags_in_display_order() {
     assert_eq!(tagged.ok()["added"], 2);
 
     let mut err: *mut c_char = std::ptr::null_mut();
-    let view = unsafe { fam_view_new(h.core.handle(), text("name").as_ptr(), text("ascending").as_ptr(), &mut err) };
+    let view = unsafe {
+        fam_view_new(
+            h.core.handle(),
+            text("name").as_ptr(),
+            text("ascending").as_ptr(),
+            &mut err,
+        )
+    };
     assert!(view > 0);
 
     let mut result = Out::new();

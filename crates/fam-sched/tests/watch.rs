@@ -66,7 +66,10 @@ fn created_files_reach_the_sink_as_created() {
         entry_for(seen, "fresh.txt").is_some_and(|change| change == "created")
     });
 
-    assert_eq!(entry_for(&seen, "fresh.txt").map(String::as_str), Some("created"));
+    assert_eq!(
+        entry_for(&seen, "fresh.txt").map(String::as_str),
+        Some("created")
+    );
     assert_eq!(handle.shutdown(), 0, "no events should have been dropped");
 }
 
@@ -82,7 +85,10 @@ fn deletions_reach_the_sink_which_the_legacy_consumer_lost() {
         entry_for(seen, "doomed.txt").is_some_and(|change| change == "removed")
     });
 
-    assert_eq!(entry_for(&seen, "doomed.txt").map(String::as_str), Some("removed"));
+    assert_eq!(
+        entry_for(&seen, "doomed.txt").map(String::as_str),
+        Some("removed")
+    );
     handle.shutdown();
 }
 
@@ -132,7 +138,11 @@ fn repeated_writes_collapse_to_one_delta_per_path() {
         })
         .map(|(_, change)| change)
         .collect();
-    assert_eq!(matches.len(), 1, "one path yields one row delta per batch: {seen:?}");
+    assert_eq!(
+        matches.len(),
+        1,
+        "one path yields one row delta per batch: {seen:?}"
+    );
     handle.shutdown();
 }
 

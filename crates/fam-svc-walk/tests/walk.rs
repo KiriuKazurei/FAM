@@ -49,11 +49,7 @@ fn policy(root: &Path) -> WalkPolicy {
 }
 
 fn collect_paths(root: &Path) -> BTreeSet<String> {
-    let (entries, _) = collect(
-        &policy(root),
-        &Cancellation::new(),
-        Duration::from_secs(30),
-    );
+    let (entries, _) = collect(&policy(root), &Cancellation::new(), Duration::from_secs(30));
     entries
         .iter()
         .map(|entry| fam_core::path_key(&entry.path))
@@ -95,7 +91,10 @@ fn walk_reports_no_errors_on_a_clean_tree() {
     // Only `sub` and `sub/deep` are counted: `.git`, `node_modules` and `excluded` are pruned
     // before they are ever visited, and the root is seeded rather than discovered.
     assert_eq!(report.directories, 2);
-    assert!(report.skipped >= 1, "pruned entries are reported: {report:?}");
+    assert!(
+        report.skipped >= 1,
+        "pruned entries are reported: {report:?}"
+    );
 }
 
 #[test]
@@ -196,13 +195,18 @@ fn cancelling_mid_walk_stops_it() {
     let cancel = Cancellation::new();
     let mut seen = 0usize;
 
-    let report = walk(&policy(dir.path()), &cancel, Duration::from_secs(30), |_| {
-        seen += 1;
-        if seen >= 10 {
-            cancel.cancel();
-        }
-        true
-    });
+    let report = walk(
+        &policy(dir.path()),
+        &cancel,
+        Duration::from_secs(30),
+        |_| {
+            seen += 1;
+            if seen >= 10 {
+                cancel.cancel();
+            }
+            true
+        },
+    );
 
     assert!(report.cancelled);
     assert!(seen < 200, "walk kept going after cancel: {seen}");
@@ -214,10 +218,15 @@ fn callback_can_stop_the_walk_immediately() {
     sample_tree(dir.path());
     let mut seen = 0usize;
 
-    let report = walk(&policy(dir.path()), &Cancellation::new(), Duration::from_secs(30), |_| {
-        seen += 1;
-        false
-    });
+    let report = walk(
+        &policy(dir.path()),
+        &Cancellation::new(),
+        Duration::from_secs(30),
+        |_| {
+            seen += 1;
+            false
+        },
+    );
 
     assert_eq!(seen, 1);
     assert!(report.cancelled);
@@ -278,7 +287,10 @@ fn search_stops_at_the_limit_without_marking_results_incomplete() {
         .unwrap();
 
     assert_eq!(hits.entries.len(), 7);
-    assert!(!hits.incomplete, "reaching the limit is not an incomplete search");
+    assert!(
+        !hits.incomplete,
+        "reaching the limit is not an incomplete search"
+    );
 }
 
 #[test]
@@ -307,7 +319,10 @@ fn a_search_without_any_scope_says_so() {
     let error = backend
         .search(&SearchQuery::new("x"), &cancel, Duration::from_secs(1))
         .unwrap_err();
-    assert!(matches!(error, SearchError::Unavailable { .. }), "got {error:?}");
+    assert!(
+        matches!(error, SearchError::Unavailable { .. }),
+        "got {error:?}"
+    );
     assert!(error.to_string().contains("--in"), "{error}");
 
     let dir = tempfile::tempdir().unwrap();

@@ -6,11 +6,11 @@ use anyhow::{anyhow, bail, Result};
 use fam_core::{AppPaths, Config};
 use fam_sched::{spawn, Batch, SchedulerConfig};
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
-use fam_svc_walk::{
-    collect, Cancellation, Entry, Kind, SearchBackend, SearchError, SearchQuery, SearchResults,
-    SearchService, WalkPolicy, WalkReport, EverythingBackend, WalkBackend,
-};
 use fam_svc_walk::KIND_ORDER;
+use fam_svc_walk::{
+    collect, Cancellation, Entry, EverythingBackend, Kind, SearchBackend, SearchError, SearchQuery,
+    SearchResults, SearchService, WalkBackend, WalkPolicy, WalkReport,
+};
 
 use crate::{ConfigAction, TagAction};
 
@@ -96,16 +96,16 @@ fn parse_kind(value: Option<&str>) -> Result<Option<Kind>> {
     let Some(value) = value else {
         return Ok(None);
     };
-    Kind::parse(value)
-        .map(Some)
-        .ok_or_else(|| anyhow!(
+    Kind::parse(value).map(Some).ok_or_else(|| {
+        anyhow!(
             "unknown kind {value:?}; expected one of {}",
             KIND_ORDER
                 .iter()
                 .map(|kind| kind.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
-        ))
+        )
+    })
 }
 
 pub fn search(
@@ -119,9 +119,13 @@ pub fn search(
     let kind = parse_kind(kind)?;
     let service = match backend {
         None | Some("auto") | Some("walk") => SearchService::default_with(walk_policy(config)),
-        Some("walk-only") => SearchService::new(vec![Box::new(WalkBackend::new(walk_policy(config)))]),
+        Some("walk-only") => {
+            SearchService::new(vec![Box::new(WalkBackend::new(walk_policy(config)))])
+        }
         Some("everything") => SearchService::new(vec![Box::new(Forced(EverythingBackend))]),
-        Some(other) => bail!("unknown backend {other:?}; expected auto, walk, walk-only or everything"),
+        Some(other) => {
+            bail!("unknown backend {other:?}; expected auto, walk, walk-only or everything")
+        }
     };
 
     let mut request = SearchQuery::new(query);
@@ -194,10 +198,7 @@ pub fn tag(config: &Config, action: &TagAction) -> Result<()> {
             for record in records {
                 println!(
                     "{}  {}  priority={}  {}",
-                    record.source,
-                    record.tag,
-                    record.priority,
-                    record.created_at
+                    record.source, record.tag, record.priority, record.created_at
                 );
             }
         }
@@ -315,7 +316,10 @@ pub fn stats(config: &Config) -> Result<()> {
     let stats = store.stats()?;
     println!("database: {}", config.database_path.display());
     println!("files:    {}", stats.files);
-    println!("tags:     {} (manual {} / auto {})", stats.tags, stats.manual, stats.auto);
+    println!(
+        "tags:     {} (manual {} / auto {})",
+        stats.tags, stats.manual, stats.auto
+    );
     Ok(())
 }
 
@@ -325,10 +329,7 @@ fn walk_policy(config: &Config) -> WalkPolicy {
 
 fn render_entries(entries: &[Entry]) {
     for kind in KIND_ORDER {
-        let group: Vec<&Entry> = entries
-            .iter()
-            .filter(|entry| entry.kind == kind)
-            .collect();
+        let group: Vec<&Entry> = entries.iter().filter(|entry| entry.kind == kind).collect();
         if group.is_empty() {
             continue;
         }

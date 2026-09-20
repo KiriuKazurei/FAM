@@ -29,7 +29,7 @@ use fam_core::Config;
 use fam_sched::{spawn, Batcher, FileChange, Handle, SchedulerConfig};
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
 use fam_svc_walk::{Cancellation, Kind, SearchQuery, SearchService, WalkPolicy};
-use fam_view::{Delta, Filter, Order, Row, SortKey, ViewModel, row_for_path};
+use fam_view::{row_for_path, Delta, Filter, Order, Row, SortKey, ViewModel};
 use serde::Serialize;
 
 const OK: c_int = 0;
@@ -160,19 +160,27 @@ impl FamCore {
     /// Lock poisoning can only follow a panic that an entry point already caught, so recovering
     /// the guard keeps one bad call from wedging the front-end.
     fn store(&self) -> std::sync::MutexGuard<'_, TagStore> {
-        self.store.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn views(&self) -> std::sync::MutexGuard<'_, HashMap<u64, ViewModel>> {
-        self.views.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.views
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn watchers(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Handle>> {
-        self.watchers.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.watchers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn pending(&self) -> std::sync::MutexGuard<'_, Vec<FileChange>> {
-        self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn stats(&self) -> Result<String, String> {
@@ -195,16 +203,28 @@ impl FamCore {
         serde_json::to_string(&out).map_err(|error| error.to_string())
     }
 
-    fn tag_add(&self, path: &Path, tags_json: &str, source: &str, priority: i32) -> Result<String, String> {
+    fn tag_add(
+        &self,
+        path: &Path,
+        tags_json: &str,
+        source: &str,
+        priority: i32,
+    ) -> Result<String, String> {
         let names = parse_tags(tags_json)?;
         let source = Source::parse(source).map_err(|error| error.to_string())?;
         let entries: Vec<NewTag> = names
             .iter()
             .cloned()
-            .map(|tag| NewTag::manual(tag).with_source(source).with_priority(priority))
+            .map(|tag| {
+                NewTag::manual(tag)
+                    .with_source(source)
+                    .with_priority(priority)
+            })
             .collect();
         let store = self.store();
-        let outcome = store.add_tags(path, &entries).map_err(|error| error.to_string())?;
+        let outcome = store
+            .add_tags(path, &entries)
+            .map_err(|error| error.to_string())?;
         Ok(format!(
             "{{\"added\":{},\"present\":{}}}",
             outcome.inserted, outcome.refreshed
@@ -213,7 +233,9 @@ impl FamCore {
 
     fn tag_list(&self, path: &Path) -> Result<String, String> {
         let store = self.store();
-        let records = store.tags_of(path, None).map_err(|error| error.to_string())?;
+        let records = store
+            .tags_of(path, None)
+            .map_err(|error| error.to_string())?;
         let tags: Vec<TagOut> = records
             .iter()
             .map(|record| TagOut {
@@ -226,13 +248,21 @@ impl FamCore {
         serde_json::to_string(&tags).map_err(|error| error.to_string())
     }
 
-    fn tag_remove(&self, path: &Path, tags_json: &str, source: Option<&str>) -> Result<String, String> {
+    fn tag_remove(
+        &self,
+        path: &Path,
+        tags_json: &str,
+        source: Option<&str>,
+    ) -> Result<String, String> {
         let names: Vec<String> = if tags_json.trim().is_empty() {
             Vec::new()
         } else {
             parse_tags(tags_json)?
         };
-        let source = source.map(Source::parse).transpose().map_err(|e| e.to_string())?;
+        let source = source
+            .map(Source::parse)
+            .transpose()
+            .map_err(|e| e.to_string())?;
         let store = self.store();
         let removed = store
             .remove_tags(path, &names, source)
@@ -249,7 +279,10 @@ impl FamCore {
         limit: Option<usize>,
     ) -> Result<String, String> {
         let tags = parse_tags(tags_json)?;
-        let source = source.map(Source::parse).transpose().map_err(|e| e.to_string())?;
+        let source = source
+            .map(Source::parse)
+            .transpose()
+            .map_err(|e| e.to_string())?;
         let request = SearchRequest {
             tags,
             match_all,
@@ -274,7 +307,8 @@ impl FamCore {
         let sort_key = parse_sort(sort)?;
         let order = parse_order(order)?;
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        self.views().insert(token, ViewModel::with_sort(sort_key, order));
+        self.views()
+            .insert(token, ViewModel::with_sort(sort_key, order));
         Ok(token)
     }
 
@@ -310,13 +344,22 @@ impl FamCore {
         let mut rows: Vec<Row> = results
             .entries
             .iter()
-            .map(|entry| Row::new(&entry.path, entry.kind, entry.size, entry.modified_ms.unwrap_or(0)))
+            .map(|entry| {
+                Row::new(
+                    &entry.path,
+                    entry.kind,
+                    entry.size,
+                    entry.modified_ms.unwrap_or(0),
+                )
+            })
             .collect();
 
         let keys: Vec<String> = rows.iter().map(|row| row.key.clone()).collect();
         let tags = {
             let store = self.store();
-            store.tag_names_for(&keys).map_err(|error| error.to_string())?
+            store
+                .tag_names_for(&keys)
+                .map_err(|error| error.to_string())?
         };
         for row in rows.iter_mut() {
             if let Some(names) = tags.get(&row.key) {
@@ -448,8 +491,9 @@ fn write_cstring(target: *mut *mut c_char, value: impl Into<String>) {
     if target.is_null() {
         return;
     }
-    let encoded = CString::new(value.into())
-        .unwrap_or_else(|_| CString::new("{\"error\":\"result contained a NUL byte\"}").expect("static text"));
+    let encoded = CString::new(value.into()).unwrap_or_else(|_| {
+        CString::new("{\"error\":\"result contained a NUL byte\"}").expect("static text")
+    });
     unsafe { *target = encoded.into_raw() };
 }
 
@@ -494,7 +538,12 @@ where
     }
 }
 
-unsafe fn with_core<F>(core: *mut FamCore, out: *mut *mut c_char, err: *mut *mut c_char, body: F) -> c_int
+unsafe fn with_core<F>(
+    core: *mut FamCore,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+    body: F,
+) -> c_int
 where
     F: FnOnce(&FamCore) -> Result<String, String>,
 {
@@ -572,7 +621,11 @@ pub unsafe extern "C" fn fam_free_string(value: *mut c_char) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn fam_stats(core: *mut FamCore, out: *mut *mut c_char, err: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn fam_stats(
+    core: *mut FamCore,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
     with_core(core, out, err, |borrow| borrow.stats())
 }
 
@@ -696,7 +749,11 @@ pub unsafe extern "C" fn fam_view_free(core: *mut FamCore, token: u64) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn fam_watch_start(core: *mut FamCore, dir: *const c_char, err: *mut *mut c_char) -> u64 {
+pub unsafe extern "C" fn fam_watch_start(
+    core: *mut FamCore,
+    dir: *const c_char,
+    err: *mut *mut c_char,
+) -> u64 {
     with_core_token(core, err, |borrow| {
         let dir = required_str(dir, "dir")?;
         borrow.watch_start(Path::new(dir))

@@ -170,7 +170,11 @@ impl TagStore {
         Ok(self.conn.execute(&sql, params_from_iter(sql_refs(&args)))?)
     }
 
-    pub fn tags_of(&self, path: &Path, source: Option<Source>) -> Result<Vec<TagRecord>, StoreError> {
+    pub fn tags_of(
+        &self,
+        path: &Path,
+        source: Option<Source>,
+    ) -> Result<Vec<TagRecord>, StoreError> {
         let key = path_key(path);
         let sql = format!(
             "SELECT tag, source, priority, created_at FROM tags WHERE path_norm = ?1{}{}",
@@ -308,7 +312,10 @@ impl TagStore {
     }
 
     /// Tag names for many files in one query, keyed by `path_norm`, in display order.
-    pub fn tag_names_for(&self, keys: &[String]) -> Result<HashMap<String, Vec<String>>, StoreError> {
+    pub fn tag_names_for(
+        &self,
+        keys: &[String],
+    ) -> Result<HashMap<String, Vec<String>>, StoreError> {
         if keys.is_empty() {
             return Ok(HashMap::new());
         }
@@ -320,9 +327,10 @@ impl TagStore {
         let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
         {
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(params_from_iter(keys.iter().map(String::as_str)), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
+            let rows = stmt
+                .query_map(params_from_iter(keys.iter().map(String::as_str)), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
             for row in rows {
                 let (key, tag) = row?;
                 grouped.entry(key).or_default().push(tag);
@@ -374,7 +382,9 @@ impl TagStore {
         let mut stmt = self
             .conn
             .prepare("SELECT source, COUNT(*) FROM tags GROUP BY source")?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
         for row in rows {
             let (source, count) = row?;
             match parse_source(&source) {
@@ -396,7 +406,8 @@ impl TagStore {
             );
             let keys: Vec<&str> = hits.iter().map(|(key, _)| key.as_str()).collect();
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(params_from_iter(keys.iter().copied()), read_grouped_record)?;
+            let rows =
+                stmt.query_map(params_from_iter(keys.iter().copied()), read_grouped_record)?;
             for row in rows {
                 let (key, record) = row?;
                 grouped.entry(key).or_default().push(record);

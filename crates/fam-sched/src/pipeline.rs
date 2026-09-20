@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use fam_core::Config;
 use notify::event::{ModifyKind, RenameMode};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use notify::Config as NotifyConfig;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::batch::{Batch, Batcher, Change, FileChange};
 
@@ -286,7 +286,10 @@ mod tests {
     }
 
     fn kinds(changes: &[FileChange]) -> Vec<&str> {
-        changes.iter().map(|change| change.change.as_str()).collect()
+        changes
+            .iter()
+            .map(|change| change.change.as_str())
+            .collect()
     }
 
     #[test]
@@ -340,7 +343,10 @@ mod tests {
     fn a_full_queue_drops_events_instead_of_blocking() {
         let (sender, receiver) = sync_channel::<FileChange>(1);
         let dropped = Arc::new(AtomicU64::new(0));
-        let publisher = Publisher { sender, dropped: Arc::clone(&dropped) };
+        let publisher = Publisher {
+            sender,
+            dropped: Arc::clone(&dropped),
+        };
 
         let discarded = publisher.publish(vec![
             FileChange::new("D:/a", Change::Created),
@@ -358,7 +364,10 @@ mod tests {
     fn watcher_errors_count_as_loss() {
         let (sender, _receiver) = sync_channel::<FileChange>(1);
         let dropped = Arc::new(AtomicU64::new(0));
-        let publisher = Publisher { sender, dropped: Arc::clone(&dropped) };
+        let publisher = Publisher {
+            sender,
+            dropped: Arc::clone(&dropped),
+        };
 
         publisher.note_loss();
 

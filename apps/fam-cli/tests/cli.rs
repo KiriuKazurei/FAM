@@ -32,10 +32,7 @@ impl Cli {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.command()
-            .args(args)
-            .output()
-            .expect("fam binary runs")
+        self.command().args(args).output().expect("fam binary runs")
     }
 
     fn stdout(&self, args: &[&str]) -> String {
@@ -72,7 +69,10 @@ fn help_lists_every_subcommand() {
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
 
     for command in ["config", "scan", "search", "tag", "find", "watch", "stats"] {
-        assert!(text.contains(command), "{command} missing from help:\n{text}");
+        assert!(
+            text.contains(command),
+            "{command} missing from help:\n{text}"
+        );
     }
 }
 

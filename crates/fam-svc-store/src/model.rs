@@ -304,9 +304,18 @@ mod tests {
         assert!(in_range("D:/FAM/DOC.TXT"));
         assert!(in_range("D:/FAM/A/B/C.PDF"));
         assert!(in_range("D:/FAM/!URGENT"));
-        assert!(!in_range("D:/FAM"), "the directory itself is matched by equality");
-        assert!(!in_range("D:/FAM.PARENT"), "shared-prefix sibling must fall out");
-        assert!(!in_range("D:/FAMFOO"), "shared-prefix sibling must fall out");
+        assert!(
+            !in_range("D:/FAM"),
+            "the directory itself is matched by equality"
+        );
+        assert!(
+            !in_range("D:/FAM.PARENT"),
+            "shared-prefix sibling must fall out"
+        );
+        assert!(
+            !in_range("D:/FAMFOO"),
+            "shared-prefix sibling must fall out"
+        );
         assert_eq!(descendant_range("/"), None);
         assert_eq!(descendant_range(""), None);
     }
