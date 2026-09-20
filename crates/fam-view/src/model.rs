@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use fam_core::path_key;
+use fam_core::{classify, path_key, to_epoch_ms, Kind};
 use fam_sched::{Batch, Change};
-use fam_svc_walk::{classify, to_epoch_ms, Kind};
+
+// Sorting vocabulary is shared with the directory index; this crate must not own a second copy.
+pub use fam_core::{Order, SortKey};
 
 pub type RowKey = String;
 
@@ -49,20 +51,6 @@ pub fn row_for_path(path: &Path) -> Option<Row> {
         if is_directory { 0 } else { metadata.len() },
         metadata.modified().ok().and_then(to_epoch_ms).unwrap_or(0),
     ))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortKey {
-    Name,
-    Size,
-    Modified,
-    Kind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Order {
-    Ascending,
-    Descending,
 }
 
 fn compare(a: &Row, b: &Row, key: SortKey) -> Ordering {
@@ -116,9 +104,18 @@ impl Filter {
 /// One positioned change, mirroring the signals a list model emits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delta {
-    Inserted { index: usize, row: Row },
-    Removed { index: usize, key: RowKey },
-    Changed { index: usize, row: Row },
+    Inserted {
+        index: usize,
+        row: Row,
+    },
+    Removed {
+        index: usize,
+        key: RowKey,
+    },
+    Changed {
+        index: usize,
+        row: Row,
+    },
     /// The projection was rebuilt; a model should wrap this in a reset.
     Reset,
 }
@@ -401,7 +398,10 @@ mod tests {
         );
         assert_eq!(
             view.visible_keys(),
-            vec![path_key(Path::new("D:/dir/a.txt")), path_key(Path::new("D:/dir/b.txt"))]
+            vec![
+                path_key(Path::new("D:/dir/a.txt")),
+                path_key(Path::new("D:/dir/b.txt"))
+            ]
         );
     }
 
@@ -450,7 +450,10 @@ mod tests {
         let mut view = ViewModel::new();
         for name in ["a", "b", "c"] {
             view.apply_with(
-                &batch(vec![FileChange::new(format!("D:/{name}.txt"), Change::Created)]),
+                &batch(vec![FileChange::new(
+                    format!("D:/{name}.txt"),
+                    Change::Created,
+                )]),
                 move |path| Some(row(&path.display().to_string(), Kind::Document, 1, 1)),
             );
         }
@@ -531,7 +534,11 @@ mod tests {
             |_| Some(row("D:/report.pdf", Kind::Image, 1, 1)),
         );
 
-        assert_eq!(view.len(), 1, "the term still matches, only the kind changed");
+        assert_eq!(
+            view.len(),
+            1,
+            "the term still matches, only the kind changed"
+        );
         view.set_filter(Filter::matching("report").kind(Kind::Image));
         assert_eq!(view.len(), 1);
     }
@@ -591,7 +598,10 @@ mod tests {
         ];
 
         sort_rows(&mut rows, SortKey::Size, Order::Descending);
-        let order: Vec<String> = rows.iter().map(|row| row.path.display().to_string()).collect();
+        let order: Vec<String> = rows
+            .iter()
+            .map(|row| row.path.display().to_string())
+            .collect();
 
         assert_eq!(order, vec!["D:/c.big", "D:/a.same", "D:/b.same"]);
     }
@@ -604,7 +614,18 @@ mod tests {
                 FileChange::new("D:/1.txt", Change::Created),
                 FileChange::new("D:/2.txt", Change::Created),
             ]),
-            |path| Some(row(&path.display().to_string(), Kind::Document, if path.display().to_string().contains('1') { 100 } else { 1 }, 1)),
+            |path| {
+                Some(row(
+                    &path.display().to_string(),
+                    Kind::Document,
+                    if path.display().to_string().contains('1') {
+                        100
+                    } else {
+                        1
+                    },
+                    1,
+                ))
+            },
         );
 
         let deltas = view.set_sort(SortKey::Size, Order::Ascending);

@@ -56,7 +56,11 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run { iterations, passes, write } => {
+        Command::Run {
+            iterations,
+            passes,
+            write,
+        } => {
             let results = run_all(iterations, passes)?;
             if write {
                 write_baseline(&cli.baseline, &results)?;
@@ -73,10 +77,7 @@ fn main() -> Result<()> {
 
 const DEFAULT_PASSES: usize = 3;
 
-fn run_all(
-    iterations: Option<usize>,
-    passes: usize,
-) -> Result<BTreeMap<String, CaseResult>> {
+fn run_all(iterations: Option<usize>, passes: usize) -> Result<BTreeMap<String, CaseResult>> {
     let mut results = BTreeMap::new();
     for case in Case::all() {
         match case.measure_best_of(iterations, passes) {
@@ -112,15 +113,19 @@ fn write_baseline(path: &Path, results: &BTreeMap<String, CaseResult>) -> Result
         cases: results.clone(),
     };
     let json = serde_json::to_string_pretty(&body)?;
-    let mut file = std::fs::File::create(path)
-        .with_context(|| format!("cannot write {}", path.display()))?;
+    let mut file =
+        std::fs::File::create(path).with_context(|| format!("cannot write {}", path.display()))?;
     file.write_all(json.as_bytes())?;
     Ok(())
 }
 
 fn check_against_baseline(path: &Path, current: &BTreeMap<String, CaseResult>) -> Result<()> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("no baseline at {}; run `fam-bench run --write` first", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "no baseline at {}; run `fam-bench run --write` first",
+            path.display()
+        )
+    })?;
     let stored: Baseline = serde_json::from_str(&text).context("baseline is not valid JSON")?;
 
     const FAIL_RATIO: f64 = 1.25;
@@ -169,7 +174,10 @@ fn check_against_baseline(path: &Path, current: &BTreeMap<String, CaseResult>) -
         for failure in &failures {
             eprintln!("error: {failure}");
         }
-        anyhow::bail!("{} benchmark case(s) regressed beyond the 25% floor gate", failures.len());
+        anyhow::bail!(
+            "{} benchmark case(s) regressed beyond the 25% floor gate",
+            failures.len()
+        );
     }
     println!("\nall measured cases within gate");
     Ok(())
@@ -191,4 +199,3 @@ fn describe_machine() -> String {
         env!("CARGO_PKG_VERSION")
     )
 }
-

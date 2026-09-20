@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/fam-core",
     "crates/fam-svc-store",
+    "crates/fam-svc-enumerate",
+    "crates/fam-svc-index",
+    "crates/fam-svc-everything",
     "crates/fam-svc-walk",
     "crates/fam-sched",
     "crates/fam-view",
@@ -21,6 +24,9 @@ publish = false
 [workspace.dependencies]
 fam-core = { path = "crates/fam-core" }
 fam-svc-store = { path = "crates/fam-svc-store" }
+fam-svc-enumerate = { path = "crates/fam-svc-enumerate" }
+fam-svc-index = { path = "crates/fam-svc-index" }
+fam-svc-everything = { path = "crates/fam-svc-everything" }
 fam-svc-walk = { path = "crates/fam-svc-walk" }
 fam-sched = { path = "crates/fam-sched" }
 fam-view = { path = "crates/fam-view" }

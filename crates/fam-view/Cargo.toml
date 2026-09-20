@@ -9,7 +9,6 @@ publish.workspace = true
 [dependencies]
 fam-core.workspace = true
 fam-sched.workspace = true
-fam-svc-walk.workspace = true
 log.workspace = true
 thiserror.workspace = true
 

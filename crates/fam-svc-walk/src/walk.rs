@@ -5,11 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use fam_core::{path_key, Config};
-
-use crate::kind::{classify, Kind};
+use fam_core::{classify, path_key, to_epoch_ms, Cancellation, Config, Kind};
 
 pub const DEFAULT_MAX_ENTRIES: usize = 200_000;
 pub const DEFAULT_THREADS: usize = 10;
@@ -22,28 +20,6 @@ const DEADLINE_POLL: Duration = Duration::from_millis(25);
 /// Queue depth per worker at which extra parallelism starts paying for itself. A flat directory
 /// queues no children at all, so opening one never creates a thread beyond the first.
 const GROW_QUEUE: usize = 4;
-
-/// Cooperative stop signal: enumeration polls it between directories and between emitted entries,
-/// which is what the legacy scan never had — its timeout only made the caller give up while the
-/// walk kept running (`docs/legacy-specs.md` §2.2-4).
-#[derive(Debug, Clone, Default)]
-pub struct Cancellation {
-    stop: Arc<AtomicBool>,
-}
-
-impl Cancellation {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn cancel(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-
-    pub fn is_stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct WalkPolicy {
@@ -143,14 +119,6 @@ impl Entry {
                 .and_then(to_epoch_ms),
             path,
         }
-    }
-}
-
-/// Milliseconds since the Unix epoch, negative for timestamps before it.
-pub fn to_epoch_ms(at: SystemTime) -> Option<i64> {
-    match at.duration_since(UNIX_EPOCH) {
-        Ok(elapsed) => i64::try_from(elapsed.as_millis()).ok(),
-        Err(error) => i64::try_from(error.duration().as_millis()).map(|value| -value).ok(),
     }
 }
 
@@ -419,7 +387,9 @@ impl Ctx {
         let is_directory = file_type.is_dir();
         // Both predicates allocate — an uppercase fold and a path key — so they are skipped
         // entirely when nothing is configured to exclude.
-        if is_directory && !self.policy.excluded_names.is_empty() && self.policy.name_excluded(&path)
+        if is_directory
+            && !self.policy.excluded_names.is_empty()
+            && self.policy.name_excluded(&path)
         {
             self.shared.skipped.fetch_add(1, Ordering::Relaxed);
             return;
@@ -478,7 +448,9 @@ impl Ctx {
 }
 
 fn is_walkable_dir(path: &Path) -> bool {
-    fs::metadata(path).map(|meta| meta.is_dir()).unwrap_or(false)
+    fs::metadata(path)
+        .map(|meta| meta.is_dir())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -488,12 +460,6 @@ mod tests {
     #[test]
     fn extensionless_files_classify_as_other() {
         assert_eq!(classify(Path::new("D:/LICENSE"), false), Kind::Other);
-    }
-
-    #[test]
-    fn negative_epoch_offsets_survive_conversion() {
-        let before_epoch = UNIX_EPOCH - Duration::from_secs(1_000);
-        assert_eq!(to_epoch_ms(before_epoch), Some(-1_000_000));
     }
 
     #[test]

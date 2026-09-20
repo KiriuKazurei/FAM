@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// The legacy stack filtered enumeration through a media-extension whitelist that contradicted
 /// itself between config and code, and could not show non-media files at all
 /// (`docs/legacy-specs.md` §2). A resource manager shows everything; the bucket only decides which
-/// section a hit renders under.
+/// section a hit renders under, so this table groups and never filters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
@@ -52,6 +52,25 @@ impl Kind {
     pub fn parse(value: &str) -> Option<Self> {
         KIND_ORDER.into_iter().find(|kind| kind.as_str() == value)
     }
+
+    /// Declaration index, used as the `u8` carried by [`crate::Item`].
+    pub const fn index(self) -> u8 {
+        match self {
+            Kind::Directory => 0,
+            Kind::Image => 1,
+            Kind::Video => 2,
+            Kind::Audio => 3,
+            Kind::Document => 4,
+            Kind::Archive => 5,
+            Kind::Code => 6,
+            Kind::Executable => 7,
+            Kind::Other => 8,
+        }
+    }
+
+    pub fn from_index(index: u8) -> Option<Self> {
+        KIND_ORDER.get(index as usize).copied()
+    }
 }
 
 impl std::fmt::Display for Kind {
@@ -61,7 +80,7 @@ impl std::fmt::Display for Kind {
 }
 
 /// Lowercases an extension before lookup, so `.PNG` and `.png` land in the same bucket — the
-/// mismatch recorded in §2.2-2.
+/// mismatch recorded in `docs/legacy-specs.md` §2.2-2.
 pub fn extension_of(path: &Path) -> Option<String> {
     let name = path.file_name()?;
     let text = name.to_string_lossy();
@@ -77,23 +96,25 @@ pub fn kind_of_extension(extension: &str) -> Kind {
         "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "heic" | "heif"
         | "svg" | "ico" | "avif" | "raw" | "cr2" | "nef" | "arw" | "dng" | "psd" => Kind::Image,
 
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg" | "m2ts"
-        | "3gp" => Kind::Video,
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg"
+        | "m2ts" | "3gp" => Kind::Video,
 
-        "mp3" | "flac" | "wav" | "ogg" | "oga" | "m4a" | "aac" | "wma" | "opus" | "aiff" | "mid"
-        | "ape" => Kind::Audio,
+        "mp3" | "flac" | "wav" | "ogg" | "oga" | "m4a" | "aac" | "wma" | "opus" | "aiff"
+        | "mid" | "ape" => Kind::Audio,
 
         "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "iso" | "cab" | "apk" => {
             Kind::Archive
         }
 
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "markdown" | "rtf" | "odt"
-        | "ods" | "odp" | "epub" | "mobi" | "azw3" | "csv" | "tsv" | "lnk" => Kind::Document,
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "markdown"
+        | "rtf" | "odt" | "ods" | "odp" | "epub" | "mobi" | "azw3" | "csv" | "tsv" | "lnk" => {
+            Kind::Document
+        }
 
-        "rs" | "go" | "java" | "kt" | "ts" | "tsx" | "js" | "jsx" | "py" | "rb" | "php" | "swift"
-        | "c" | "h" | "cpp" | "hpp" | "cc" | "cs" | "sh" | "ps1" | "bat" | "cmd" | "sql"
-        | "html" | "css" | "scss" | "vue" | "json" | "xml" | "yaml" | "yml" | "toml" | "ini"
-        | "conf" | "log" => Kind::Code,
+        "rs" | "go" | "java" | "kt" | "ts" | "tsx" | "js" | "jsx" | "py" | "rb" | "php"
+        | "swift" | "c" | "h" | "cpp" | "hpp" | "cc" | "cs" | "sh" | "ps1" | "bat" | "cmd"
+        | "sql" | "html" | "css" | "scss" | "vue" | "json" | "xml" | "yaml" | "yml" | "toml"
+        | "ini" | "conf" | "log" => Kind::Code,
 
         "exe" | "dll" | "ocx" | "sys" | "msi" | "so" | "dylib" | "jar" | "pyd" | "lib" | "a"
         | "obj" => Kind::Executable,
@@ -132,7 +153,10 @@ mod tests {
     fn extensionless_and_dotfile_names_fall_back_to_other() {
         assert_eq!(classify(Path::new("D:/Makefile"), false), Kind::Other);
         assert_eq!(classify(Path::new("D:/.gitignore"), false), Kind::Other);
-        assert_eq!(classify(Path::new("D:/archive.tar.gz"), false), Kind::Archive);
+        assert_eq!(
+            classify(Path::new("D:/archive.tar.gz"), false),
+            Kind::Archive
+        );
     }
 
     #[test]
@@ -144,9 +168,11 @@ mod tests {
     }
 
     #[test]
-    fn buckets_cover_the_media_types_the_legacy_whitelist_claimed() {
-        for extension in ["jpg", "png", "mp4", "avi", "pdf", "docx", "mp3"] {
-            assert_ne!(kind_of_extension(extension), Kind::Other, "{extension}");
+    fn the_wire_index_is_the_declaration_order() {
+        for (index, kind) in KIND_ORDER.into_iter().enumerate() {
+            assert_eq!(kind.index(), index as u8);
+            assert_eq!(Kind::from_index(kind.index()), Some(kind));
         }
+        assert_eq!(Kind::from_index(KIND_ORDER.len() as u8), None);
     }
 }

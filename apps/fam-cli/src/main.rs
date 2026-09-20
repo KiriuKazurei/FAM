@@ -148,11 +148,9 @@ fn main() -> ExitCode {
 
 fn init_logging(verbose: bool) {
     let level = if verbose { "debug" } else { "warn" };
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(level),
-    )
-    .format_target(false)
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level))
+        .format_target(false)
+        .init();
 }
 
 fn run(cli: &Cli) -> anyhow::Result<()> {

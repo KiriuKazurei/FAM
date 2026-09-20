@@ -325,6 +325,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "fam-svc-enumerate"
+version = "0.1.0"
+dependencies = [
+ "fam-core",
+ "log",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "fam-svc-everything"
+version = "0.1.0"
+dependencies = [
+ "fam-core",
+]
+
+[[package]]
+name = "fam-svc-index"
+version = "0.1.0"
+dependencies = [
+ "fam-core",
+ "fam-svc-enumerate",
+ "fam-svc-everything",
+ "fam-svc-walk",
+ "log",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "fam-svc-store"
 version = "0.1.0"
 dependencies = [
@@ -353,7 +383,6 @@ version = "0.1.0"
 dependencies = [
  "fam-core",
  "fam-sched",
- "fam-svc-walk",
  "log",
  "tempfile",
  "thiserror",

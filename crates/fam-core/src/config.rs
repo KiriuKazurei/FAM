@@ -58,6 +58,13 @@ impl AppPaths {
     }
 }
 
+/// What a loader does when the file does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnMissing {
+    Error,
+    Defaults,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -78,7 +85,10 @@ impl Default for Config {
             database_path: AppPaths::default_database_file(),
             search_roots: default_search_roots(),
             excluded_dirs: Vec::new(),
-            excluded_names: DEFAULT_EXCLUDED_NAMES.iter().map(|s| (*s).to_string()).collect(),
+            excluded_names: DEFAULT_EXCLUDED_NAMES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             scan_timeout_secs: DEFAULT_SCAN_TIMEOUT_SECS,
             walk_threads: DEFAULT_WALK_THREADS,
             event_queue_capacity: DEFAULT_EVENT_QUEUE_CAPACITY,
@@ -114,19 +124,26 @@ impl Config {
         }
     }
 
+    /// Strict: an absent file is an error.
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
-        let text = read_if_present(path)?.ok_or_else(|| ConfigError::Missing(path.to_path_buf()))?;
-        let config: Config = Self::parse(text, path)?;
-        config.validate()?;
-        Ok(config)
+        Self::load_with(path, OnMissing::Error)
     }
 
-    /// Absent file yields defaults, present file is merged over them by `#[serde(default)]`.
+    /// Lenient: an absent file yields the defaults; a present file is merged over them by
+    /// `#[serde(default)]`.
     pub fn load_merging(path: &Path) -> Result<Self, ConfigError> {
-        let Some(text) = read_if_present(path)? else {
-            return Ok(Self::default());
+        Self::load_with(path, OnMissing::Defaults)
+    }
+
+    pub fn load_with(path: &Path, on_missing: OnMissing) -> Result<Self, ConfigError> {
+        let text = match read_if_present(path)? {
+            Some(text) => text,
+            None => match on_missing {
+                OnMissing::Error => return Err(ConfigError::Missing(path.to_path_buf())),
+                OnMissing::Defaults => return Ok(Self::default()),
+            },
         };
-        let config: Config = Self::parse(text, path)?;
+        let config = Self::parse(text, path)?;
         config.validate()?;
         Ok(config)
     }
@@ -159,7 +176,9 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.database_path.as_os_str().is_empty() {
-            return Err(ConfigError::Invalid("database_path must not be empty".into()));
+            return Err(ConfigError::Invalid(
+                "database_path must not be empty".into(),
+            ));
         }
         if self.walk_threads == 0 || self.walk_threads > 64 {
             return Err(ConfigError::Invalid(format!(
@@ -313,10 +332,7 @@ mod tests {
             memory_limit_mb: Some(64),
             ..Config::default()
         };
-        assert!(matches!(
-            too_small.validate(),
-            Err(ConfigError::Invalid(_))
-        ));
+        assert!(matches!(too_small.validate(), Err(ConfigError::Invalid(_))));
         let within_range = Config {
             memory_limit_mb: Some(1024),
             ..Config::default()

@@ -7,6 +7,4 @@
 
 mod model;
 
-pub use model::{
-    Delta, Filter, Order, Row, RowKey, SortKey, ViewModel, row_for_path, sort_rows,
-};
+pub use model::{row_for_path, sort_rows, Delta, Filter, Order, Row, RowKey, SortKey, ViewModel};
