@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SLASH: u16 = b'/' as u16;
 const BACKSLASH: u16 = b'\\' as u16;
@@ -69,15 +69,25 @@ impl PathKey {
     }
 
     pub fn to_path_buf(&self) -> std::path::PathBuf {
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStringExt;
-            std::path::PathBuf::from(std::ffi::OsString::from_wide(&self.0))
-        }
-        #[cfg(not(windows))]
-        {
-            std::path::PathBuf::from(self.to_lossy_string())
-        }
+        path_buf_from_units(&self.0)
+    }
+}
+
+/// Rebuilds a path from raw UTF-16 units. Exact on Windows, where that is what the filesystem
+/// speaks; lossy elsewhere, where a `PathBuf` is bytes and only this project's test targets run.
+///
+/// Enumeration hands out entry names as units, so joining them onto a parent directory has to go
+/// through here — routing a name through `String::from_utf16_lossy` first would rewrite every lone
+/// surrogate into U+FFFD and produce a path that names a different file.
+pub fn path_buf_from_units(units: &[u16]) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_wide(units))
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(String::from_utf16_lossy(units))
     }
 }
 

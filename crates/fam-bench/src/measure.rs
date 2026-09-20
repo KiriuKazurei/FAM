@@ -1,11 +1,27 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use fam_core::Config;
-use fam_svc_walk::{collect, Cancellation, WalkPolicy};
+use fam_core::{Cancellation, Config};
+use fam_svc_enumerate::list_one_level;
+use fam_svc_walk::{collect, WalkPolicy};
 use serde::{Deserialize, Serialize};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Which driver a case runs.
+///
+/// `ReadWin32` and `ReadStd` price one reader against the other on a single warm directory, with no
+/// thread pool, channel or collected `Vec` between them. They exist because "a listing pays two
+/// syscalls per entry, and that is what makes a big folder slow" had to be checked rather than
+/// assumed — and because the same comparison over a 78k-entry tree turned out to be ungateable: the
+/// spread within one variant (864-1207us) was wider than the gap between variants.
+#[derive(Clone, Copy)]
+pub enum Mode {
+    Walk,
+    ReadWin32,
+    ReadStd,
+}
 
 pub struct Case {
     id: &'static str,
@@ -13,6 +29,7 @@ pub struct Case {
     default_corpus: &'static str,
     iterations: usize,
     entry_cap: usize,
+    mode: Mode,
     note: &'static str,
 }
 
@@ -43,6 +60,7 @@ impl Case {
                 default_corpus: "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
                 iterations: 300,
                 entry_cap: 200_000,
+                mode: Mode::Walk,
                 note: "flat ~188-entry directory: the folder-open headline",
             },
             Case {
@@ -51,6 +69,7 @@ impl Case {
                 default_corpus: "D:/Applications/Qt/6.11/6.11.2/mingw_64/plugins",
                 iterations: 200,
                 entry_cap: 200_000,
+                mode: Mode::Walk,
                 note: "files plus 15 subdirectories one level down",
             },
             Case {
@@ -59,6 +78,7 @@ impl Case {
                 default_corpus: "D:/Applications/Qt",
                 iterations: 9,
                 entry_cap: 200_000,
+                mode: Mode::Walk,
                 note: "77,891 entries across 4,730 directories",
             },
             Case {
@@ -67,7 +87,27 @@ impl Case {
                 default_corpus: "D:/",
                 iterations: 3,
                 entry_cap: 200_000,
+                mode: Mode::Walk,
                 note: "whole-volume scan that stops at the entry cap",
+            },
+            Case {
+                id: "read_flat_win32",
+                env_var: "FAM_BENCH_FLAT",
+                default_corpus: "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
+                iterations: 4000,
+                entry_cap: 0,
+                mode: Mode::ReadWin32,
+                note:
+                    "one warm directory via FindFirstFileExW; floor over entries is per-entry cost",
+            },
+            Case {
+                id: "read_flat_std",
+                env_var: "FAM_BENCH_FLAT",
+                default_corpus: "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
+                iterations: 4000,
+                entry_cap: 0,
+                mode: Mode::ReadStd,
+                note: "the same directory via std::fs, the reader the walk used until increment 2",
             },
         ]
     }
@@ -116,36 +156,15 @@ impl Case {
         }
         let rounds = iterations.unwrap_or(self.iterations).max(2);
 
-        let mut policy = WalkPolicy::from_config(&Config::default());
-        policy.roots = vec![corpus.clone()];
-        policy.max_entries = self.entry_cap;
-        let cancel = Cancellation::new();
+        let mut samples = match self.mode {
+            Mode::Walk => measure_walk(&corpus, rounds, self.entry_cap),
+            Mode::ReadWin32 => measure_scan(&corpus, rounds, read_flat_win32),
+            Mode::ReadStd => measure_scan(&corpus, rounds, read_flat_std),
+        };
+        samples.durations.sort_unstable();
 
-        // Warm-up pass: page cache and any lazily built state, excluded from the statistics.
-        collect(&policy, &cancel, TIMEOUT);
-
-        let mut durations: Vec<u64> = Vec::with_capacity(rounds);
-        let mut last_entries = 0u64;
-        let mut last_dirs = 0u64;
-        let mut last_errors = 0u64;
-        let mut total = Duration::ZERO;
-
-        for _ in 0..rounds {
-            let started = Instant::now();
-            let (rows, report) = collect(&policy, &cancel, TIMEOUT);
-            let elapsed = started.elapsed();
-            // Keep the rows alive so the compiler cannot elide the enumeration.
-            std::hint::black_box(rows.len());
-            durations.push(elapsed.as_micros() as u64);
-            last_entries = report.emitted;
-            last_dirs = report.directories;
-            last_errors = report.errors;
-            total += elapsed;
-        }
-
-        durations.sort_unstable();
-        let seconds = total.as_secs_f64().max(f64::EPSILON);
-
+        let seconds = samples.total.as_secs_f64().max(f64::EPSILON);
+        let durations = samples.durations;
         Ok(CaseResult {
             id: self.id.to_string(),
             corpus: corpus.display().to_string(),
@@ -155,12 +174,134 @@ impl Case {
             p95_us: percentile(&durations, 0.95),
             min_us: durations[0],
             max_us: durations[durations.len() - 1],
-            entries: last_entries,
-            dirs: last_dirs,
-            errors: last_errors,
-            entries_per_s: (last_entries as f64 / seconds) as u64,
+            entries: samples.entries,
+            dirs: samples.dirs,
+            errors: samples.errors,
+            // A walk case reports what one capped scan emitted; a reader case re-reads the same
+            // directory over and over, so its throughput has to count every round.
+            entries_per_s: match self.mode {
+                Mode::Walk => (samples.entries as f64 / seconds) as u64,
+                _ => (samples.entries as f64 * rounds as f64 / seconds) as u64,
+            },
         })
     }
+}
+
+struct Samples {
+    durations: Vec<u64>,
+    total: Duration,
+    entries: u64,
+    dirs: u64,
+    errors: u64,
+}
+
+fn new_samples(rounds: usize) -> Samples {
+    Samples {
+        durations: Vec::with_capacity(rounds),
+        total: Duration::ZERO,
+        entries: 0,
+        dirs: 0,
+        errors: 0,
+    }
+}
+
+fn measure_walk(corpus: &Path, rounds: usize, entry_cap: usize) -> Samples {
+    let mut policy = WalkPolicy::from_config(&Config::default());
+    policy.roots = vec![corpus.to_path_buf()];
+    policy.max_entries = entry_cap;
+    let cancel = Cancellation::new();
+
+    // Warm-up pass: page cache and any lazily built state, excluded from the statistics.
+    collect(&policy, &cancel, TIMEOUT);
+
+    let mut samples = new_samples(rounds);
+    for _ in 0..rounds {
+        let started = Instant::now();
+        let (rows, report) = collect(&policy, &cancel, TIMEOUT);
+        let elapsed = started.elapsed();
+        // Keep the rows alive so the compiler cannot elide the enumeration.
+        std::hint::black_box(rows.len());
+        samples.durations.push(elapsed.as_micros() as u64);
+        samples.total += elapsed;
+        samples.entries = report.emitted;
+        samples.dirs = report.directories;
+        samples.errors = report.errors;
+    }
+    samples
+}
+
+/// What one read of a corpus reports. `bytes` exists only so the work behind it cannot be elided.
+struct Tally {
+    entries: u64,
+    dirs: u64,
+    errors: u64,
+    bytes: u64,
+}
+
+fn measure_scan(corpus: &Path, rounds: usize, read: fn(&Path) -> Tally) -> Samples {
+    read(corpus);
+    let mut samples = new_samples(rounds);
+    for _ in 0..rounds {
+        let started = Instant::now();
+        let tally = read(corpus);
+        let elapsed = started.elapsed();
+        std::hint::black_box(tally.bytes);
+        samples.durations.push(elapsed.as_micros() as u64);
+        samples.total += elapsed;
+        samples.entries = tally.entries;
+        samples.dirs = tally.dirs;
+        samples.errors = tally.errors;
+    }
+    samples
+}
+
+fn read_flat_win32(dir: &Path) -> Tally {
+    let cancel = Cancellation::new();
+    let mut tally = Tally {
+        entries: 0,
+        dirs: 1,
+        errors: 0,
+        bytes: 0,
+    };
+    if list_one_level(dir, &cancel, &mut |item| {
+        tally.entries += 1;
+        tally.bytes += item.size;
+        true
+    })
+    .is_err()
+    {
+        tally.errors += 1;
+    }
+    tally
+}
+
+/// The same shape through `std::fs`. `DirEntry::metadata` is not the second query it looks like:
+/// std fills it from the enumeration record it already holds, which is why this reader came out
+/// within a few percent of the Win32 one instead of at twice its cost.
+fn read_flat_std(dir: &Path) -> Tally {
+    let mut tally = Tally {
+        entries: 0,
+        dirs: 1,
+        errors: 0,
+        bytes: 0,
+    };
+    match fs::read_dir(dir) {
+        Ok(items) => {
+            for item in items {
+                let Ok(item) = item else {
+                    tally.errors += 1;
+                    continue;
+                };
+                tally.entries += 1;
+                match item.metadata() {
+                    Ok(metadata) => tally.bytes += metadata.len(),
+                    Err(_) => tally.errors += 1,
+                }
+            }
+        }
+        Err(_) => tally.errors += 1,
+    }
+    tally
 }
 
 fn percentile(sorted: &[u64], fraction: f64) -> u64 {
@@ -174,9 +315,24 @@ fn percentile(sorted: &[u64], fraction: f64) -> u64 {
 impl CaseResult {
     pub fn print_line(&self) {
         println!(
-            "{:<24} p50 {:>8}us  p95 {:>9}us  min {:>8}us  entries {:>6}  dirs {:>5}  errors {:>3}",
-            self.id, self.p50_us, self.p95_us, self.min_us, self.entries, self.dirs, self.errors
+            "{:<24} p50 {:>8}us  p95 {:>9}us  min {:>8}us  entries {:>6}  dirs {:>5}  errors {:>3}  {:>5}ns/entry",
+            self.id,
+            self.p50_us,
+            self.p95_us,
+            self.min_us,
+            self.entries,
+            self.dirs,
+            self.errors,
+            self.floor_ns_per_entry()
         );
+    }
+
+    /// The floor divided by the entries seen — the unit the plan gates enumeration on.
+    pub fn floor_ns_per_entry(&self) -> u64 {
+        if self.entries == 0 {
+            return 0;
+        }
+        self.min_us * 1000 / self.entries
     }
 }
 
@@ -201,6 +357,7 @@ mod tests {
             default_corpus: "Q:/no/such/directory/anywhere",
             iterations: 2,
             entry_cap: 10,
+            mode: Mode::Walk,
             note: "test",
         };
         let missing = case.measure(Some(2)).unwrap_err();
@@ -215,11 +372,57 @@ mod tests {
             default_corpus: env!("CARGO_MANIFEST_DIR"),
             iterations: 2,
             entry_cap: 500,
+            mode: Mode::Walk,
             note: "this crate's own directory",
         };
         let result = case.measure(Some(2)).expect("corpus exists");
         assert_eq!(result.samples, 2);
         assert!(result.entries > 0);
         assert!(result.p50_us > 0);
+    }
+
+    /// The two readers must see the same directory the same way, or the case that compares them
+    /// measures nothing. Only `attrs` may differ, and that field is not part of a tally.
+    #[test]
+    fn both_readers_count_the_same_directory_the_same_way() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("top.txt"), "123").unwrap();
+        std::fs::write(root.path().join("photo.png"), "4567").unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+
+        let win32 = read_flat_win32(root.path());
+        let std = read_flat_std(root.path());
+
+        assert_eq!(win32.entries, 3, "two files and one subdirectory");
+        assert_eq!(win32.errors, 0);
+        assert_eq!(std.entries, win32.entries);
+        assert_eq!(std.bytes, win32.bytes);
+    }
+
+    #[test]
+    fn floor_per_entry_divides_the_fastest_observation() {
+        let result = CaseResult {
+            id: "x".into(),
+            corpus: "c".into(),
+            note: "n".into(),
+            samples: 1,
+            p50_us: 300,
+            p95_us: 400,
+            min_us: 240,
+            max_us: 400,
+            entries: 120,
+            dirs: 1,
+            errors: 0,
+            entries_per_s: 0,
+        };
+        assert_eq!(result.floor_ns_per_entry(), 2_000);
+        assert_eq!(
+            CaseResult {
+                entries: 0,
+                ..result
+            }
+            .floor_ns_per_entry(),
+            0
+        );
     }
 }

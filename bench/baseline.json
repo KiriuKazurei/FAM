@@ -1,5 +1,5 @@
 {
-  "recorded_on": "windows x86_64, warm cache, fam-bench 0.1.0",
+  "recorded_on": "windows x86_64, warm cache, fam-bench 0.1.0 | read_flat_* added at increment 2 (same machine, same session)",
   "cases": {
     "open_flat_dir": {
       "id": "open_flat_dir",
@@ -56,6 +56,34 @@
       "dirs": 4730,
       "errors": 0,
       "entries_per_s": 19861
+    },
+    "read_flat_std": {
+      "id": "read_flat_std",
+      "corpus": "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
+      "note": "the same directory via std::fs, the reader the walk used until increment 2",
+      "samples": 4000,
+      "p50_us": 293,
+      "p95_us": 428,
+      "min_us": 256,
+      "max_us": 878,
+      "entries": 188,
+      "dirs": 1,
+      "errors": 0,
+      "entries_per_s": 595963
+    },
+    "read_flat_win32": {
+      "id": "read_flat_win32",
+      "corpus": "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
+      "note": "one warm directory via FindFirstFileExW; floor over entries is per-entry cost",
+      "samples": 4000,
+      "p50_us": 301,
+      "p95_us": 451,
+      "min_us": 247,
+      "max_us": 1156,
+      "entries": 188,
+      "dirs": 1,
+      "errors": 0,
+      "entries_per_s": 574146
     }
   }
 }

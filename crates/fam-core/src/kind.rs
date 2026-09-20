@@ -133,6 +133,35 @@ pub fn classify(path: &Path, is_directory: bool) -> Kind {
     }
 }
 
+const MAX_EXTENSION_UNITS: usize = 16;
+
+/// [`classify`] for a name the caller already holds as UTF-16 units, which is the shape the Win32
+/// enumeration hands over. Allocation-free on purpose: this runs once per directory entry, and an
+/// extension longer than [`MAX_EXTENSION_UNITS`] or containing anything outside ASCII cannot be in
+/// the table anyway, so neither case needs a `String`.
+pub fn classify_units(name: &[u16], is_directory: bool) -> Kind {
+    if is_directory {
+        return Kind::Directory;
+    }
+    let Some(dot) = name.iter().rposition(|unit| *unit == b'.' as u16) else {
+        return Kind::Other;
+    };
+    let extension = &name[dot + 1..];
+    if extension.is_empty() || extension.len() > MAX_EXTENSION_UNITS {
+        return Kind::Other;
+    }
+    let mut buffer = [0u8; MAX_EXTENSION_UNITS];
+    for (slot, unit) in buffer.iter_mut().zip(extension) {
+        if *unit >= 0x80 {
+            // The table is ASCII-only, so a non-ASCII extension can never match.
+            return Kind::Other;
+        }
+        *slot = (*unit as u8).to_ascii_lowercase();
+    }
+    let text = std::str::from_utf8(&buffer[..extension.len()]).unwrap_or("");
+    kind_of_extension(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +194,36 @@ mod tests {
             assert_eq!(Kind::parse(kind.as_str()), Some(kind));
         }
         assert_eq!(Kind::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn units_and_path_forms_always_agree() {
+        let names = [
+            "photo.PNG",
+            "movie.mkv",
+            "song.flac",
+            "book.epub",
+            "tool.rs",
+            "run.exe",
+            "archive.tar.gz",
+            "Makefile",
+            ".gitignore",
+            "note.超",
+            "a.abcdefghijklmnop",
+            "a.abcdefghijklmnopq",
+            "trailing.",
+            "weird..TXT",
+        ];
+        for name in names {
+            let path = Path::new("D:/x").join(name);
+            let units = crate::raw_name_units(&path);
+            assert_eq!(
+                classify_units(&units, false),
+                classify(&path, false),
+                "{name}"
+            );
+        }
+        assert_eq!(classify_units(&[], true), Kind::Directory);
     }
 
     #[test]

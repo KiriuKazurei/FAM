@@ -19,9 +19,9 @@ pub use config::{
     DEFAULT_SCAN_TIMEOUT_SECS, DEFAULT_UI_BATCH_MS, DEFAULT_WALK_THREADS, MEMORY_LIMIT_MB_MAX,
     MEMORY_LIMIT_MB_MIN,
 };
-pub use kind::{classify, extension_of, kind_of_extension, Kind, KIND_ORDER};
+pub use kind::{classify, classify_units, extension_of, kind_of_extension, Kind, KIND_ORDER};
 pub use list::{DirId, Item, ItemFlags, ListRequest};
-pub use pathkey::{is_within, path_key, raw_name_units, PathKey};
+pub use pathkey::{is_within, path_buf_from_units, path_key, raw_name_units, PathKey};
 pub use search::{SearchError, SearchHit, SearchOutcome, SearchProvider, SearchRequest};
 pub use sort::{Order, SortKey};
 pub use time::to_epoch_ms;

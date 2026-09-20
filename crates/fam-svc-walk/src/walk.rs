@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fam_core::{classify, path_key, to_epoch_ms, Cancellation, Config, Kind};
+use fam_core::{path_buf_from_units, path_key, Cancellation, Config, Kind};
+use fam_svc_enumerate::{list_one_level, RawItem};
 
 pub const DEFAULT_MAX_ENTRIES: usize = 200_000;
 pub const DEFAULT_THREADS: usize = 10;
@@ -109,15 +110,15 @@ impl Entry {
             .unwrap_or_else(|| self.path.display().to_string())
     }
 
-    fn build(path: PathBuf, is_directory: bool, metadata: Option<fs::Metadata>) -> Self {
+    /// Assembled from an enumeration record whose name the caller has already joined onto its
+    /// parent. Everything here except that join is already known, which is the point of reading
+    /// through `fam-svc-enumerate` instead of `std::fs`.
+    fn from_raw(path: PathBuf, raw: &RawItem<'_>) -> Self {
         Self {
-            kind: classify(&path, is_directory),
-            size: metadata.as_ref().map(|meta| meta.len()).unwrap_or(0),
-            modified_ms: metadata
-                .as_ref()
-                .and_then(|meta| meta.modified().ok())
-                .and_then(to_epoch_ms),
             path,
+            kind: raw.kind,
+            size: raw.size,
+            modified_ms: (raw.mtime_ms != i64::MIN).then_some(raw.mtime_ms),
         }
     }
 }
@@ -350,13 +351,15 @@ fn worker_loop(ctx: Ctx) {
             thread::sleep(QUEUE_POLL);
             continue;
         };
-        match fs::read_dir(&dir) {
-            Ok(entries) => {
-                for item in entries {
-                    if ctx.shared.stop.load(Ordering::Relaxed) || ctx.cancel.is_stopped() {
-                        break;
-                    }
-                    ctx.handle_item(item);
+        // One `FindFirstFileExW`/`FindNextFileW` chain per directory. The record it fills already
+        // carries size, timestamps and attributes, so no second query is issued for a child —
+        // that pairing is what used to put a large listing at ~2.9us per entry.
+        match list_one_level(&dir, &ctx.cancel, &mut |raw| ctx.handle_raw(&dir, raw)) {
+            Ok(report) => {
+                if report.errors > 0 {
+                    ctx.shared
+                        .errors
+                        .fetch_add(report.errors, Ordering::Relaxed);
                 }
             }
             Err(_) => {
@@ -369,22 +372,12 @@ fn worker_loop(ctx: Ctx) {
 }
 
 impl Ctx {
-    fn handle_item(&self, item: Result<fs::DirEntry, std::io::Error>) {
-        let Ok(item) = item else {
-            self.shared.errors.fetch_add(1, Ordering::Relaxed);
-            return;
-        };
-        let path = item.path();
-        let file_type = match item.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => {
-                self.shared.errors.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        };
-        // Symlinked directories are reported but never descended into, which keeps cycles and
-        // reparse-point storms off the walk (`follow_symlinks` is intentionally not a knob yet).
-        let is_directory = file_type.is_dir();
+    fn handle_raw(&self, parent: &Path, raw: RawItem<'_>) -> bool {
+        if self.shared.stop.load(Ordering::Relaxed) || self.cancel.is_stopped() {
+            return false;
+        }
+        let path = parent.join(path_buf_from_units(raw.name));
+        let is_directory = raw.flags.is_directory();
         // Both predicates allocate — an uppercase fold and a path key — so they are skipped
         // entirely when nothing is configured to exclude.
         if is_directory
@@ -392,23 +385,29 @@ impl Ctx {
             && self.policy.name_excluded(&path)
         {
             self.shared.skipped.fetch_add(1, Ordering::Relaxed);
-            return;
+            return true;
         }
         if !self.policy.excluded_prefixes.is_empty()
             && self.policy.prefix_excluded(&path_key(&path))
         {
             self.shared.skipped.fetch_add(1, Ordering::Relaxed);
-            return;
+            return true;
         }
+        // A reparse point — junction or directory symlink — is reported but never descended into.
+        // The walk keeps no visited set, so following one can loop forever, and the enumeration
+        // record already carries the attribute that says so.
         if is_directory {
-            self.shared.directories.fetch_add(1, Ordering::Relaxed);
-            self.shared.push_dir(path.clone());
+            if !raw.flags.is_reparse() {
+                self.shared.directories.fetch_add(1, Ordering::Relaxed);
+                self.shared.push_dir(path.clone());
+            }
             if !self.policy.include_directories {
-                return;
+                return true;
             }
         }
-        let entry = Entry::build(path, is_directory, item.metadata().ok());
+        let entry = Entry::from_raw(path, &raw);
         let _ = self.sender.send(entry);
+        true
     }
 
     /// Recruit up to one worker per `GROW_QUEUE` queued directories, so a wide directory reaches its
@@ -456,11 +455,6 @@ fn is_walkable_dir(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extensionless_files_classify_as_other() {
-        assert_eq!(classify(Path::new("D:/LICENSE"), false), Kind::Other);
-    }
 
     #[test]
     fn policy_exclusions_match_names_and_prefixes_across_separators() {

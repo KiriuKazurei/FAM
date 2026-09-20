@@ -28,6 +28,12 @@ struct Cli {
     /// Baseline file used by `check` and written by `run --write`.
     #[arg(long, global = true, default_value = "bench/baseline.json")]
     baseline: PathBuf,
+
+    /// Run only the cases whose id contains this text. Comparing two cases against each other is
+    /// otherwise impossible to trust: they always run in list order, and whatever runs second sees
+    /// a warmer file-name cache.
+    #[arg(long, global = true)]
+    only: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -61,7 +67,7 @@ fn main() -> Result<()> {
             passes,
             write,
         } => {
-            let results = run_all(iterations, passes)?;
+            let results = run_all(iterations, passes, cli.only.as_deref())?;
             if write {
                 write_baseline(&cli.baseline, &results)?;
                 println!("\nbaseline written to {}", cli.baseline.display());
@@ -69,7 +75,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Check { iterations, passes } => {
-            let results = run_all(iterations, passes)?;
+            let results = run_all(iterations, passes, cli.only.as_deref())?;
             check_against_baseline(&cli.baseline, &results)
         }
     }
@@ -77,9 +83,16 @@ fn main() -> Result<()> {
 
 const DEFAULT_PASSES: usize = 3;
 
-fn run_all(iterations: Option<usize>, passes: usize) -> Result<BTreeMap<String, CaseResult>> {
+fn run_all(
+    iterations: Option<usize>,
+    passes: usize,
+    only: Option<&str>,
+) -> Result<BTreeMap<String, CaseResult>> {
     let mut results = BTreeMap::new();
     for case in Case::all() {
+        if only.is_some_and(|filter| !case.id().contains(filter)) {
+            continue;
+        }
         match case.measure_best_of(iterations, passes) {
             Ok(result) => {
                 result.print_line();
@@ -91,7 +104,9 @@ fn run_all(iterations: Option<usize>, passes: usize) -> Result<BTreeMap<String, 
         }
     }
     if results.is_empty() {
-        anyhow::bail!("no corpora were available; set FAM_BENCH_FLAT / _MIXED / _TREE / _VOLUME");
+        anyhow::bail!(
+            "no cases ran; check --only, or set FAM_BENCH_FLAT / _MIXED / _TREE / _VOLUME to a              corpus that exists"
+        );
     }
     Ok(results)
 }

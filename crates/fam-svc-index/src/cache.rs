@@ -61,7 +61,7 @@ impl DirIndex {
                 attrs: raw.attrs,
                 dir: 0,
             };
-            table.push(&raw.name, item);
+            table.push(raw.name, item);
             true
         })?;
         // A half-read directory must never reach the cache: the next open would serve a listing

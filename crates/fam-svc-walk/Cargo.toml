@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 fam-core.workspace = true
+fam-svc-enumerate.workspace = true
 log.workspace = true
 serde.workspace = true
 thiserror.workspace = true

@@ -27,3 +27,4 @@
 | [pathkey-identity-fold.md](pathkey-identity-fold.md) | 1 | 旧路径键会把两个不同文件折成同一个身份，改为 UTF-16 键 + 仅折叠 ASCII，并记录字符串形态贵了 3.5 倍 |
 | [partial-directory-cache.md](partial-directory-cache.md) | 1 | 被取消的目录读取会以完整表的身份长期留在缓存里，改为枚举层分别报告"读完/取消/截断"并由缓存层执行门槛 |
 | [test-name-leak.md](test-name-leak.md) | 1 | 测试辅助函数签名过窄，逼出一处 `Box::leak`，放宽签名后泄漏与传染一起消失 |
+| [per-entry-syscall-premise.md](per-entry-syscall-premise.md) | 2 | "每条目录项两次 syscall"被实测否掉（两种读者同为 1.3µs/条目），换 Win32 枚举记录买到的其实是 attrs、长路径控制权与单层原语 |

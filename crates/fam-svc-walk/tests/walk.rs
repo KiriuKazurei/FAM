@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fam_svc_walk::{
-    collect, walk, Cancellation, Kind, SearchBackend, SearchError, SearchQuery, SearchService,
-    WalkBackend, WalkPolicy,
+    collect, to_epoch_ms, walk, Cancellation, Kind, SearchBackend, SearchError, SearchQuery,
+    SearchService, WalkBackend, WalkPolicy,
 };
 
 fn write_file(path: &Path, body: &str) {
@@ -137,7 +137,7 @@ fn kinds_are_assigned_case_insensitively() {
 }
 
 #[test]
-fn sizes_and_timestamps_come_from_metadata() {
+fn sizes_and_timestamps_come_from_the_enumeration_record() {
     let dir = tempfile::tempdir().unwrap();
     write_file(&dir.path().join("payload.txt"), "1234567890");
 
@@ -150,9 +150,15 @@ fn sizes_and_timestamps_come_from_metadata() {
         .iter()
         .find(|entry| entry.file_name() == "payload.txt")
         .unwrap();
+    // The reader no longer stats each child, so compare against what a stat says: the
+    // enumeration record has to carry the identical numbers, not merely plausible ones.
+    let on_disk = fs::metadata(dir.path().join("payload.txt")).unwrap();
 
-    assert_eq!(entry.size, 10);
-    assert!(entry.modified_ms.unwrap() > 0);
+    assert_eq!(entry.size, on_disk.len());
+    assert_eq!(
+        entry.modified_ms,
+        Some(to_epoch_ms(on_disk.modified().unwrap()).unwrap())
+    );
 }
 
 #[test]
@@ -337,4 +343,54 @@ fn a_search_without_any_scope_says_so() {
 
     assert_eq!(scoped.entries.len(), 1);
     assert_eq!(scoped.entries[0].file_name(), "scoped.txt");
+}
+
+#[test]
+fn a_junction_is_listed_but_never_descended() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target");
+    fs::create_dir(&target).unwrap();
+    write_file(&target.join("inside.txt"), "x");
+    let link = root.path().join("link");
+    let made = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "New-Item",
+            "-ItemType",
+            "Junction",
+            "-Path",
+            &link.to_string_lossy(),
+            "-Target",
+            &target.to_string_lossy(),
+        ])
+        .output();
+    assert!(
+        made.map(|output| output.status.success()).unwrap_or(false),
+        "this machine will not create a junction, so the test cannot run"
+    );
+
+    let policy = WalkPolicy {
+        roots: vec![root.path().to_path_buf()],
+        threads: 2,
+        ..Default::default()
+    };
+    let (entries, report) = collect(&policy, &Cancellation::new(), Duration::from_secs(30));
+    let names: BTreeSet<String> = entries.iter().map(|entry| entry.file_name()).collect();
+
+    assert!(
+        names.contains("link"),
+        "the junction itself must be visible"
+    );
+    let below = entries
+        .iter()
+        .filter(|entry| entry.path != link && entry.path.starts_with(&link))
+        .map(|entry| entry.path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        below.is_empty(),
+        "descending into a reparse point is how a walk loops forever: {below:?}"
+    );
+    assert_eq!(report.directories, 1, "only the real directory is entered");
+    assert!(!report.stopped_early());
 }
