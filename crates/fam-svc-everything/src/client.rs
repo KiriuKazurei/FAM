@@ -15,15 +15,27 @@ use std::mem::{size_of, transmute_copy};
 use std::path::Path;
 
 // `FreeLibrary` and `GetLastError` live in `Foundation` in windows-sys 0.61; the loader calls do not.
-use windows_sys::Win32::Foundation::{FreeLibrary, GetLastError, HMODULE};
+use windows_sys::Win32::Foundation::{FreeLibrary, GetLastError, FILETIME, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
 };
 
+use crate::search::RawRow;
 use crate::state::{judge, EverythingState, Probe};
 
 /// The file name Everything ships its client under, resolved next to the application.
 pub const CLIENT_DLL: &str = "Everything64.dll";
+
+/// `EVERYTHING_SORT_NAME_ASCENDING`. Set on every request rather than left alone: the client holds
+/// one process-global cursor, so the last query's sort would otherwise steer this one.
+const SORT_NAME_ASCENDING: u32 = 1;
+
+/// The `EVERYTHING_REQUEST_*` bits for the four fields a hit needs. `path` is load-bearing - without
+/// it a row's directory comes back empty and the row cannot be opened.
+const REQUEST_FIELDS: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0010 | 0x0000_0040;
+
+/// `TRUE`, as the waiting form of `Everything_QueryW` expects.
+const WAIT: i32 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -31,6 +43,8 @@ pub enum ClientError {
     LoadFailed { dll: String, code: u32 },
     #[error("`{symbol}` is not exported by `{dll}`")]
     MissingSymbol { symbol: &'static str, dll: String },
+    #[error("the search service refused the query (Everything error {code})")]
+    QueryFailed { code: u32, dll: String },
 }
 
 /// The bound client.
@@ -44,9 +58,21 @@ pub enum ClientError {
 /// `Sync`.
 pub struct Api {
     library: HMODULE,
+    dll: String,
     set_search: unsafe extern "system" fn(*const u16),
+    set_max: unsafe extern "system" fn(u32),
+    set_offset: unsafe extern "system" fn(u32),
+    set_sort: unsafe extern "system" fn(u32),
+    set_request_flags: unsafe extern "system" fn(u32),
     query: unsafe extern "system" fn(i32) -> i32,
     last_error: unsafe extern "system" fn() -> u32,
+    num_results: unsafe extern "system" fn() -> u32,
+    is_folder_result: unsafe extern "system" fn(u32) -> i32,
+    result_file_name: unsafe extern "system" fn(u32) -> *const u16,
+    result_path: unsafe extern "system" fn(u32) -> *const u16,
+    /// `LARGE_INTEGER` is eight signed bytes, which is what a `*mut i64` points at.
+    result_size: unsafe extern "system" fn(u32, *mut i64) -> i32,
+    result_date_modified: unsafe extern "system" fn(u32, *mut FILETIME) -> i32,
     is_db_loaded: unsafe extern "system" fn() -> i32,
     target_machine: unsafe extern "system" fn() -> u32,
     clean_up: unsafe extern "system" fn(),
@@ -55,8 +81,32 @@ pub struct Api {
 // See the type's safety note: the owner-thread discipline is what makes this sound.
 unsafe impl Send for Api {}
 
+fn terminate(units: &[u16]) -> Vec<u16> {
+    units.iter().copied().chain(std::iter::once(0)).collect()
+}
+
 fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
+    terminate(&text.encode_utf16().collect::<Vec<u16>>())
+}
+
+/// Copies a NUL-terminated wide string the client owns into units of our own.
+///
+/// The pointer is only good until the next query, which is why the row conversion copies rather than
+/// passing slices around. The length comes from scanning for the terminator - the API gives no other
+/// bound, and a DLL we chose to load is already trusted further than this.
+unsafe fn wide_string(pointer: *const u16) -> Vec<u16> {
+    if pointer.is_null() {
+        return Vec::new();
+    }
+    let mut units = Vec::new();
+    for offset in 0.. {
+        let unit = unsafe { *pointer.add(offset) };
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+    }
+    units
 }
 
 /// Resolves one exported function by name.
@@ -122,9 +172,20 @@ impl Api {
     unsafe fn resolve_all(library: HMODULE, dll: &str) -> Result<Self, ClientError> {
         Ok(Self {
             library,
+            dll: dll.to_string(),
             set_search: Self::need(library, "Everything_SetSearchW", dll)?,
+            set_max: Self::need(library, "Everything_SetMax", dll)?,
+            set_offset: Self::need(library, "Everything_SetOffset", dll)?,
+            set_sort: Self::need(library, "Everything_SetSort", dll)?,
+            set_request_flags: Self::need(library, "Everything_SetRequestFlags", dll)?,
             query: Self::need(library, "Everything_QueryW", dll)?,
             last_error: Self::need(library, "Everything_GetLastError", dll)?,
+            num_results: Self::need(library, "Everything_GetNumResults", dll)?,
+            is_folder_result: Self::need(library, "Everything_IsFolderResult", dll)?,
+            result_file_name: Self::need(library, "Everything_GetResultFileNameW", dll)?,
+            result_path: Self::need(library, "Everything_GetResultPathW", dll)?,
+            result_size: Self::need(library, "Everything_GetResultSize", dll)?,
+            result_date_modified: Self::need(library, "Everything_GetResultDateModified", dll)?,
             is_db_loaded: Self::need(library, "Everything_IsDBLoaded", dll)?,
             target_machine: Self::need(library, "Everything_GetTargetMachine", dll)?,
             // Spelled `CleanUp`, not `Cleanup`: that is what the header and the DLL export.
@@ -169,6 +230,60 @@ impl Api {
         judge(&probe)
     }
 
+    /// One bounded page of the result list: `[offset, offset + want)` of `query`, converted to raw
+    /// rows. This is the whole of this crate's contact with the service; everything that decides
+    /// what a search *means* lives in [`crate::search`].
+    ///
+    /// # Safety
+    ///
+    /// The client holds one result list for the whole process, so two calls overlapping would read
+    /// each other's rows. The provider's mutex is what keeps them exclusive; this is `pub(crate)` so
+    /// that only it can reach the cursor.
+    pub(crate) unsafe fn page(
+        &self,
+        query: &[u16],
+        offset: u32,
+        want: u32,
+    ) -> Result<Vec<RawRow>, ClientError> {
+        let search = terminate(query);
+        (self.set_search)(search.as_ptr());
+        (self.set_offset)(offset);
+        (self.set_max)(want);
+        (self.set_sort)(SORT_NAME_ASCENDING);
+        (self.set_request_flags)(REQUEST_FIELDS);
+        if (self.query)(WAIT) == 0 {
+            return Err(ClientError::QueryFailed {
+                code: (self.last_error)(),
+                dll: self.dll.clone(),
+            });
+        }
+        // The service should not answer with more rows than it was asked for, and a corrupt count
+        // must not become an allocation of that size. `want` is the bound the caller chose.
+        let count = (self.num_results)().min(want);
+        let mut rows = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let mut size = 0i64;
+            let mut time = FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            };
+            rows.push(RawRow {
+                name: wide_string((self.result_file_name)(index)),
+                path: wide_string((self.result_path)(index)),
+                folder: (self.is_folder_result)(index) != 0,
+                size: if (self.result_size)(index, &mut size) != 0 {
+                    size.max(0) as u64
+                } else {
+                    0
+                },
+                modified_100ns: ((self.result_date_modified)(index, &mut time) != 0).then(|| {
+                    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+                }),
+            });
+        }
+        Ok(rows)
+    }
+
     /// Tears down the client's process-global state (its message window and reply thread) and
     /// unmaps the DLL. Call once, from the owner thread, before it stops.
     pub fn shutdown(self) {
@@ -182,20 +297,20 @@ impl Api {
     }
 }
 
+/// The client library vendored with the SDK. It is the real artifact - the same file that ships
+/// next to the core - so binding it exercises the same names production resolves, on a machine that
+/// has no Everything installed to talk to.
+#[cfg(test)]
+pub(crate) fn vendored() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../third_party/everything-sdk/dll/Everything64.dll")
+        .canonicalize()
+        .expect("the vendored client DLL is part of the repository")
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-
-    /// The client library vendored with the SDK. It is the real artifact - the same file that ships
-    /// next to the core - so binding it exercises the same names production resolves.
-    fn vendored() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../third_party/everything-sdk/dll/Everything64.dll")
-            .canonicalize()
-            .expect("the vendored client DLL is part of the repository")
-    }
 
     #[test]
     fn every_symbol_the_client_calls_resolves_in_the_shipped_dll() {
@@ -268,6 +383,9 @@ mod tests {
             ClientError::LoadFailed { .. } => {}
             ClientError::MissingSymbol { symbol, .. } => {
                 assert!(symbol.starts_with("Everything_"), "{symbol}");
+            }
+            ClientError::QueryFailed { .. } => {
+                panic!("nothing was queried: a bind failure must come first")
             }
         }
     }

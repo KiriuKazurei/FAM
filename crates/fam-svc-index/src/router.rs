@@ -75,7 +75,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("needle-report.txt"), "x").unwrap();
         let router = SearchRouter::new(vec![
-            Box::new(EverythingProvider),
+            Box::new(EverythingProvider::without_client()),
             Box::new(WalkProvider::new(
                 WalkPolicy::default().rooted_at(dir.path()),
                 std::time::Duration::from_secs(30),
@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn with_no_provider_available_the_error_is_explicit() {
-        let router = SearchRouter::new(vec![Box::new(EverythingProvider)]);
+        let router = SearchRouter::new(vec![Box::new(EverythingProvider::without_client())]);
         let error = router
             .search(
                 &fam_core::SearchRequest::new("x"),
