@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use fam_core::Config;
-use fam_sched::{spawn, Batcher, FileChange, Handle, SchedulerConfig};
+use fam_sched::{spawn, Batcher, FileChange, Handle, SchedulerConfig, Signal};
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
 use fam_svc_walk::{Cancellation, Kind, SearchQuery, SearchService, WalkPolicy};
 use fam_view::{row_for_path, Delta, Filter, Order, Row, SortKey, ViewModel};
@@ -406,9 +406,13 @@ impl FamCore {
         }
         let mut batcher = Batcher::new(std::time::Duration::ZERO, usize::MAX);
         for change in queued {
-            batcher.absorb(change);
+            batcher.absorb(Signal::Row(change));
         }
-        let batch = fam_sched::Batch::new(batcher.drain(), self.losses.swap(0, Ordering::Relaxed));
+        let batch = fam_sched::Batch::new(
+            batcher.drain_parts().0,
+            Vec::new(),
+            self.losses.swap(0, Ordering::Relaxed),
+        );
 
         let mut views = self.views();
         let view = views
@@ -432,14 +436,19 @@ impl FamCore {
         let pending = Arc::clone(&self.pending);
         let losses = Arc::clone(&self.losses);
         let sink = move |batch: fam_sched::Batch| {
-            losses.fetch_add(batch.dropped, Ordering::Relaxed);
+            // v1 has no per-directory "re-read this" channel, so a watch the kernel dropped is
+            // reported the way a full queue already is: as loss, which is what tells the shell to
+            // re-poll the view.
+            losses.fetch_add(
+                batch.dropped + batch.rescans.len() as u64,
+                Ordering::Relaxed,
+            );
             if let Ok(mut queue) = pending.lock() {
                 queue.extend(batch.changes);
             }
         };
         let handle = spawn(
-            &[dir.to_path_buf()],
-            SchedulerConfig::from_config(&self.config),
+            SchedulerConfig::watching(&[dir.to_path_buf()], self.config.clone()),
             Box::new(sink),
         )
         .map_err(|error| error.to_string())?;

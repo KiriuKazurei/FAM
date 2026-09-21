@@ -6,8 +6,14 @@
 
 mod batch;
 mod pipeline;
+mod reconcile;
 
-pub use batch::{merge, Batch, Batcher, Change, FileChange};
-pub use pipeline::{
-    spawn, Handle, SchedError, SchedulerConfig, Sink, DEFAULT_MAX_BATCH, DEFAULT_QUEUE_CAPACITY,
+pub use batch::{
+    merge, Batch, Batcher, Change, DirBatches, DirDelta, FileChange, RescanWhy, RowDelta, Signal,
+    Target,
 };
+pub use pipeline::{
+    spawn, Handle, Mode, SchedError, SchedulerConfig, Sink, DEFAULT_MAX_BATCH,
+    DEFAULT_QUEUE_CAPACITY, RECONCILE_INTERVAL, SWEEP_WINDOW,
+};
+pub use reconcile::{write_time, WatchSet};

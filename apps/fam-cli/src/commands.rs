@@ -268,8 +268,7 @@ pub fn watch(config: &Config, dirs: &[PathBuf], seconds: u64) -> Result<()> {
     }
     let (tx, rx) = mpsc::channel::<Batch>();
     let handle = spawn(
-        &roots,
-        SchedulerConfig::from_config(config),
+        SchedulerConfig::watching(&roots, config.clone()),
         Box::new(move |batch: Batch| {
             let _ = tx.send(batch);
         }),
@@ -286,20 +285,27 @@ pub fn watch(config: &Config, dirs: &[PathBuf], seconds: u64) -> Result<()> {
     let deadline = started + Duration::from_secs(seconds);
     let mut batches = 0usize;
     let mut changes = 0usize;
+    let mut rescans = 0usize;
     while Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(batch) => {
                 batches += 1;
-                changes += batch.len();
+                changes += batch.changes.len();
                 println!(
                     "t+{:>5}ms  batch #{}  {} change(s)  dropped={}",
                     started.elapsed().as_millis(),
                     batches,
-                    batch.len(),
+                    batch.changes.len(),
                     batch.dropped
                 );
                 for change in &batch.changes {
                     println!("  {:<8} {}", change.change, change.path.display());
+                }
+                // A rescan line is the interesting one: it says the directory's coverage is gone,
+                // so patching rows would have been wrong and the whole table gets re-read.
+                for (dir, why) in &batch.rescans {
+                    rescans += 1;
+                    println!("  {:<8} {} ({why:?})", "rescan", dir.to_lossy_string());
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -307,7 +313,9 @@ pub fn watch(config: &Config, dirs: &[PathBuf], seconds: u64) -> Result<()> {
         }
     }
     let dropped = handle.shutdown();
-    println!("stopped: {batches} batch(es), {changes} change(s), {dropped} dropped event(s)");
+    println!(
+        "stopped: {batches} batch(es), {changes} change(s), {rescans} rescan(s), {dropped} dropped event(s)"
+    );
     Ok(())
 }
 

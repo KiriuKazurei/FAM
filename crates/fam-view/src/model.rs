@@ -367,7 +367,7 @@ mod tests {
     }
 
     fn batch(changes: Vec<FileChange>) -> Batch {
-        Batch::new(changes, 0)
+        Batch::new(changes, Vec::new(), 0)
     }
 
     #[test]
