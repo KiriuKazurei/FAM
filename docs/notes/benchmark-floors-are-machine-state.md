@@ -1,7 +1,7 @@
 # 基准地板是机器状态：三条数字已经不可复现，记录它们的提交自己也测不出来
 
 - 增量：5b（下）
-- 提交：本次 `chore(bench)` 重录 `bench/baseline.json`
+- 提交：`531593c`（重录 baseline），以及本次补记的两处工具修正（`measure_best_of` 选批、`--write` 合并）
 - 涉及：`crates/fam-bench/src/main.rs`、`crates/fam-bench/src/measure.rs`、`bench/baseline.json`
 
 ## 1. 描述问题
@@ -69,29 +69,43 @@ format!("{} {}, warm cache, fam-bench {} | provenance: docs/notes/", ...)
 
 3. 本文就是那份出处：旧数字、A/B 表、以及"哪个提交记录的哪条地板"都留在上面。
 
+**同一台机器上补记（同日，加两个合成 case 时）。** 那次重录又暴露两处：
+
+- `measure_best_of` 的注释写着"keeps the pass with the lowest floor"，代码却按 **p50** 选批
+  （`if candidate.p50_us < current.p50_us`），而 `check` 只比 `min_us`。八批里 p50 最低的那批
+  未必 floor 最低，于是**记进 baseline 的地板比这台机器当时实际做到的更差**。改成按 floor 选
+  （`lowest_floor`，带一条测试）。
+- `run --write` 原先把整个 `cases` 换成"本次跑过的那几例"，于是 `--only <case> --write`
+  会**删掉其余八例的地板**。改成读回旧文件、只覆盖本次测到的那些（带两条测试，含"文件在但解析不出来
+  就报错、不拿部分结果去覆盖整份"）。这两处合起来才让"机器忙时只重录受影响的用例"成为可能。
+
 ## 4. 解决方式效果评估
 
-**正面证据。** 重录后再跑 `check`：
+**正面证据。** 当天补记之后，两条合成 case 在**静下来的机器上**重录，`check` 九例全绿：
 
 ```
 case                   floor base  floor now floor x   p50 x  verdict
-open_flat_dir               1032us      1004us   0.97x   0.98x  ok
-open_mixed_dir              2464us      2252us   0.91x   0.97x  ok
-read_flat_std                212us       213us   1.00x   0.91x  ok
-read_flat_win32              390us       395us   1.01x   1.02x  ok
-viewport_from_cache           64us        64us   1.00x   0.98x  ok
-volume_scan_capped        705786us    738373us   1.05x   1.01x  ok
-walk_large_tree           260152us    257327us   0.99x   0.98x  ok
+open_flat_dir               1032us       971us   0.94x   0.93x  ok
+open_mixed_dir              2464us      2018us   0.82x   0.81x  ok
+patch_256_of_20k           12821us     12837us   1.00x   1.00x  ok
+read_flat_std                212us       207us   0.98x   0.90x  ok
+read_flat_win32              390us       384us   0.98x   0.97x  ok
+rebuild_view_20k            8225us      8219us   1.00x   1.00x  ok
+viewport_from_cache           64us        63us   0.98x   0.98x  ok
+volume_scan_capped        586534us    596680us   1.02x   1.01x  ok
+walk_large_tree           205068us    206201us   1.01x   1.01x  ok
 all measured cases within gate
 ```
 
-七条的 floor x 落在 0.91–1.05，门槛重新在量同一台机器上的**相对**变化，
-这正是它该做的事（`measure.rs:132-134` 的注释已经说明只 gate `min_us`）。
+**"这台机器静没静"有一个可操作的判据**（这次学到的）：看**同一用例的 p95 ÷ min**。
+游戏客户端驻留 15GB 时，`rebuild_view_20k` 的 min 在 8.4–13.5ms 之间跳（同一份二进制，60% 幅度）；
+静下来之后同一用例给出 `min 8195 / p50 8335 / p95 8624`——**p95 落在 min 的 5% 以内**，
+随后 `check` 复现到 1.00x。所以：p95/min > 1.3 就是"现在录出来的地板以后守不住"，别录。
 
-**代价。** 两条地板被**收紧**：`volume_scan_capped` 1102706→705786、
-`walk_large_tree` 381928→260152。以后大遍历贵过 25% 就会红——这是更严，不是更松，
-但下一次真变慢时它可能只是机器又漂了。
-另有 `describe_machine()` 多一句字符串。
+**代价。** 地板分两轮收紧：`volume_scan_capped` 1102706→705786→**586534**、
+`walk_large_tree` 381928→260152→**205068**（第二轮是机器彻底静下来之后测的，
+比第一轮又低 17–21%）。以后大遍历贵过 25% 就会红——更严，不是更松。
+另有 `describe_machine()` 多一句字符串，`measure_best_of`/`write_baseline` 各多一个小函数与三条测试。
 
 **残留风险与局限（没解决什么）。**
 
@@ -106,3 +120,10 @@ all measured cases within gate
    同一套 A/B 手法仍然会得出"不是代码"的结论，门槛就会连续红灯——
    那时候该考虑的是把 gate 从"绝对地板"改成"与本次运行内的对照构建比"，
    那需要 `check` 能同时跑两个二进制，属于工具改造，留给增量 9（拆脚手架）之后。
+6. **第一次给两条合成 case 录地板是失败的，事后当场纠正。** 那一次录于游戏客户端驻留 15GB 的窗口，
+   两条互相矛盾：`patch_256_of_20k` 录成 16798µs（可达值 12.8ms，**松 31%**）、
+   `rebuild_view_20k` 录成 10550µs（可达值 8.2ms，**紧 28%**）——于是几分钟后的一次 `check`
+   就把 `rebuild_view_20k` 报成 1.28x FAIL。同一份代码、同一次运行里两条朝反方向错，
+   说明"整批一起录"在负载波动里会同时产出太松与太紧的地板。
+   静下来重录之后（§4）两条都稳定在 1.00x。**留此记着的规则**：录地板前先看 p95/min，
+   大于 1.3 就别录；宁可让 `--only <case> --write` 分次收紧，也不要一次录完。

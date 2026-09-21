@@ -39,4 +39,4 @@
 | [search-hit-path-was-folded.md](search-hit-path-was-folded.md) | 5 | 搜索行的路径取自折叠身份，目录会被印成小写：`SearchHit` 改带逐字整路径、`scope` 改 `PathBuf`，provider 自己折一次只用于比较 |
 | [cancelled-search-had-no-state.md](cancelled-search-had-no-state.md) | 5 | 被取消/到 limit 的搜索既不是 FAILED 也不是永远 LOADING：`settled` 与 `complete` 分开，READY + INCOMPLETE 表达"终态但只是部分" |
 | [test-helper-dangling-cstring.md](test-helper-dangling-cstring.md) | 5 | 测试辅助把 `CString` move 进 `map_or` 闭包，C 侧读到已释放内存，表现成 `unknown kind ""` 与 0 行——它不总是错，所以最难查 |
-| [benchmark-floors-are-machine-state.md](benchmark-floors-are-machine-state.md) | 5 | 三条地板不可复现（写下它们的提交今天自己也只测出 61µs vs 记录的 13µs），A/B 对照后重录 baseline，出处从会被覆盖的字段搬进 notes |
+| [benchmark-floors-are-machine-state.md](benchmark-floors-are-machine-state.md) | 5 | 三条地板不可复现（写下它们的提交今天自己也只测出 61µs vs 记录的 13µs），A/B 对照后重录；补记两处工具修正：选批按 p50 而门槛只看 min、`--write` 会删掉没跑的用例的地板 |
