@@ -36,6 +36,9 @@ typedef struct FamCore FamCore;
  *   fam_dir_fetch  header, `row_count` records of `record_size` bytes (a FamRecord), then the
  *                  UTF-16 name blob: a name starts at (40 + row_count * 32 + name_off * 2)
  *   fam_dir_poll   header, then `row_count` FamCut records, no blob
+ *   fam_search_page  fam_dir_fetch's shape exactly, except that a record's name is the entry's whole
+ *                  path - a result set spans directories, so the name has to say where as well as
+ *                  what
  *
  * `record_size` is the version mechanism for the records: fields are appended and never reordered,
  * so a shell that knows only the first N bytes of a FamRecord steps `record_size` per row and reads
@@ -45,6 +48,7 @@ typedef struct FamCore FamCore;
 #define FAM_FLAG_TRUNCATED 0x01u /* the window had more rows than this buffer got */
 #define FAM_FLAG_LOSS 0x02u      /* events were discarded; what is on screen may be missing rows */
 #define FAM_FLAG_RESYNC 0x04u    /* rows changed in a way positions cannot express: rebuild */
+#define FAM_FLAG_INCOMPLETE 0x08u /* these rows are a prefix: the scope was not fully covered */
 
 enum FamDirState {
     FAM_READY = 0,   /* rows cached and current */
@@ -122,7 +126,26 @@ void fam_dir_close(FamCore *core, uint64_t token);
 /* Which search backends exist and which are usable now, as JSON. */
 int fam_backends_json(FamCore *core, char **out, char **err);
 
-/* --- v1: JSON views, kept so an older shell still runs against this library ---------------- */
+/* --- v2: paged name search ------------------------------------------------------------------
+ *
+ * fam_search_begin queues a search and returns its token without waiting for a single row. The rows
+ * are then read the same way a directory's are: fam_search_page hands out a window with a header that
+ * says whether the set is still growing (FAM_FLAG_INCOMPLETE, state FAM_LOADING) or final.
+ * fam_search_cancel asks the core's search thread to stop - cooperatively, between directories and
+ * between entries, so the walk really ends instead of the caller merely giving up on it.
+ * `limit` 0 asks for the core's default (500 hits); larger values are clamped to 20000, because a
+ * result set is held in the core until fam_search_close.
+ */
+uint64_t fam_search_begin(FamCore *core, const char *query, const char *within, const char *kind,
+                          uint32_t limit, char **err);
+int fam_search_page(FamCore *core, uint64_t token, uint32_t first, uint32_t count,
+                    unsigned char *buffer, uint32_t buffer_len, char **err);
+int fam_search_cancel(FamCore *core, uint64_t token, char **err);
+void fam_search_close(FamCore *core, uint64_t token);
+
+/* --- v1: JSON payloads. The shell above no longer calls fam_view_* - it browses and searches
+ * through v2 - but they stay exported so a build from before the break still runs, and they go away
+ * with the rest of the v1 surface. tags, find and stats are JSON in both ABIs. */
 FamCore *fam_core_new(const char *config_path, char **err);
 void fam_core_free(FamCore *core);
 void fam_free_string(char *value);

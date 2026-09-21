@@ -37,8 +37,9 @@ private slots:
 
 private:
     void setStatus(const QString &text);
-    /* The v1 JSON view search still answers through, created on the first search. */
-    bool ensureSearchView(QString *error);
+    /* One poll of a search that is still running: its row count grows, and when it stops growing the
+     * rows are re-sorted, which is the last thing the model has to hear about. */
+    void pollSearch();
 
     std::unique_ptr<FamBridge> m_bridge;
     FamListModel *m_model = nullptr;
@@ -49,7 +50,8 @@ private:
     QTimer *m_timer = nullptr;
     QStringList m_kinds;
     quint64 m_dirToken = 0;
-    quint64 m_view = 0;
+    quint64 m_searchToken = 0;
+    bool m_searchRunning = false;
     QString m_directory;
     FamWindow m_head;
     /* Everything the shell does after this point is measured against it, so the headless log can say

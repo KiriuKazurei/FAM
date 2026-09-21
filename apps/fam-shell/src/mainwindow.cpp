@@ -103,9 +103,16 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
 }
 
 MainWindow::~MainWindow() {
-    if (m_bridge != nullptr && m_dirToken != 0) {
+    if (m_bridge == nullptr) {
+        return;
+    }
+    if (m_dirToken != 0) {
         m_bridge->closeDir(m_dirToken);
         m_dirToken = 0;
+    }
+    if (m_searchToken != 0) {
+        m_bridge->closeSearch(m_searchToken);
+        m_searchToken = 0;
     }
 }
 
@@ -123,6 +130,14 @@ bool MainWindow::openFolder(const QString &dir, QString *error) {
     }
     m_dirToken = token;
     m_directory = dir;
+    if (m_searchToken != 0) {
+        /* The model is about to be bound to the folder, so the search's rows are no longer on screen
+         * and its token has nobody left to page them. */
+        m_bridge->cancelSearch(m_searchToken);
+        m_bridge->closeSearch(m_searchToken);
+        m_searchToken = 0;
+        m_searchRunning = false;
+    }
 
     FamWindow head;
     m_bridge->dirStatus(token, &head, error);
@@ -164,65 +179,56 @@ void MainWindow::openFolderDialog() {
     }
 }
 
-bool MainWindow::ensureSearchView(QString *error) {
-    if (m_view != 0) {
-        return true;
-    }
-    return m_bridge->createView(QStringLiteral("name"), QStringLiteral("ascending"), &m_view,
-                                error);
-}
-
 void MainWindow::runSearch() {
     if (m_bridge == nullptr) {
         return;
     }
     QString error;
-    if (!ensureSearchView(&error)) {
-        setStatus(error);
-        return;
-    }
     const QString kind = m_kind->currentData().toString();
-    QJsonValue result;
-    if (!m_bridge->search(m_view, m_search->text(), QString(), kind, &result, &error)) {
+    quint64 token = 0;
+    if (!m_bridge->beginSearch(m_search->text(), QString(), kind, 0, &token, &error)) {
         setStatus(error);
         return;
     }
-    const QJsonObject object = result.toObject();
-
-    /* Search still answers in v1's JSON, where each row carries its own full path. */
-    QVector<FamViewRow> rows;
-    const QJsonArray listed = object.value("rows").toArray();
-    rows.reserve(listed.size());
-    for (const QJsonValue &value : listed) {
-        const QJsonObject row = value.toObject();
-        FamViewRow entry;
-        entry.name = row.value(QStringLiteral("name")).toString();
-        entry.path = row.value(QStringLiteral("path")).toString();
-        entry.size = row.value(QStringLiteral("size")).toVariant().toULongLong();
-        entry.modifiedMs = qint64(row.value(QStringLiteral("modified_ms")).toDouble());
-        entry.kind = quint8(qMax(0, m_kinds.indexOf(row.value(QStringLiteral("kind")).toString())));
-        entry.directory = row.value(QStringLiteral("kind")).toString()
-                          == QLatin1String("directory");
-        rows.append(entry);
+    if (m_searchToken != 0) {
+        m_bridge->closeSearch(m_searchToken);
     }
-    /* A result set has no directory to be current about, so the folder view goes away with it. */
+    m_searchToken = token;
+    m_searchRunning = true;
+    /* A result set has no directory to be current about, so the folder view goes away with it - and
+     * closing that view is what stops the core watching a directory nobody is looking at. */
     if (m_dirToken != 0) {
         m_bridge->closeDir(m_dirToken);
         m_dirToken = 0;
     }
-    m_model->loadStatic(rows);
 
-    QString text = QStringLiteral("%1 row(s) · backend %2")
-                       .arg(m_model->count())
-                       .arg(object.value(QStringLiteral("backend")).toString());
-    if (object.value(QStringLiteral("incomplete")).toBool()) {
-        text += QStringLiteral(" · incomplete: scope not fully covered");
+    FamBridge *bridge = m_bridge.get();
+    /* The same windowed fetch a directory gets, against a token whose rows are still arriving: the
+     * model asks for a viewport, and the core answers with the prefix it has. */
+    m_model->bind(token, QString(), m_kinds,
+                  [bridge, token](quint32 first, quint32 count, FamWindow *window) {
+                      return bridge->searchPage(token, first, count, window, nullptr);
+                  });
+    FamWindow head;
+    if (!m_bridge->searchStatus(token, &head, &error)) {
+        setStatus(error);
+        return;
     }
-    setStatus(text);
+    m_head = head;
+    m_model->readHead(head);
+    qInfo("search for %s queued at %lldms: state=%u total=%u", qUtf8Printable(m_search->text()),
+          m_clock.elapsed(), head.state, head.totalRows);
+    setStatus(QStringLiteral("searching for %1").arg(m_search->text()));
 }
 
 void MainWindow::pollChanges() {
-    if (m_bridge == nullptr || m_dirToken == 0) {
+    if (m_bridge == nullptr) {
+        return;
+    }
+    if (m_dirToken == 0) {
+        if (m_searchRunning) {
+            pollSearch();
+        }
         return;
     }
     QString error;
@@ -279,6 +285,36 @@ void MainWindow::pollChanges() {
         text += QStringLiteral(" · stale");
     }
     setStatus(text);
+}
+
+void MainWindow::pollSearch() {
+    QString error;
+    FamWindow polled;
+    if (!m_bridge->searchStatus(m_searchToken, &polled, &error)) {
+        m_searchRunning = false;
+        setStatus(error);
+        return;
+    }
+    m_model->readHead(polled);
+    m_head = polled;
+    if (polled.state == FAM_LOADING) {
+        setStatus(QStringLiteral("%1 row(s) for %2 · still searching")
+                      .arg(m_model->totalRows())
+                      .arg(m_search->text()));
+        return;
+    }
+    m_searchRunning = false;
+    const QString why = polled.state == FAM_FAILED
+                            ? QStringLiteral(" · the search backend could not answer")
+                            : (polled.partial() ? QStringLiteral(" · scope not fully covered")
+                                                : QString());
+    /* The headless gate reads this: rows arriving through the paged channel is the whole point of a v2
+     * search, and a screenshot alone cannot tell a settled result set from an empty list. */
+    qInfo("search settled at %lldms: %u row(s)%s", m_clock.elapsed(), polled.totalRows,
+          qUtf8Printable(why));
+    setStatus(QStringLiteral("%1 row(s) for %2%3")
+                  .arg(m_model->totalRows())
+                  .arg(m_search->text(), why));
 }
 
 void MainWindow::tagSelectedFile() {

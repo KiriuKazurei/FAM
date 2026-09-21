@@ -4,6 +4,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QDebug>
 
 #include <cstring>
 
@@ -132,6 +133,9 @@ bool FamBridge::find(const QStringList &tags, bool matchAll, const QString &with
                               &err);
     return invoke(code, out, err, result, error);
 }
+
+/* The three below are v1's JSON view, and `abi-smoke` is their only caller: the gate that proves a v1
+ * consumer still gets answers out of this library goes through the same wrapper the shell does. */
 
 bool FamBridge::createView(const QString &sort, const QString &order, quint64 *view,
                            QString *error) {
@@ -298,6 +302,37 @@ bool FamBridge::decode(const unsigned char *buffer, int written, FamWindow *wind
     return true;
 }
 
+/* Two tries: the second with four times the room, for rows whose names are longer than the allowance.
+ * A page that came back with nothing in it because the buffer was too small is not an answer the
+ * caller can use, and past the retry the truncated flag is what they were going to get anyway. */
+bool FamBridge::readRows(int (*call)(FamCore *, uint64_t, uint32_t, uint32_t, unsigned char *,
+                                     uint32_t, char **),
+                         quint64 token, quint32 first, quint32 count, FamWindow *window,
+                         QString *error) const {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        QVector<unsigned char> buffer(roomForRows(count) * (attempt == 0 ? 1 : 4));
+        char *err = nullptr;
+        const int written = call(m_core, token, first, count, buffer.data(),
+                                 uint32_t(buffer.size()), &err);
+        if (written < 0) {
+            return report(&err, error);
+        }
+        if (err != nullptr) {
+            fam_free_string(err);
+        }
+        if (!decode(buffer.constData(), written, window, nullptr)) {
+            if (error != nullptr) {
+                *error = QStringLiteral("core sent a buffer this shell cannot read");
+            }
+            return false;
+        }
+        if (!window->truncated() || !window->rows.isEmpty() || attempt == 1) {
+            return true;
+        }
+    }
+    return true;
+}
+
 bool FamBridge::openDir(const QString &path, quint64 *token, QString *error) {
     const QByteArray utf8 = path.toUtf8();
     char *err = nullptr;
@@ -331,30 +366,7 @@ bool FamBridge::dirStatus(quint64 token, FamWindow *window, QString *error) {
 
 bool FamBridge::dirFetch(quint64 token, quint32 first, quint32 count, FamWindow *window,
                          QString *error) {
-    /* Two tries: the second with four times the room, for a directory whose names are longer than
-     * the allowance. Past that the truncated flag is the answer the caller was given anyway. */
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        QVector<unsigned char> buffer(roomForRows(count) * (attempt == 0 ? 1 : 4));
-        char *err = nullptr;
-        const int written = fam_dir_fetch(m_core, token, first, count, buffer.data(),
-                                          uint32_t(buffer.size()), &err);
-        if (written < 0) {
-            return report(&err, error);
-        }
-        if (err != nullptr) {
-            fam_free_string(err);
-        }
-        if (!decode(buffer.constData(), written, window, nullptr)) {
-            if (error != nullptr) {
-                *error = QStringLiteral("core sent a buffer this shell cannot read");
-            }
-            return false;
-        }
-        if (!window->truncated() || !window->rows.isEmpty() || attempt == 1) {
-            return true;
-        }
-    }
-    return true;
+    return readRows(fam_dir_fetch, token, first, count, window, error);
 }
 
 bool FamBridge::dirCuts(quint64 token, FamWindow *window, QVector<quint32> *cuts, QString *error) {
@@ -417,3 +429,60 @@ bool FamBridge::coreKinds(QStringList *kinds, QString *error) {
     }
     return true;
 }
+
+/* --- v2: paged name search ------------------------------------------------------------------ */
+
+bool FamBridge::beginSearch(const QString &query, const QString &within, const QString &kind,
+                            quint32 limit, quint64 *token, QString *error) {
+    const QByteArray utf8Query = query.toUtf8();
+    const QByteArray utf8Within = within.toUtf8();
+    const QByteArray utf8Kind = kind.toUtf8();
+    char *err = nullptr;
+    const quint64 value = fam_search_begin(m_core, utf8Query.constData(),
+                                           within.isEmpty() ? nullptr : utf8Within.constData(),
+                                           kind.isEmpty() ? nullptr : utf8Kind.constData(), limit,
+                                           &err);
+    if (value == 0) {
+        return report(&err, error);
+    }
+    if (err != nullptr) {
+        fam_free_string(err);
+    }
+    *token = value;
+    return true;
+}
+
+bool FamBridge::searchPage(quint64 token, quint32 first, quint32 count, FamWindow *window,
+                           QString *error) {
+    if (!readRows(fam_search_page, token, first, count, window, error)) {
+        return false;
+    }
+    /* A search row's name is its whole path, because a result set has no one directory to compose the
+     * path from. The listing shows the last component and keeps the rest for opening. */
+    for (FamViewRow &row : window->rows) {
+        const int cut =
+            qMax(row.name.lastIndexOf(QLatin1Char('/')), row.name.lastIndexOf(QLatin1Char('\\'))) + 1;
+        row.path = row.name;
+        row.name = row.name.mid(cut);
+    }
+    return true;
+}
+
+bool FamBridge::searchStatus(quint64 token, FamWindow *window, QString *error) {
+    return searchPage(token, 0, 0, window, error);
+}
+
+void FamBridge::cancelSearch(quint64 token) {
+    char *err = nullptr;
+    if (fam_search_cancel(m_core, token, &err) < 0 && err != nullptr) {
+        /* Nothing to do about it here: the only way this fails is a token this shell has already
+         * dropped, and the search it refers to is over either way. */
+        qWarning("fam_search_cancel: %s", qUtf8Printable(take(err)));
+        return;
+    }
+    if (err != nullptr) {
+        fam_free_string(err);
+    }
+}
+
+void FamBridge::closeSearch(quint64 token) { fam_search_close(m_core, token); }

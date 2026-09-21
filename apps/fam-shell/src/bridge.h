@@ -41,6 +41,9 @@ struct FamWindow {
     bool truncated() const { return (flags & FAM_FLAG_TRUNCATED) != 0; }
     bool resync() const { return (flags & FAM_FLAG_RESYNC) != 0; }
     bool lostEvents() const { return (flags & FAM_FLAG_LOSS) != 0; }
+    /* A search sets this while it runs and at its ceiling, and never a directory view: a header that
+     * carries it is telling the caller these rows are real but not all of them. */
+    bool partial() const { return (flags & FAM_FLAG_INCOMPLETE) != 0; }
 };
 
 /* Owns a FamCore handle and turns the C ABI into Qt types.
@@ -74,7 +77,20 @@ public:
     /* The kind names, in the order the wire's index means them. */
     bool coreKinds(QStringList *kinds, QString *error);
 
-    /* --- v1: JSON payloads, while the shell's search half still uses them ---------------- */
+    /* --- v2: page a name search while it runs ---------------------------------------------
+     *
+     * A search token is read exactly like a directory token, with one difference: a record's name is
+     * the whole path, which `searchPage` splits into the row's `path` and its display `name`.
+     */
+    bool beginSearch(const QString &query, const QString &within, const QString &kind,
+                     quint32 limit, quint64 *token, QString *error);
+    bool searchPage(quint64 token, quint32 first, quint32 count, FamWindow *window, QString *error);
+    /* An empty page: the cheap way to ask where a search stands. */
+    bool searchStatus(quint64 token, FamWindow *window, QString *error);
+    void cancelSearch(quint64 token);
+    void closeSearch(quint64 token);
+
+    /* --- v1: JSON payloads, while the shell's tag half still uses them --------------------- */
 
     bool stats(QJsonValue *result, QString *error);
     bool tagAdd(const QString &path, const QStringList &tags, const QString &source, int priority,
@@ -84,15 +100,26 @@ public:
     bool find(const QStringList &tags, bool matchAll, const QString &within, QJsonValue *result,
               QString *error);
 
+    /* The v1 view trio. Nothing in the shell calls these any more - it searches through v2 - but
+     * `abi-smoke` does, because the claim it gates is that a v1 consumer still gets answers out of
+     * this library, and going through the same wrapper the shell uses makes that claim stronger than
+     * calling the C entry points raw would. */
     bool createView(const QString &sort, const QString &order, quint64 *view, QString *error);
     bool search(quint64 view, const QString &query, const QString &within, const QString &kind,
                 QJsonValue *result, QString *error);
     bool drain(quint64 view, QJsonValue *result, QString *error);
+
     bool startWatch(const QString &dir, quint64 *watch, QString *error);
 
 private:
     static QString take(char *raw);
     bool invoke(int code, char *out, char *err, QJsonValue *result, QString *error) const;
+    /* The shared half of `dirFetch` and `searchPage`: both hand back a window of rows written into a
+     * buffer this side owns, through the same C signature. */
+    bool readRows(int (*call)(FamCore *, uint64_t, uint32_t, uint32_t, unsigned char *, uint32_t,
+                              char **),
+                  quint64 token, quint32 first, quint32 count, FamWindow *window,
+                  QString *error) const;
     /* Reads a v2 header, and the records behind it when `rows` or `cuts` ask for them. */
     static bool decode(const unsigned char *buffer, int written, FamWindow *window,
                        QVector<quint32> *cuts);

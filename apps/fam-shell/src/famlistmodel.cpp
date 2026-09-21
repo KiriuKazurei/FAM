@@ -31,19 +31,9 @@ void FamListModel::bind(quint64 token, const QString &directory, const QStringLi
     m_kinds = kinds;
     m_fetch = std::move(fetch);
     m_total = 0;
+    m_state = FAM_EMPTY;
     m_first = -1;
     m_rows.clear();
-    endResetModel();
-}
-
-void FamListModel::loadStatic(const QVector<FamViewRow> &rows) {
-    beginResetModel();
-    m_token = 0;
-    m_fetch = nullptr;
-    m_directory.clear();
-    m_rows = rows;
-    m_first = 0;
-    m_total = quint32(rows.size());
     endResetModel();
 }
 
@@ -52,20 +42,28 @@ void FamListModel::unbind() {
     m_token = 0;
     m_fetch = nullptr;
     m_total = 0;
+    m_state = FAM_EMPTY;
     m_first = -1;
     m_rows.clear();
     endResetModel();
 }
 
 void FamListModel::readHead(const FamWindow &window) {
-    if (window.state != FAM_READY && window.state != FAM_STALE) {
-        return; /* loading or failed: total_rows is zero because nothing answered yet */
+    /* A directory's header says nothing until its rows exist. A search's does while it still runs - it
+     * reports the rows found so far and flags them a prefix - so that is the case the READY/STALE test
+     * would throw away. Either way "loading, with nothing to show" must not reset a view that is
+     * already displaying rows. */
+    const bool usable =
+        window.state == FAM_READY || window.state == FAM_STALE || window.partial();
+    if (!usable) {
+        return;
     }
-    if (window.totalRows == m_total) {
+    if (window.totalRows == m_total && window.state == m_state) {
         return;
     }
     beginResetModel();
     m_total = window.totalRows;
+    m_state = window.state;
     m_first = -1;
     m_rows.clear();
     endResetModel();

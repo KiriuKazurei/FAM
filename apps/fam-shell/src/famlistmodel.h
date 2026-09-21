@@ -8,12 +8,13 @@
 
 #include "bridge.h"
 
-/* A directory listing, painted from a v2 view without ever holding the whole thing.
+/* A listing painted from a v2 view without ever holding the whole thing: a directory, or a search's
+ * rows as they arrive.
  *
- * The core reports how many rows a directory has; this model materialises one window of them, and
+ * The core reports how many rows a view holds; this model materialises one window of them, and
  * fetches a new window only when a paint asks for a row outside the one it holds. A 78k-row folder
  * therefore costs a viewport's worth of work per frame instead of 78k row allocations, and the fetch
- * that fills a miss is a bounded copy out of the cache - no filesystem call, no wait.
+ * that fills a miss is a bounded copy out of the core - no filesystem call, no wait.
  *
  * Change events arrive as positions to cut, in the order they must be applied. Consecutive equal
  * positions are a run of neighbours and become one beginRemoveRows, so deleting a thousand adjacent
@@ -45,11 +46,7 @@ public:
     void bind(quint64 token, const QString &directory, const QStringList &kinds, Fetcher fetch);
     void unbind();
 
-    /* A finished result set that is not a directory: search hits, which the core still delivers as
-     * one JSON payload. The whole list is held because there is nothing to fetch more from. */
-    void loadStatic(const QVector<FamViewRow> &rows);
-
-    /* What the core says the directory holds. Called from the status and fetch headers. */
+    /* What the core says the view holds. Called from the status and fetch headers. */
     void readHead(const FamWindow &window);
 
     /* Cuts one poll reported. Returns the number of row-signal pairs emitted. */
@@ -79,6 +76,9 @@ private:
     mutable quint32 m_total = 0;
     mutable int m_first = -1;
     mutable QVector<FamViewRow> m_rows;
+    /* A search's rows arrive in discovery order and are sorted once, when it finishes, so the count is
+     * not enough to know the view is unchanged: same number of rows, different order. */
+    quint8 m_state = FAM_EMPTY;
     int m_viewport = 128;
 };
 
