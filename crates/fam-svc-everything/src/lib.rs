@@ -13,11 +13,16 @@
 #[cfg(windows)]
 mod client;
 mod query;
+mod search;
 mod state;
 
 #[cfg(windows)]
 pub use client::{Api, ClientError, CLIENT_DLL};
 pub use query::compile;
+/// The paging loop and the row conversion, public because a second implementation of the same
+/// contract - the deterministic fake in this crate's tests - is exercised against these rather than
+/// against the DLL.
+pub use search::{drain, to_hit, RawRow, PAGE};
 pub use state::{
     judge, next_probe_delay, EverythingState, Probe, ERROR_IPC, PROBE_FIRST, PROBE_MAX,
 };
