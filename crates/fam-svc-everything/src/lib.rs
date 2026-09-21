@@ -10,9 +10,13 @@
 //! the development machine has no Everything installed: [`query`] compiles a request into
 //! Everything's search language, and [`state`] decides what a probe's answers mean.
 
+#[cfg(windows)]
+mod client;
 mod query;
 mod state;
 
+#[cfg(windows)]
+pub use client::{Api, ClientError, CLIENT_DLL};
 pub use query::compile;
 pub use state::{
     judge, next_probe_delay, EverythingState, Probe, ERROR_IPC, PROBE_FIRST, PROBE_MAX,
