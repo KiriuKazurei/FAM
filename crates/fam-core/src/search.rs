@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 
 use crate::cancel::Cancellation;
 use crate::kind::Kind;
@@ -8,8 +9,13 @@ use crate::pathkey::PathKey;
 pub struct SearchRequest {
     /// Lower-cased; every term must appear in the candidate name.
     pub terms: Vec<String>,
-    /// Restrict results to this directory subtree.
-    pub scope: Option<PathKey>,
+    /// Directory subtree to confine the search to, spelled as the caller spelled it.
+    ///
+    /// Not a [`PathKey`], even though a key is the natural type for a directory: a provider that has
+    /// to restart enumeration uses this as its root, and a root taken from a folded key reports the
+    /// user's own folders back to them in lower case. Providers fold it themselves for the identity
+    /// comparisons.
+    pub scope: Option<PathBuf>,
     pub kind: Option<Kind>,
     pub limit: usize,
 }
@@ -28,8 +34,8 @@ impl SearchRequest {
         }
     }
 
-    pub fn scope(mut self, scope: PathKey) -> Self {
-        self.scope = Some(scope);
+    pub fn scope(mut self, scope: impl Into<PathBuf>) -> Self {
+        self.scope = Some(scope.into());
         self
     }
 
@@ -56,10 +62,14 @@ impl SearchRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
+    /// Folded identity, for a caller that has to match the hit against the directory cache.
     pub key: PathKey,
-    pub dir: PathKey,
-    /// Verbatim UTF-16 name as the filesystem reported it.
-    pub name: Vec<u16>,
+    /// Verbatim UTF-16 path as the filesystem reported it, separators included.
+    ///
+    /// This is not a convenience on top of `key`: a `PathKey` folds ASCII case because two spellings
+    /// of one name are one file, and a filename label drawn from the fold tells the user their own
+    /// folders are spelled in lower case. The base name is the part after the last separator.
+    pub path: Vec<u16>,
     pub kind: Kind,
     pub size: u64,
     pub mtime_ms: i64,
@@ -125,11 +135,15 @@ mod tests {
     #[test]
     fn builders_compose() {
         let request = SearchRequest::new("a")
-            .scope(PathKey::of(std::path::Path::new("D:/x")))
+            .scope(PathBuf::from("D:/MixedCase"))
             .kind(Kind::Document)
             .limit(50);
         assert_eq!(request.limit, 50);
         assert_eq!(request.kind, Some(Kind::Document));
-        assert!(request.scope.is_some());
+        assert_eq!(
+            request.scope,
+            Some(PathBuf::from("D:/MixedCase")),
+            "the scope is kept as it was given, not folded"
+        );
     }
 }

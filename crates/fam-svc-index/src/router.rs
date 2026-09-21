@@ -2,6 +2,13 @@ use fam_core::{
     Cancellation, SearchError, SearchHit, SearchOutcome, SearchProvider, SearchRequest,
 };
 
+/// What a search produced, and who produced it.
+#[derive(Debug)]
+pub struct Searched {
+    pub provider: &'static str,
+    pub outcome: SearchOutcome,
+}
+
 /// Tries providers in order and returns the first that succeeds, keeping the ordered-fallback
 /// shape the old `SearchService` already had.
 ///
@@ -24,19 +31,29 @@ impl SearchRouter {
             .collect()
     }
 
+    /// Runs the first available provider that succeeds, and says **which one** answered.
+    ///
+    /// The id is part of the result because which backend served a search is user-visible and
+    /// load-bearing: enumeration covers any volume while Everything only indexes local fixed NTFS
+    /// ones, so "complete" means different scopes depending on who ran.
     pub fn search(
         &self,
         request: &SearchRequest,
         cancel: &Cancellation,
         sink: &mut dyn FnMut(SearchHit) -> bool,
-    ) -> Result<SearchOutcome, SearchError> {
+    ) -> Result<Searched, SearchError> {
         let mut last: Option<SearchError> = None;
         for provider in &self.providers {
             if !provider.is_available() {
                 continue;
             }
             match provider.search(request, cancel, sink) {
-                Ok(outcome) => return Ok(outcome),
+                Ok(outcome) => {
+                    return Ok(Searched {
+                        provider: provider.id(),
+                        outcome,
+                    })
+                }
                 Err(error) => last = Some(error),
             }
         }
@@ -73,15 +90,17 @@ mod tests {
                 &fam_core::SearchRequest::new("needle"),
                 &Cancellation::new(),
                 &mut |hit| {
-                    names.push(String::from_utf16_lossy(&hit.name));
+                    let path = fam_core::path_buf_from_units(&hit.path);
+                    names.push(path.file_name().unwrap().to_string_lossy().into_owned());
                     true
                 },
             )
             .unwrap();
 
         assert_eq!(names, vec!["needle-report.txt"]);
-        assert_eq!(outcome.matched, 1);
-        assert!(outcome.complete);
+        assert_eq!(outcome.outcome.matched, 1);
+        assert!(outcome.outcome.complete);
+        assert_eq!(outcome.provider, "walk");
     }
 
     #[test]

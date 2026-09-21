@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use fam_core::{Config, PathKey};
+use fam_core::{Config, PathKey, SearchRequest as NameRequest};
 use fam_sched::{spawn, Batcher, FileChange, Handle, SchedulerConfig, Signal};
 use fam_svc_index::DirIndex;
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
@@ -34,12 +34,15 @@ use fam_view::{row_for_path, Delta, Filter, Order, Row, SortKey, ViewModel};
 use serde::Serialize;
 
 mod browse;
+mod search;
 
 /// The v2 byte contract, public so a caller in the same workspace - the tests here, and the MCP
 /// server that will speak the same rows later - reads the layout from one place.
 pub mod wire;
 
 use browse::{Job, Loader, Views};
+use fam_svc_index::SearchRouter;
+use search::Searches;
 
 const OK: c_int = 0;
 const ERR: c_int = -1;
@@ -48,6 +51,15 @@ const ERR: c_int = -1;
 /// rows; the cap is there so one call cannot be made to allocate without bound, and the header's
 /// truncated flag tells the caller to ask again.
 const MAX_ROWS_PER_CALL: usize = 4096;
+
+/// How many hits a `fam_search_begin` with `limit = 0` asks for. The number is inherited from the
+/// legacy tag store's default, and it exists at all because a search accumulates its whole result
+/// set on the owner thread: "no ceiling" against a root like `D:\` would be an unbounded allocation
+/// that only a cancel can interrupt.
+const DEFAULT_SEARCH_LIMIT: u32 = 500;
+
+/// Ceiling on an explicit `limit`, so a caller cannot ask for the unbounded case by name.
+const MAX_SEARCH_LIMIT: u32 = 20_000;
 
 pub struct FamCore {
     config: Config,
@@ -62,6 +74,8 @@ pub struct FamCore {
     v2: Views,
     /// v2's one pipeline, shared with the loader thread that registers and withdraws its watches.
     loader: Loader,
+    /// v2's paged name search: the router, and the one thread allowed to run a search on it.
+    searches: Searches,
     /// Directories with an open view, so the last one to close can stop its watch. `Handle` dedupes
     /// by identity already; this counts the views, which is what decides whether a watch is still
     /// wanted.
@@ -204,6 +218,17 @@ impl FamCore {
                 queue.extend(batch.changes);
             }
         };
+        let router = Arc::new(SearchRouter::new(vec![
+            // Everything indexes local fixed NTFS volumes only, so enumeration has to stay
+            // available as the fallback rather than being a fallback of last resort.
+            Box::new(fam_svc_everything::EverythingProvider),
+            Box::new(fam_svc_walk::WalkProvider::new(
+                WalkPolicy::from_config(&config),
+                config.scan_timeout(),
+            )),
+        ]));
+        let searches = Searches::start(router);
+
         let pipeline = Arc::new(Mutex::new(
             spawn(SchedulerConfig::from_config(&config), Box::new(sink))
                 .map_err(|error| error.to_string())?,
@@ -219,6 +244,7 @@ impl FamCore {
             next_token: AtomicU64::new(1),
             index,
             v2,
+            searches,
             loader,
             watched: Mutex::new(HashMap::new()),
         })
@@ -763,6 +789,86 @@ impl FamCore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    // ---- v2: paged name search -------------------------------------------------------------
+
+    /// Starts a search and hands back its token without waiting. Rows appear as the provider finds
+    /// them; the header's state says when they are final.
+    ///
+    /// `limit` is how many hits to accumulate: 0 asks for [`DEFAULT_SEARCH_LIMIT`], and anything
+    /// larger is clamped to [`MAX_SEARCH_LIMIT`]. There is deliberately no "no ceiling" spelling -
+    /// the rows live in this process until the caller closes the token, and an unbounded walk of
+    /// `D:\` is an unbounded allocation only a cancel can interrupt.
+    fn search_begin(
+        &self,
+        query: &str,
+        within: Option<&Path>,
+        kind: Option<&str>,
+        limit: u32,
+    ) -> Result<u64, String> {
+        let mut request = NameRequest::new(query);
+        if request.is_empty() {
+            return Err("query carries no search terms".into());
+        }
+        if let Some(kind) = kind.map(parse_kind).transpose()? {
+            request = request.kind(kind);
+        }
+        if let Some(within) = within {
+            request = request.scope(within);
+        }
+        let ceiling = if limit == 0 {
+            DEFAULT_SEARCH_LIMIT
+        } else {
+            limit.min(MAX_SEARCH_LIMIT)
+        };
+        Ok(self.searches.begin(request.limit(ceiling as usize)))
+    }
+
+    fn search_page(
+        &self,
+        token: u64,
+        first: u32,
+        count: u32,
+        buffer: &mut [u8],
+    ) -> Result<usize, String> {
+        let asked = (count as usize).min(MAX_ROWS_PER_CALL);
+        let Some(page) = self.searches.page(token, first as usize, asked) else {
+            return Err(format!("unknown search token {token}"));
+        };
+        let mut head = page.head;
+        let mut names = Vec::new();
+        let mut items = Vec::with_capacity(page.rows.len());
+        for (mut item, path) in page.rows {
+            item.name_off = names.len() as u32;
+            item.name_units = path.len() as u16;
+            names.extend_from_slice(&path);
+            items.push(item);
+        }
+        if (first as usize) + items.len() < head.total_rows as usize {
+            head.flags |= wire::FLAG_TRUNCATED;
+        }
+        Ok(wire::encode(
+            &wire::record_block(&items),
+            wire::RECORDS,
+            &names,
+            head,
+            buffer,
+        ))
+    }
+
+    /// Stops a search. Its rows stay pageable - what was found before the stop is still true, and
+    /// the header keeps saying the scope was not covered.
+    fn search_cancel(&self, token: u64) -> Result<(), String> {
+        if self.searches.cancel(token) {
+            Ok(())
+        } else {
+            Err(format!("unknown search token {token}"))
+        }
+    }
+
+    fn search_close(&self, token: u64) {
+        self.searches.close(token);
+    }
 }
 
 fn parse_tags(json: &str) -> Result<Vec<String>, String> {
@@ -968,7 +1074,7 @@ pub unsafe extern "C" fn fam_core_free(core: *mut FamCore) {
     if core.is_null() {
         return;
     }
-    let (watchers, loader) = {
+    let (watchers, loader, searches) = {
         let borrow = unsafe { &*core };
         let watchers = {
             let mut watchers = borrow.watchers();
@@ -976,8 +1082,9 @@ pub unsafe extern "C" fn fam_core_free(core: *mut FamCore) {
         };
         // The loader thread holds a clone of the pipeline, so it has to be joined before that
         // Handle is shut down - and before either, it must be told to stop taking work.
-        (watchers, borrow.loader.clone())
+        (watchers, borrow.loader.clone(), borrow.searches.clone())
     };
+    searches.shutdown();
     loader.shutdown();
     for (_, handle) in watchers {
         handle.shutdown();
@@ -1261,4 +1368,60 @@ pub unsafe extern "C" fn fam_backends_json(
     err: *mut *mut c_char,
 ) -> c_int {
     with_core(core, out, err, move |borrow| Ok(borrow.backends_json()))
+}
+
+/// Starts a name search and returns its token, without waiting for any result. 0 is failure.
+/// `limit` 0 means the core's default (500 hits); larger values are clamped to 20000, because the
+/// result set is held in this process until `fam_search_close`.
+#[no_mangle]
+pub unsafe extern "C" fn fam_search_begin(
+    core: *mut FamCore,
+    query: *const c_char,
+    within: *const c_char,
+    kind: *const c_char,
+    limit: u32,
+    err: *mut *mut c_char,
+) -> u64 {
+    with_core_token(core, err, |borrow| {
+        let query = required_str(query, "query")?;
+        let within = arg_str(within)?;
+        let kind = arg_str(kind)?;
+        borrow.search_begin(query, within.map(Path::new), kind, limit)
+    })
+}
+
+/// Rows `[first, first + count)` of a search, in the same buffer shape as `fam_dir_fetch` except
+/// that a record's name is the whole path. Returns bytes written, or -1.
+#[no_mangle]
+pub unsafe extern "C" fn fam_search_page(
+    core: *mut FamCore,
+    token: u64,
+    first: u32,
+    count: u32,
+    buffer: *mut c_uchar,
+    buffer_len: u32,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core_buffer(core, buffer, buffer_len, err, |borrow, bytes| {
+        borrow.search_page(token, first, count, bytes)
+    })
+}
+
+/// Asks a running search to stop. Cooperative: the provider notices between directories and between
+/// entries, which is what v1's caller-side timeout never was. Returns -1 for an unknown token.
+#[no_mangle]
+pub unsafe extern "C" fn fam_search_cancel(
+    core: *mut FamCore,
+    token: u64,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core_status(core, err, |borrow| borrow.search_cancel(token))
+}
+
+/// Ends a search and releases its rows.
+#[no_mangle]
+pub unsafe extern "C" fn fam_search_close(core: *mut FamCore, token: u64) {
+    if let Ok(borrow) = unsafe { borrow_core(core) } {
+        borrow.search_close(token);
+    }
 }

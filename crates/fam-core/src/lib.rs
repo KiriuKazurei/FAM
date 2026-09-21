@@ -23,7 +23,7 @@ pub use kind::{classify, classify_units, extension_of, kind_of_extension, Kind, 
 pub use list::{DirId, Item, ItemFlags, ListRequest};
 pub use pathkey::{
     fold_name_units, is_within, name_units_match, path_buf_from_units, path_key, raw_name_units,
-    PathKey,
+    raw_path_units, PathKey,
 };
 pub use search::{SearchError, SearchHit, SearchOutcome, SearchProvider, SearchRequest};
 pub use sort::{Order, SortKey};

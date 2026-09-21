@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use fam_core::{
-    raw_name_units, Cancellation, Kind, PathKey, SearchError as ProviderError, SearchHit,
+    raw_path_units, Cancellation, Kind, PathKey, SearchError as ProviderError, SearchHit,
     SearchOutcome, SearchProvider, SearchRequest,
 };
 
@@ -278,8 +278,13 @@ impl SearchProvider for WalkProvider {
             return Err(ProviderError::Empty);
         }
         let mut policy = self.policy.clone();
+        // The scope is the root as the caller spelled it, and its folded form is what decides whether
+        // an entry is inside it: two uses, one string each, and swapping them would either lose the
+        // caller's casing or compare paths the filesystem does not treat as equal.
+        let mut inside = None;
         if let Some(scope) = &request.scope {
-            policy.roots = vec![scope.to_path_buf()];
+            policy.roots = vec![scope.clone()];
+            inside = Some(PathKey::of(scope));
         }
         if policy.roots.is_empty() {
             return Err(ProviderError::Unavailable {
@@ -299,17 +304,15 @@ impl SearchProvider for WalkProvider {
                 return true;
             }
             let key = PathKey::of(&entry.path);
-            if let Some(scope) = &request.scope {
+            if let Some(scope) = &inside {
                 if !scope.is_within(&key) {
                     return true;
                 }
             }
             outcome.matched += 1;
-            let dir = key.parent().unwrap_or_else(|| key.clone());
             let hit = SearchHit {
-                name: raw_name_units(&entry.path),
+                path: raw_path_units(&entry.path),
                 key,
-                dir,
                 kind: entry.kind,
                 size: entry.size,
                 mtime_ms: entry.modified_ms.unwrap_or(i64::MIN),
@@ -386,6 +389,15 @@ mod tests {
         std::fs::write(path, name).unwrap();
     }
 
+    /// A hit's display name: the last component of the verbatim path it carries.
+    fn base(hit: &SearchHit) -> String {
+        fam_core::path_buf_from_units(&hit.path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn the_provider_streams_hits_and_counts_every_entry_it_saw() {
         let dir = tempfile::tempdir().unwrap();
@@ -409,10 +421,15 @@ mod tests {
         assert!(outcome.complete);
 
         let hit = &hits[0];
-        assert_eq!(String::from_utf16_lossy(&hit.name), "Report-2026.pdf");
+        assert_eq!(base(hit), "Report-2026.pdf");
+        assert_eq!(
+            fam_core::path_buf_from_units(&hit.path),
+            dir.path().join("Report-2026.pdf"),
+            "the path is what the filesystem reported, not the folded form the identity uses"
+        );
         assert_eq!(hit.kind, Kind::Document);
         assert_eq!(hit.size, "Report-2026.pdf".len() as u64);
-        assert_eq!(hit.dir, PathKey::of(dir.path()));
+        assert_eq!(hit.key.parent().unwrap(), PathKey::of(dir.path()));
     }
 
     #[test]
@@ -469,7 +486,7 @@ mod tests {
         write(dir.path(), "top-report.txt");
         write(dir.path(), "sub/inner-report.txt");
 
-        let scope = PathKey::of(&dir.path().join("sub"));
+        let scope = dir.path().join("sub");
         let mut hits = Vec::new();
         let outcome = provider(dir.path())
             .search(
@@ -483,7 +500,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(hits.len(), 1);
-        assert_eq!(String::from_utf16_lossy(&hits[0].name), "inner-report.txt");
+        assert_eq!(base(&hits[0]), "inner-report.txt");
         assert_eq!(outcome.matched, 1);
         assert_eq!(
             outcome.visited, 1,

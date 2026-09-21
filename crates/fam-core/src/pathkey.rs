@@ -91,13 +91,23 @@ pub fn path_buf_from_units(units: &[u16]) -> PathBuf {
     }
 }
 
-/// Verbatim UTF-16 units of a path's final component, unfolded — what a search hit carries so the
-/// shell can display exactly what the filesystem reported.
+/// Verbatim UTF-16 units of a path's final component, unfolded — what a directory row's name and a
+/// change event's name carry, so the shell can display exactly what the filesystem reported.
 pub fn raw_name_units(path: &Path) -> Vec<u16> {
     match path.file_name() {
         Some(name) => units_of(std::path::Path::new(name)),
         None => Vec::new(),
     }
+}
+
+/// Verbatim UTF-16 units of a whole path, separators as the platform writes them.
+///
+/// A search result set spans directories, so its rows have to carry the location, not just the name.
+/// Taking that from [`PathKey`] would print `c:\users\…` for a folder the user calls `C:\Users\…`:
+/// the fold lower-cases ASCII because two spellings are one *identity*, which is a different question
+/// from what the filesystem reported.
+pub fn raw_path_units(path: &Path) -> Vec<u16> {
+    units_of(path)
 }
 
 fn units_of(path: &Path) -> Vec<u16> {

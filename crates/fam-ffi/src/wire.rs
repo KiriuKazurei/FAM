@@ -32,6 +32,9 @@ pub const FLAG_TRUNCATED: u8 = 0b1;
 pub const FLAG_LOSS: u8 = 0b10;
 /// A change arrived that cannot be expressed as positions: rebuild the view from a fresh fetch.
 pub const FLAG_RESYNC: u8 = 0b100;
+/// The scope was not fully covered, so this result set is a prefix of what a complete search
+/// would find. Only a search carries it - a directory page is always the whole directory.
+pub const FLAG_INCOMPLETE: u8 = 0b1000;
 
 /// Row availability, as `u8` so the field is the same width under both toolchains.
 pub mod state {

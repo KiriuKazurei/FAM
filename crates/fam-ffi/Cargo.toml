@@ -13,6 +13,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 fam-core.workspace = true
 fam-sched.workspace = true
+fam-svc-everything.workspace = true
 fam-svc-index.workspace = true
 fam-svc-store.workspace = true
 fam-svc-walk.workspace = true
