@@ -1,5 +1,5 @@
 {
-  "recorded_on": "windows x86_64, warm cache, fam-bench 0.1.0",
+  "recorded_on": "windows x86_64, warm cache, fam-bench 0.1.0 | provenance: docs/notes/",
   "cases": {
     "open_flat_dir": {
       "id": "open_flat_dir",
@@ -29,6 +29,20 @@
       "errors": 0,
       "entries_per_s": 93
     },
+    "patch_256_of_20k": {
+      "id": "patch_256_of_20k",
+      "corpus": "synthetic: 20000 rows",
+      "note": "one 256-name departure batch on a 20k-row table, and the view that follows it",
+      "samples": 300,
+      "p50_us": 13078,
+      "p95_us": 13490,
+      "min_us": 12821,
+      "max_us": 14358,
+      "entries": 20000,
+      "dirs": 1,
+      "errors": 0,
+      "entries_per_s": 1524828
+    },
     "read_flat_std": {
       "id": "read_flat_std",
       "corpus": "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
@@ -57,6 +71,20 @@
       "errors": 0,
       "entries_per_s": 430465
     },
+    "rebuild_view_20k": {
+      "id": "rebuild_view_20k",
+      "corpus": "synthetic: 20000 rows",
+      "note": "ordering a freshly read 20k-row table from scratch - a re-read without its I/O",
+      "samples": 40,
+      "p50_us": 8346,
+      "p95_us": 8717,
+      "min_us": 8225,
+      "max_us": 9242,
+      "entries": 20000,
+      "dirs": 1,
+      "errors": 0,
+      "entries_per_s": 2374107
+    },
     "viewport_from_cache": {
       "id": "viewport_from_cache",
       "corpus": "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
@@ -76,28 +104,28 @@
       "corpus": "D:/",
       "note": "whole-volume scan that stops at the entry cap",
       "samples": 3,
-      "p50_us": 746448,
-      "p95_us": 746448,
-      "min_us": 705786,
-      "max_us": 750419,
+      "p50_us": 595880,
+      "p95_us": 595880,
+      "min_us": 586534,
+      "max_us": 600599,
       "entries": 200000,
-      "dirs": 22250,
+      "dirs": 22190,
       "errors": 1,
-      "entries_per_s": 90799
+      "entries_per_s": 112169
     },
     "walk_large_tree": {
       "id": "walk_large_tree",
       "corpus": "D:/Applications/Qt",
       "note": "77,891 entries across 4,730 directories",
       "samples": 9,
-      "p50_us": 269468,
-      "p95_us": 347261,
-      "min_us": 260152,
-      "max_us": 488318,
+      "p50_us": 211626,
+      "p95_us": 216447,
+      "min_us": 205068,
+      "max_us": 218385,
       "entries": 77891,
       "dirs": 4730,
       "errors": 0,
-      "entries_per_s": 28167
+      "entries_per_s": 40811
     }
   }
 }

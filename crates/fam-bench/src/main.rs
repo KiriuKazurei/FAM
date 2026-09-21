@@ -118,14 +118,30 @@ struct Baseline {
     cases: BTreeMap<String, CaseResult>,
 }
 
+/// Folds this run's results into the stored file instead of replacing it.
+///
+/// `--only <case> --write` re-prices one case and leaves the floors of the ones that did not run
+/// alone. That matters on this machine: a whole-suite pass run while something else is busy records
+/// every floor 2x too slow, and a floor that is too generous gates nothing.
 fn write_baseline(path: &Path, results: &BTreeMap<String, CaseResult>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
+    let mut cases = match std::fs::read_to_string(path) {
+        Ok(text) => {
+            serde_json::from_str::<Baseline>(&text)
+                .with_context(|| format!("baseline at {} is not valid JSON", path.display()))?
+                .cases
+        }
+        Err(_) => BTreeMap::new(),
+    };
+    for (id, result) in results {
+        cases.insert(id.clone(), result.clone());
+    }
     let body = Baseline {
         recorded_on: describe_machine(),
-        cases: results.clone(),
+        cases,
     };
     let json = serde_json::to_string_pretty(&body)?;
     let mut file =
@@ -215,4 +231,64 @@ fn describe_machine() -> String {
         std::env::consts::ARCH,
         env!("CARGO_PKG_VERSION")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(id: &str, min_us: u64) -> CaseResult {
+        CaseResult {
+            id: id.into(),
+            corpus: "c".into(),
+            note: "n".into(),
+            samples: 1,
+            p50_us: min_us,
+            p95_us: min_us,
+            min_us,
+            max_us: min_us,
+            entries: 1,
+            dirs: 1,
+            errors: 0,
+            entries_per_s: 1,
+        }
+    }
+
+    /// The reason `--write` merges: re-pricing one case while the machine is busy must not carry that
+    /// noise into the floors of the cases that did not run.
+    #[test]
+    fn writing_one_case_keeps_the_ones_that_did_not_run() {
+        let file = tempfile::tempdir().unwrap().path().join("baseline.json");
+        let mut stored = BTreeMap::new();
+        stored.insert("a".to_string(), result("a", 100));
+        stored.insert("b".to_string(), result("b", 200));
+        write_baseline(&file, &stored).unwrap();
+
+        let mut one = BTreeMap::new();
+        one.insert("b".to_string(), result("b", 900));
+        write_baseline(&file, &one).unwrap();
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        let read: Baseline = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            read.cases.len(),
+            2,
+            "a is still gated even though it did not run"
+        );
+        assert_eq!(read.cases["a"].min_us, 100);
+        assert_eq!(read.cases["b"].min_us, 900, "and b took the new number");
+    }
+
+    /// A file that exists but does not parse is not something to overwrite with a partial run.
+    #[test]
+    fn a_corrupt_baseline_is_reported_rather_than_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("baseline.json");
+        std::fs::write(&file, "not json").unwrap();
+
+        let mut one = BTreeMap::new();
+        one.insert("a".to_string(), result("a", 1));
+        assert!(write_baseline(&file, &one).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "not json");
+    }
 }
