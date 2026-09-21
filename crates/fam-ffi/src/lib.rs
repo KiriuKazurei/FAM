@@ -19,21 +19,35 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, c_int, c_uchar, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use fam_core::Config;
+use fam_core::{Config, PathKey};
 use fam_sched::{spawn, Batcher, FileChange, Handle, SchedulerConfig, Signal};
+use fam_svc_index::DirIndex;
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
 use fam_svc_walk::{Cancellation, Kind, SearchQuery, SearchService, WalkPolicy};
 use fam_view::{row_for_path, Delta, Filter, Order, Row, SortKey, ViewModel};
 use serde::Serialize;
 
+mod browse;
+
+/// The v2 byte contract, public so a caller in the same workspace - the tests here, and the MCP
+/// server that will speak the same rows later - reads the layout from one place.
+pub mod wire;
+
+use browse::{Job, Loader, Views};
+
 const OK: c_int = 0;
 const ERR: c_int = -1;
+
+/// Rows one `fam_dir_fetch` will copy out, however large the requested `count`. A viewport is tens of
+/// rows; the cap is there so one call cannot be made to allocate without bound, and the header's
+/// truncated flag tells the caller to ask again.
+const MAX_ROWS_PER_CALL: usize = 4096;
 
 pub struct FamCore {
     config: Config,
@@ -43,6 +57,15 @@ pub struct FamCore {
     watchers: Mutex<HashMap<u64, Handle>>,
     losses: Arc<AtomicU64>,
     next_token: AtomicU64,
+    /// v2: the cache every directory view is served from.
+    index: DirIndex,
+    v2: Views,
+    /// v2's one pipeline, shared with the loader thread that registers and withdraws its watches.
+    loader: Loader,
+    /// Directories with an open view, so the last one to close can stop its watch. `Handle` dedupes
+    /// by identity already; this counts the views, which is what decides whether a watch is still
+    /// wanted.
+    watched: Mutex<HashMap<PathKey, u32>>,
 }
 
 #[derive(Serialize)]
@@ -146,14 +169,58 @@ impl FamCore {
         };
         config.validate().map_err(|error| error.to_string())?;
         let store = TagStore::open(&config.database_path).map_err(|error| error.to_string())?;
+        let losses = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let index = DirIndex::with_budget_bytes(config.cache_budget_bytes());
+        let v2 = Views::new();
+        let (sender, receiver) = Loader::channel();
+        let queue = Arc::new(Mutex::new(sender));
+
+        // One pipeline serves both halves of the ABI, so one set of watches backs them and a shell
+        // that mixes v1 and v2 calls is not paying for each directory twice.
+        let sink_index = DirIndex::clone(&index);
+        let sink_views = Views::clone(&v2);
+        let sink_queue = Arc::clone(&queue);
+        let sink_losses = Arc::clone(&losses);
+        let sink_pending = Arc::clone(&pending);
+        let sink = move |batch: fam_sched::Batch| {
+            sink_losses.fetch_add(batch.dropped, Ordering::Relaxed);
+            let groups = batch.by_directory();
+            for delta in groups.iter() {
+                if delta.needs_rescan() {
+                    // A lost watch or a moved write time: the only safe instruction is to re-read,
+                    // and `claim` is what decides whether anyone is already doing it.
+                    sink_index.invalidate(&delta.dir);
+                    if let Some(claim) = sink_index.claim(&delta.dir) {
+                        if let Ok(queue) = sink_queue.lock() {
+                            let _ = queue.send(Job::Load(claim));
+                        }
+                    }
+                }
+                sink_views.absorb(&sink_index, delta);
+            }
+            // v1 still wants the raw changes, and gets them off the same batch.
+            if let Ok(mut queue) = sink_pending.lock() {
+                queue.extend(batch.changes);
+            }
+        };
+        let pipeline = Arc::new(Mutex::new(
+            spawn(SchedulerConfig::from_config(&config), Box::new(sink))
+                .map_err(|error| error.to_string())?,
+        ));
+        let loader = Loader::start(receiver, index.clone(), v2.clone(), queue, pipeline);
         Ok(Self {
             config,
             store: Mutex::new(store),
             views: Mutex::new(HashMap::new()),
-            pending: Arc::new(Mutex::new(Vec::new())),
+            pending,
             watchers: Mutex::new(HashMap::new()),
-            losses: Arc::new(AtomicU64::new(0)),
+            losses,
             next_token: AtomicU64::new(1),
+            index,
+            v2,
+            loader,
+            watched: Mutex::new(HashMap::new()),
         })
     }
 
@@ -463,6 +530,223 @@ impl FamCore {
             self.losses.fetch_add(dropped, Ordering::Relaxed);
         }
     }
+
+    // ---- v2: directory views, bounded fetch, and the delta poll -----------------------------
+
+    /// Opens a directory. The token comes back immediately; the rows arrive when the loader gets
+    /// there, and [`fam_dir_state`] is how a shell finds out they have.
+    fn dir_open(&self, path: &Path) -> u64 {
+        let key = PathKey::of(path);
+        let token = self.v2.open(&self.index, &key);
+        self.request_load(&key);
+        self.watch_one_more(&key, path);
+        token
+    }
+
+    /// Asks for a read when the cached rows, if any, cannot answer for the present.
+    ///
+    /// `claim` is the arbiter of everything else: a read already running, or a failure still cooling
+    /// down, gets `None` and this posts nothing.
+    fn request_load(&self, key: &PathKey) {
+        if matches!(self.index.state(key), fam_svc_index::State::Ready) {
+            return;
+        }
+        if let Some(claim) = self.index.claim(key) {
+            self.loader.post(Job::Load(claim));
+        }
+    }
+
+    /// The first view of a directory arms its watch, the last one disarms it.
+    ///
+    /// Counted here rather than left to `Handle`, which dedupes watches but knows nothing about how
+    /// many views wanted one. Only directories someone is looking at get watched at all: one costs
+    /// ~900us on this machine, so arming one for every cached directory would cost more than reading
+    /// it (`docs/notes/watch-sweep-costs-a-path-lookup.md`).
+    fn watch_one_more(&self, key: &PathKey, path: &Path) {
+        let mut counts = self.watched();
+        let entry = counts.entry(key.clone()).or_insert(0);
+        *entry += 1;
+        if *entry == 1 {
+            self.loader.post(Job::Watch(path.to_path_buf()));
+        }
+    }
+
+    fn unwatch_one_less(&self, key: &PathKey) {
+        let mut counts = self.watched();
+        let Some(entry) = counts.get_mut(key) else {
+            return;
+        };
+        *entry = entry.saturating_sub(1);
+        if *entry > 0 {
+            return;
+        }
+        counts.remove(key);
+        // A watch's last view is a `PathKey`, and `Handle::unwatch` wants the path it was given.
+        self.loader.post(Job::Unwatch(key.to_path_buf()));
+    }
+
+    fn dir_status(&self, token: u64) -> Result<wire::FamRowHeader, String> {
+        let status = self
+            .v2
+            .status(&self.index, token)
+            .ok_or_else(|| format!("unknown view token {token}"))?;
+        let mut flags = 0u8;
+        if status.resync {
+            flags |= wire::FLAG_RESYNC;
+        }
+        if self.losses.load(Ordering::Relaxed) > 0 {
+            flags |= wire::FLAG_LOSS;
+        }
+        Ok(wire::status(
+            status.state,
+            status.total_rows,
+            status.generation,
+            status.seq,
+            flags,
+        ))
+    }
+
+    /// Copies one window of rows into the caller's buffer, whole rows or none.
+    fn dir_fetch(
+        &self,
+        token: u64,
+        first: u32,
+        count: u32,
+        buffer: &mut [u8],
+    ) -> Result<usize, String> {
+        let mut header = self.dir_status(token)?;
+        let asked = (count as usize).min(MAX_ROWS_PER_CALL);
+        // The window is read under the view's lock and encoded outside it: the copy into the
+        // caller's buffer works off owned values, so no lock is held across it.
+        let (window, visible) = {
+            let view = self
+                .v2
+                .view(token)
+                .ok_or_else(|| format!("unknown view token {token}"))?;
+            let guard = view.lock().expect("view lock");
+            match guard.window(first as usize, asked) {
+                Some((rows, total)) => (rows, total),
+                // Nothing to show yet; the header's state says whether that is a read, a failure, or
+                // no request at all.
+                None => return Ok(wire::encode(&[], wire::RECORDS, &[], header, buffer)),
+            }
+        };
+
+        let mut names = Vec::new();
+        let mut items = Vec::with_capacity(window.len());
+        for row in window {
+            let mut item = row.item;
+            // The record's name fields address the blob at the end of this buffer, which is the wire
+            // form of the arena they addressed in the table.
+            item.name_off = names.len() as u32;
+            item.name_units = row.name.len() as u16;
+            names.extend_from_slice(&row.name);
+            items.push(item);
+        }
+        // Rows remain past this window, so the caller has a next fetch to make.
+        if (first as usize) + items.len() < visible as usize {
+            header.flags |= wire::FLAG_TRUNCATED;
+        }
+        Ok(wire::encode(
+            &wire::record_block(&items),
+            wire::RECORDS,
+            &names,
+            header,
+            buffer,
+        ))
+    }
+
+    /// Hands over the row positions queued since the last poll.
+    fn dir_poll(&self, token: u64, buffer: &mut [u8]) -> Result<usize, String> {
+        let mut header = self.dir_status(token)?;
+        let view = self
+            .v2
+            .view(token)
+            .ok_or_else(|| format!("unknown view token {token}"))?;
+        // A resync is reported by this poll and by no later one; the flag a status call shows is the
+        // caller's cue to fetch, so it is recomputed from what the take just did.
+        let (cuts, resync) = {
+            let mut view = view.lock().expect("view lock");
+            let taken = view.take_cuts();
+            // The sequence the caller compares against next time, read after the take.
+            header.seq = view.seq();
+            taken
+        };
+        if resync {
+            header.flags |= wire::FLAG_RESYNC;
+        } else {
+            header.flags &= !wire::FLAG_RESYNC;
+        }
+        Ok(wire::encode(
+            &wire::cut_block(&cuts),
+            wire::CUTS,
+            &[],
+            header,
+            buffer,
+        ))
+    }
+
+    fn dir_set_sort(&self, token: u64, sort: &str, order: &str) -> Result<(), String> {
+        let sort = parse_sort(sort)?;
+        let order = parse_order(order)?;
+        let view = self
+            .v2
+            .view(token)
+            .ok_or_else(|| format!("unknown view token {token}"))?;
+        view.lock()
+            .expect("view lock")
+            .reorder(|rows| rows.set_sort(sort, order));
+        Ok(())
+    }
+
+    fn dir_set_filter(
+        &self,
+        token: u64,
+        terms_json: &str,
+        kind: Option<&str>,
+    ) -> Result<(), String> {
+        let terms: Vec<String> = if terms_json.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(terms_json)
+                .map_err(|error| format!("expected a JSON array of search terms: {error}"))?
+        };
+        let kind = kind.map(parse_kind).transpose()?;
+        let view = self
+            .v2
+            .view(token)
+            .ok_or_else(|| format!("unknown view token {token}"))?;
+        view.lock()
+            .expect("view lock")
+            .reorder(|rows| rows.set_filter(terms, kind));
+        Ok(())
+    }
+
+    fn dir_close(&self, token: u64) -> bool {
+        match self.v2.close(token) {
+            Some(key) => {
+                self.unwatch_one_less(&key);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Which search backends exist and which are usable now, as JSON: control data, not rows.
+    fn backends_json(&self) -> String {
+        let service = SearchService::default_with(WalkPolicy::from_config(&self.config));
+        serde_json::to_string(&serde_json::json!({
+            "backends": service.backend_ids(),
+            "available": service.available_backends(),
+        }))
+        .unwrap_or_else(|_| "{\"backends\":[],\"available\":[]}".into())
+    }
+
+    fn watched(&self) -> MutexGuard<'_, HashMap<PathKey, u32>> {
+        self.watched
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 fn parse_tags(json: &str) -> Result<Vec<String>, String> {
@@ -583,6 +867,64 @@ where
     }
 }
 
+/// For calls that only need to succeed or fail.
+unsafe fn with_core_status<F>(core: *mut FamCore, err: *mut *mut c_char, body: F) -> c_int
+where
+    F: FnOnce(&FamCore) -> Result<(), String>,
+{
+    match with_core(core, std::ptr::null_mut(), err, |borrow| {
+        body(borrow).map(|()| String::new())
+    }) {
+        OK => OK,
+        _ => ERR,
+    }
+}
+
+/// Borrows a caller-supplied buffer. Length is checked before a single byte is written, and a null
+/// pointer with a non-zero length is a bug in the caller rather than something to survive.
+unsafe fn buffer_slice<'a>(pointer: *mut c_uchar, len: u32) -> Result<&'a mut [u8], String> {
+    if len == 0 {
+        return Err("buffer_len must be greater than zero".into());
+    }
+    if pointer.is_null() {
+        return Err("buffer must not be null".into());
+    }
+    Ok(unsafe { std::slice::from_raw_parts_mut(pointer, len as usize) })
+}
+
+/// The shape of every row-carrying v2 call: bytes written, or -1 with a message in `err`.
+unsafe fn with_core_buffer<F>(
+    core: *mut FamCore,
+    buffer: *mut c_uchar,
+    buffer_len: u32,
+    err: *mut *mut c_char,
+    body: F,
+) -> c_int
+where
+    F: FnOnce(&FamCore, &mut [u8]) -> Result<usize, String>,
+{
+    let bytes = match buffer_slice(buffer, buffer_len) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            write_cstring(err, message);
+            return ERR;
+        }
+    };
+    let outcome = borrow_core(core).and_then(|borrow| {
+        catch_unwind(AssertUnwindSafe(move || body(borrow, bytes)))
+            .unwrap_or_else(|_| Err("FAM core panicked; the call was aborted".into()))
+    });
+    match outcome {
+        // A buffer larger than `c_int` cannot be described by this signature, and no view is asked
+        // for one: `MAX_ROWS_PER_CALL` records is well under half of what fits.
+        Ok(written) => written.min(c_int::MAX as usize) as c_int,
+        Err(message) => {
+            write_cstring(err, message);
+            ERR
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn fam_core_new(
     config_path: *const c_char,
@@ -610,11 +952,17 @@ pub unsafe extern "C" fn fam_core_free(core: *mut FamCore) {
     if core.is_null() {
         return;
     }
-    let watchers = {
+    let (watchers, loader) = {
         let borrow = unsafe { &*core };
-        let mut watchers = borrow.watchers();
-        std::mem::take(&mut *watchers)
+        let watchers = {
+            let mut watchers = borrow.watchers();
+            std::mem::take(&mut *watchers)
+        };
+        // The loader thread holds a clone of the pipeline, so it has to be joined before that
+        // Handle is shut down - and before either, it must be told to stop taking work.
+        (watchers, borrow.loader.clone())
     };
+    loader.shutdown();
     for (_, handle) in watchers {
         handle.shutdown();
     }
@@ -779,5 +1127,122 @@ pub unsafe extern "C" fn fam_watch_stop(core: *mut FamCore, token: u64) {
 /// Lets a shell refuse to run against a stale core library.
 #[no_mangle]
 pub extern "C" fn fam_abi_version() -> u32 {
-    1
+    wire::ABI as u32
+}
+
+/// Starts a view of one directory and hands back its token, without waiting for the rows.
+///
+/// A folder open is a hash lookup plus two queue posts: the read and the watch both happen on the
+/// loader thread. `fam_dir_state` says when the rows are there.
+#[no_mangle]
+pub unsafe extern "C" fn fam_open_dir(
+    core: *mut FamCore,
+    path: *const c_char,
+    err: *mut *mut c_char,
+) -> u64 {
+    with_core_token(core, err, |borrow| {
+        let path = required_str(path, "path")?;
+        Ok(borrow.dir_open(Path::new(path)))
+    })
+}
+
+/// Writes a header and no rows: state, row count, generation and sequence.
+#[no_mangle]
+pub unsafe extern "C" fn fam_dir_state(
+    core: *mut FamCore,
+    token: u64,
+    buffer: *mut c_uchar,
+    buffer_len: u32,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core_buffer(core, buffer, buffer_len, err, |borrow, bytes| {
+        let header = borrow.dir_status(token)?;
+        Ok(wire::encode(&[], wire::RECORDS, &[], header, bytes))
+    })
+}
+
+/// Copies up to `count` rows from `first` into the caller's buffer.
+///
+/// Returns bytes written, or -1. A short buffer is not an error: the header comes back with
+/// `row_count` 0 and the truncated flag, and the caller retries with room for what it asked for.
+#[no_mangle]
+pub unsafe extern "C" fn fam_dir_fetch(
+    core: *mut FamCore,
+    token: u64,
+    first: u32,
+    count: u32,
+    buffer: *mut c_uchar,
+    buffer_len: u32,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core_buffer(core, buffer, buffer_len, err, |borrow, bytes| {
+        borrow.dir_fetch(token, first, count, bytes)
+    })
+}
+
+/// Hands over the row positions queued since the last poll of this token.
+///
+/// Positions are to be applied in the order returned, each against the rows the earlier cuts left
+/// behind. When the header carries the resync flag there are none, because something changed that
+/// positions cannot express - a re-read, a new sort - and the model has to be rebuilt from a fetch.
+#[no_mangle]
+pub unsafe extern "C" fn fam_dir_poll(
+    core: *mut FamCore,
+    token: u64,
+    buffer: *mut c_uchar,
+    buffer_len: u32,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core_buffer(core, buffer, buffer_len, err, |borrow, bytes| {
+        borrow.dir_poll(token, bytes)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn fam_dir_set_sort(
+    core: *mut FamCore,
+    token: u64,
+    sort: *const c_char,
+    order: *const c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core_status(core, err, |borrow| {
+        let sort = arg_str(sort)?.unwrap_or("");
+        let order = arg_str(order)?.unwrap_or("");
+        borrow.dir_set_sort(token, sort, order)
+    })
+}
+
+/// Narrows a view. `terms_json` is a JSON array of lower-cased substrings, or empty for no filter.
+#[no_mangle]
+pub unsafe extern "C" fn fam_dir_set_filter(
+    core: *mut FamCore,
+    token: u64,
+    terms_json: *const c_char,
+    kind: *const c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core_status(core, err, |borrow| {
+        let terms = arg_str(terms_json)?.unwrap_or("");
+        let kind = arg_str(kind)?;
+        borrow.dir_set_filter(token, terms, kind)
+    })
+}
+
+/// Ends a view. The directory stops being watched when this was the last view of it.
+#[no_mangle]
+pub unsafe extern "C" fn fam_dir_close(core: *mut FamCore, token: u64) {
+    if let Ok(borrow) = unsafe { borrow_core(core) } {
+        borrow.dir_close(token);
+    }
+}
+
+/// Which search backends exist and which are usable now, as JSON.
+#[no_mangle]
+pub unsafe extern "C" fn fam_backends_json(
+    core: *mut FamCore,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, out, err, move |borrow| Ok(borrow.backends_json()))
 }

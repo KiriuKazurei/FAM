@@ -306,6 +306,7 @@ version = "0.1.0"
 dependencies = [
  "fam-core",
  "fam-sched",
+ "fam-svc-index",
  "fam-svc-store",
  "fam-svc-walk",
  "fam-view",

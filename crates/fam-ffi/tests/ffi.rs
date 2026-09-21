@@ -139,9 +139,12 @@ fn harness() -> Harness {
     }
 }
 
+/// The one line in this file that increment 5 had to change: a test that the ABI is still v1 cannot
+/// survive the increment that makes it v2. Everything below it is v1 as it was, served as a shim
+/// over the v2 core.
 #[test]
 fn abi_version_is_advertised() {
-    assert_eq!(fam_abi_version(), 1);
+    assert_eq!(fam_abi_version(), 2);
 }
 
 #[test]
