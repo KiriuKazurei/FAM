@@ -1,23 +1,26 @@
-//! The Everything SDK client. Skeleton only.
+//! The Everything SDK client.
 //!
-//! The SDK is vendored at `third_party/everything-sdk/` (MIT). Its `lib/Everything64.lib` is an
-//! MSVC import library while this crate builds with the GNU toolchain, so the real client will
-//! load `Everything64.dll` at run time with `LoadLibraryExW` and resolve the ~20 functions it
-//! needs — that lands in increment 6, together with the `DllMissing`/`NotRunning`/`Indexing`/
-//! `Ready` probe. Until then the provider reports itself unavailable, which is also the correct
-//! state on any machine where Everything is not running.
+//! The SDK is vendored at `third_party/everything-sdk/` (MIT). Its `lib/Everything64.lib` is an MSVC
+//! import library while the shell's core builds with the GNU toolchain, so this crate loads
+//! `Everything64.dll` at run time and resolves the handful of functions it needs. That is what keeps
+//! the dependency optional: with Everything absent or not running, name search falls back to
+//! enumeration instead of failing to start.
+//!
+//! Two of its layers need no service to talk to, and are tested without one — which matters because
+//! the development machine has no Everything installed: [`query`] compiles a request into
+//! Everything's search language, and [`state`] decides what a probe's answers mean.
+
+mod query;
+mod state;
+
+pub use query::compile;
+pub use state::{
+    judge, next_probe_delay, EverythingState, Probe, ERROR_IPC, PROBE_FIRST, PROBE_MAX,
+};
 
 use fam_core::{
     Cancellation, SearchError, SearchHit, SearchOutcome, SearchProvider, SearchRequest,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EverythingState {
-    DllMissing,
-    NotRunning,
-    Indexing,
-    Ready,
-}
 
 pub struct EverythingProvider;
 
@@ -38,7 +41,8 @@ impl SearchProvider for EverythingProvider {
     ) -> Result<SearchOutcome, SearchError> {
         Err(SearchError::Unavailable {
             provider: self.id(),
-            reason: "the Everything SDK client is wired in increment 6".into(),
+            reason: "the DLL binding is not wired yet; name search falls back to enumeration"
+                .into(),
         })
     }
 }
@@ -47,8 +51,10 @@ impl SearchProvider for EverythingProvider {
 mod tests {
     use super::*;
 
+    /// The provider being unavailable is the *contract* on a machine without Everything, not a gap:
+    /// the router must then answer from enumeration rather than report a failure.
     #[test]
-    fn the_skeleton_reports_unavailable_rather_than_empty_results() {
+    fn an_unwired_provider_reports_unavailable_rather_than_empty_results() {
         let provider = EverythingProvider;
         assert!(!provider.is_available());
 
@@ -61,7 +67,7 @@ mod tests {
         match error {
             SearchError::Unavailable { provider, reason } => {
                 assert_eq!(provider, "everything");
-                assert!(reason.contains("increment 6"), "{reason}");
+                assert!(reason.contains("falls back"), "{reason}");
             }
             other => panic!("expected Unavailable, got {other:?}"),
         }
