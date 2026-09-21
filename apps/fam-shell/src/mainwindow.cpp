@@ -252,7 +252,12 @@ void MainWindow::pollChanges() {
                       .arg(polled.totalRows));
         return;
     }
+    /* Timed on its own clock because the number the gate wants is "how long did the view wait for
+     * these signals", which the process-elapsed figure in the line below cannot answer. */
+    QElapsedTimer applied;
+    applied.start();
     const int pairs = m_model->applyCuts(cuts);
+    const qint64 cutMs = applied.elapsed();
     /* Always agree the count with the header, cuts or none: a poll that carried nothing can still be
      * the first moment the loader's rows exist, and the model has to hear about that from somewhere.
      * After a batch of cuts the two already match, so this is a no-op. */
@@ -266,8 +271,8 @@ void MainWindow::pollChanges() {
     if (!cuts.isEmpty()) {
         /* The headless gate reads this: a cut that reached the model is the whole point of the delta
          * channel, and a screenshot alone cannot tell it apart from a repaint that refetched. */
-        qInfo("cut %d position(s) in %d signal pair(s), %u row(s) left", cuts.size(), pairs,
-              m_model->totalRows());
+        qInfo("cut %d position(s) in %d signal pair(s) in %lldms, %u row(s) left", cuts.size(),
+              pairs, cutMs, m_model->totalRows());
     }
     QString text = QStringLiteral("%1 · %2 row(s)")
                        .arg(QDir::toNativeSeparators(m_directory))
