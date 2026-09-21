@@ -5,6 +5,8 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 
+#include <cstring>
+
 FamBridge::FamBridge(const QString &configPath, QString *error) {
     char *err = nullptr;
     const QByteArray utf8Config = configPath.toUtf8();
@@ -114,7 +116,8 @@ bool FamBridge::tagRemove(const QString &path, const QStringList &tags, QJsonVal
     const QByteArray utf8Tags = tags.isEmpty() ? QByteArray("[]") : tagsToJson(tags);
     char *out = nullptr;
     char *err = nullptr;
-    const int code = fam_tag_remove(m_core, utf8Path.constData(), utf8Tags.constData(), nullptr, &out, &err);
+    const int code =
+        fam_tag_remove(m_core, utf8Path.constData(), utf8Tags.constData(), nullptr, &out, &err);
     return invoke(code, out, err, result, error);
 }
 
@@ -125,11 +128,13 @@ bool FamBridge::find(const QStringList &tags, bool matchAll, const QString &with
     char *out = nullptr;
     char *err = nullptr;
     const int code = fam_find(m_core, utf8Tags.constData(), matchAll ? 1 : 0,
-                              within.isEmpty() ? nullptr : utf8Within.constData(), nullptr, 0, &out, &err);
+                              within.isEmpty() ? nullptr : utf8Within.constData(), nullptr, 0, &out,
+                              &err);
     return invoke(code, out, err, result, error);
 }
 
-bool FamBridge::createView(const QString &sort, const QString &order, quint64 *view, QString *error) {
+bool FamBridge::createView(const QString &sort, const QString &order, quint64 *view,
+                           QString *error) {
     const QByteArray utf8Sort = sort.toUtf8();
     const QByteArray utf8Order = order.toUtf8();
     char *err = nullptr;
@@ -185,5 +190,230 @@ bool FamBridge::startWatch(const QString &dir, quint64 *watch, QString *error) {
         fam_free_string(err);
     }
     *watch = token;
+    return true;
+}
+
+/* --- v2: directory views ------------------------------------------------------------------- */
+
+namespace {
+
+/* 'FRAM', the first four bytes of any buffer the core wrote. */
+constexpr uint32_t kMagic = 0x4D415246u;
+
+/* A buffer is sized with this much name per row. A directory whose names are longer than the
+ * allowance comes back truncated and gets one retry at four times the room. */
+constexpr int kNameAllowance = 256;
+
+int roomForRows(quint32 rows) {
+    return int(sizeof(FamHead)) + int(rows) * (int(sizeof(FamRecord)) + kNameAllowance * 2);
+}
+
+/* The core and this shell are both x86_64 little-endian, and famcore.h asserts these sizes against
+ * the Rust layout, so copying a struct out of the buffer is the whole deserialisation. */
+template <typename T> T readAt(const unsigned char *buffer, int at) {
+    T value;
+    std::memcpy(&value, buffer + at, sizeof(T));
+    return value;
+}
+
+/* Every v2 call that failed wrote its message the same way. */
+bool report(char **err, QString *error) {
+    if (error != nullptr) {
+        *error = QString();
+    }
+    if (err != nullptr && *err != nullptr) {
+        if (error != nullptr) {
+            *error = QString::fromUtf8(*err);
+        }
+        fam_free_string(*err);
+        *err = nullptr;
+    }
+    return false;
+}
+
+} // namespace
+
+QString FamBridge::nameOf(const unsigned char *buffer, int written, const FamRecord &record,
+                          int blob) {
+    const qint64 start = qint64(blob) + qint64(record.name_off) * 2;
+    const qint64 bytes = qint64(record.name_units) * 2;
+    if (record.name_units == 0 || start < 0 || start + bytes > written) {
+        /* A record pointing outside its own buffer is a version disagreement, not a row. */
+        return QString();
+    }
+    return QString::fromUtf16(reinterpret_cast<const char16_t *>(buffer + start),
+                              record.name_units);
+}
+
+bool FamBridge::decode(const unsigned char *buffer, int written, FamWindow *window,
+                       QVector<quint32> *cuts) {
+    if (written < int(sizeof(FamHead))) {
+        return false;
+    }
+    const FamHead head = readAt<FamHead>(buffer, 0);
+    if (head.magic != kMagic || head.abi != FAM_ABI_VERSION) {
+        return false;
+    }
+    window->state = head.state;
+    window->flags = head.flags;
+    window->totalRows = head.total_rows;
+    window->generation = head.generation;
+    window->seq = head.seq;
+
+    const int records = int(sizeof(FamHead));
+    const int blob = records + int(head.row_count) * int(head.record_size);
+    if (blob > written) {
+        return false;
+    }
+
+    if (cuts != nullptr) {
+        cuts->clear();
+        if (head.record_size != sizeof(FamCut)) {
+            return false;
+        }
+        cuts->reserve(int(head.row_count));
+        for (uint32_t index = 0; index < head.row_count; ++index) {
+            cuts->append(
+                readAt<FamCut>(buffer, records + int(index) * int(sizeof(FamCut))).position);
+        }
+        return true;
+    }
+
+    if (head.row_count > 0 && head.record_size < sizeof(FamRecord)) {
+        return false; /* too small a record to be the one this shell reads */
+    }
+    window->rows.clear();
+    window->rows.reserve(int(head.row_count));
+    for (uint32_t index = 0; index < head.row_count; ++index) {
+        const FamRecord record =
+            readAt<FamRecord>(buffer, records + int(index) * int(head.record_size));
+        FamViewRow row;
+        row.name = nameOf(buffer, written, record, blob);
+        row.size = record.size;
+        row.modifiedMs = record.modified_ms;
+        row.kind = record.kind;
+        row.directory = (record.flags & 0x1u) != 0;
+        window->rows.append(row);
+    }
+    return true;
+}
+
+bool FamBridge::openDir(const QString &path, quint64 *token, QString *error) {
+    const QByteArray utf8 = path.toUtf8();
+    char *err = nullptr;
+    const quint64 value = fam_open_dir(m_core, utf8.constData(), &err);
+    if (value == 0) {
+        return report(&err, error);
+    }
+    if (err != nullptr) {
+        fam_free_string(err);
+    }
+    *token = value;
+    return true;
+}
+
+void FamBridge::closeDir(quint64 token) {
+    fam_dir_close(m_core, token);
+}
+
+bool FamBridge::dirStatus(quint64 token, FamWindow *window, QString *error) {
+    QVector<unsigned char> buffer(int(sizeof(FamHead)));
+    char *err = nullptr;
+    const int written = fam_dir_state(m_core, token, buffer.data(), uint32_t(buffer.size()), &err);
+    if (written < 0) {
+        return report(&err, error);
+    }
+    if (err != nullptr) {
+        fam_free_string(err);
+    }
+    return decode(buffer.constData(), written, window, nullptr);
+}
+
+bool FamBridge::dirFetch(quint64 token, quint32 first, quint32 count, FamWindow *window,
+                         QString *error) {
+    /* Two tries: the second with four times the room, for a directory whose names are longer than
+     * the allowance. Past that the truncated flag is the answer the caller was given anyway. */
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        QVector<unsigned char> buffer(roomForRows(count) * (attempt == 0 ? 1 : 4));
+        char *err = nullptr;
+        const int written = fam_dir_fetch(m_core, token, first, count, buffer.data(),
+                                          uint32_t(buffer.size()), &err);
+        if (written < 0) {
+            return report(&err, error);
+        }
+        if (err != nullptr) {
+            fam_free_string(err);
+        }
+        if (!decode(buffer.constData(), written, window, nullptr)) {
+            if (error != nullptr) {
+                *error = QStringLiteral("core sent a buffer this shell cannot read");
+            }
+            return false;
+        }
+        if (!window->truncated() || !window->rows.isEmpty() || attempt == 1) {
+            return true;
+        }
+    }
+    return true;
+}
+
+bool FamBridge::dirCuts(quint64 token, FamWindow *window, QVector<quint32> *cuts, QString *error) {
+    /* Eight bytes a cut, so 64 KiB carries about 8000 of them and a bigger burst simply takes more
+     * polls - the core keeps what did not fit rather than dropping it. */
+    QVector<unsigned char> buffer(1 << 16);
+    char *err = nullptr;
+    const int written = fam_dir_poll(m_core, token, buffer.data(), uint32_t(buffer.size()), &err);
+    if (written < 0) {
+        return report(&err, error);
+    }
+    if (err != nullptr) {
+        fam_free_string(err);
+    }
+    return decode(buffer.constData(), written, window, cuts);
+}
+
+bool FamBridge::dirSetSort(quint64 token, const QString &sort, const QString &order,
+                           QString *error) {
+    const QByteArray utf8Sort = sort.toUtf8();
+    const QByteArray utf8Order = order.toUtf8();
+    char *err = nullptr;
+    if (fam_dir_set_sort(m_core, token, utf8Sort.constData(), utf8Order.constData(), &err)
+        != FAM_OK) {
+        return report(&err, error);
+    }
+    if (err != nullptr) {
+        fam_free_string(err);
+    }
+    return true;
+}
+
+bool FamBridge::dirSetFilter(quint64 token, const QJsonArray &terms, const QString &kind,
+                             QString *error) {
+    const QByteArray utf8Terms = QJsonDocument(terms).toJson(QJsonDocument::Compact);
+    const QByteArray utf8Kind = kind.toUtf8();
+    char *err = nullptr;
+    if (fam_dir_set_filter(m_core, token, utf8Terms.constData(),
+                           kind.isEmpty() ? nullptr : utf8Kind.constData(), &err)
+        != FAM_OK) {
+        return report(&err, error);
+    }
+    if (err != nullptr) {
+        fam_free_string(err);
+    }
+    return true;
+}
+
+bool FamBridge::coreKinds(QStringList *kinds, QString *error) {
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_backends_json(m_core, &out, &err);
+    QJsonValue result;
+    if (!invoke(code, out, err, &result, error)) {
+        return false;
+    }
+    const QJsonArray list = result.toObject().value(QStringLiteral("kinds")).toArray();
+    for (const QJsonValue &value : list) {
+        kinds->append(value.toString());
+    }
     return true;
 }

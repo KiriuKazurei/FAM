@@ -323,9 +323,15 @@ fn opening_a_directory_returns_before_its_rows_exist() {
         header.state, READY,
         "and the answer it gave was already 'rows are here' - the read ran inline"
     );
+    let started = Instant::now();
     let ready = core.wait_ready(token);
     assert_eq!(ready.state, READY);
     assert_eq!(ready.total_rows, 1501);
+    println!(
+        "1501 rows were on offer {}ms after open (open itself took {:?})",
+        started.elapsed().as_millis(),
+        opened
+    );
 }
 
 #[test]
@@ -613,6 +619,10 @@ fn the_backends_report_themselves_as_json() {
     unsafe { fam_free_string(out) };
     assert!(text.contains("\"backends\""), "{text}");
     assert!(text.contains("walk"), "{text}");
+    // The record's `kind` byte is an index, so the names have to come from the core that sends it.
+    assert!(text.contains("\"kinds\":["), "{text}");
+    assert!(text.contains("directory"), "{text}");
+    assert!(text.contains("executable"), "{text}");
 }
 
 /// Polls until the pipeline has reported positions, and fails if none arrive. Returns the cuts and

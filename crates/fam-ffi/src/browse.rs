@@ -80,21 +80,31 @@ impl DirView {
         self.seq
     }
 
-    /// Takes the queued cuts, or reports a resync. The sequence advances only when there was something
-    /// to say: a poll that changed nothing must not move the number a caller compares against.
-    pub fn take_cuts(&mut self) -> (Vec<usize>, bool) {
+    /// Takes up to `fitting` queued cuts, or reports a resync.
+    ///
+    /// A prefix rather than all-or-nothing, because a cut list the caller's buffer cannot hold must
+    /// not be thrown away: the rest stays queued and the truncated flag tells the caller to poll
+    /// again. Positions are only meaningful in order, which is what makes a prefix legal and a
+    /// middle slice not. The sequence advances only when there was something to say: a poll that
+    /// changed nothing must not move the number a caller compares against.
+    pub fn take_cuts(&mut self, fitting: usize) -> (Vec<usize>, bool) {
         if self.resync {
             self.resync = false;
             self.cuts.clear();
             self.seq += 1;
             return (Vec::new(), true);
         }
-        if self.cuts.is_empty() {
+        if self.cuts.is_empty() || fitting == 0 {
             return (Vec::new(), false);
         }
-        let cuts = std::mem::take(&mut self.cuts);
+        let cuts = self.cuts.drain(..fitting.min(self.cuts.len())).collect();
         self.seq += 1;
         (cuts, false)
+    }
+
+    /// Cuts waiting to be handed over, which is also what decides whether a poll has anything to say.
+    pub fn pending_cuts(&self) -> usize {
+        self.cuts.len()
     }
 
     pub fn pending_resync(&self) -> bool {

@@ -665,9 +665,12 @@ impl FamCore {
             .ok_or_else(|| format!("unknown view token {token}"))?;
         // A resync is reported by this poll and by no later one; the flag a status call shows is the
         // caller's cue to fetch, so it is recomputed from what the take just did.
+        // Room for the cuts this buffer can hold, so a burst is drained over polls rather than
+        // truncated into the bin.
+        let fitting = (buffer.len() / core::mem::size_of::<wire::FamCut>()).saturating_sub(1);
         let (cuts, resync) = {
             let mut view = view.lock().expect("view lock");
-            let taken = view.take_cuts();
+            let taken = view.take_cuts(fitting);
             // The sequence the caller compares against next time, read after the take.
             header.seq = view.seq();
             taken
@@ -676,6 +679,10 @@ impl FamCore {
             header.flags |= wire::FLAG_RESYNC;
         } else {
             header.flags &= !wire::FLAG_RESYNC;
+            if !cuts.is_empty() && view.lock().expect("view lock").pending_cuts() > 0 {
+                // More cuts are queued than this buffer could take.
+                header.flags |= wire::FLAG_TRUNCATED;
+            }
         }
         Ok(wire::encode(
             &wire::cut_block(&cuts),
@@ -732,14 +739,23 @@ impl FamCore {
         }
     }
 
-    /// Which search backends exist and which are usable now, as JSON: control data, not rows.
+    /// What the core can tell a caller about itself, as JSON: which search backends exist and are
+    /// usable now, and the vocabulary of the `kind` byte a v2 record carries.
+    ///
+    /// The kinds are in declaration order, which is the index the wire sends. A shell that hardcoded
+    /// those names would start labelling rows wrong the day a bucket is inserted, so the list is part
+    /// of the ABI rather than a comment.
     fn backends_json(&self) -> String {
         let service = SearchService::default_with(WalkPolicy::from_config(&self.config));
         serde_json::to_string(&serde_json::json!({
             "backends": service.backend_ids(),
             "available": service.available_backends(),
+            "kinds": fam_core::KIND_ORDER
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>(),
         }))
-        .unwrap_or_else(|_| "{\"backends\":[],\"available\":[]}".into())
+        .unwrap_or_else(|_| "{\"backends\":[],\"available\":[],\"kinds\":[]}".into())
     }
 
     fn watched(&self) -> MutexGuard<'_, HashMap<PathKey, u32>> {

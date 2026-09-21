@@ -1,5 +1,7 @@
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QFile>
+#include <QTextStream>
 #include <QDir>
 #include <QPixmap>
 #include <QTimer>
@@ -8,9 +10,15 @@
 #include "mainwindow.h"
 
 int main(int argc, char *argv[]) {
-    if (fam_abi_version() != 1) {
-        qWarning("famcore.dll exposes ABI version %u but this shell was built for 1",
-                 fam_abi_version());
+    /* The row layout is the contract, so a version mismatch is not a warning: a shell that read v1
+     * JSON out of what is now a fixed-length buffer would paint garbage and call it a folder. The
+     * check runs before QApplication because stderr is the only thing worth writing with yet. */
+    if (fam_abi_version() != FAM_ABI_VERSION) {
+        fprintf(stderr,
+                "famcore.dll exposes ABI version %u; this shell was built for %u and will not run "
+                "against anything else\n",
+                fam_abi_version(), FAM_ABI_VERSION);
+        return 75;
     }
 
     QApplication app(argc, argv);
@@ -30,7 +38,8 @@ int main(int argc, char *argv[]) {
         QStringLiteral("query"), QStringLiteral("Run this search once the window is shown."),
         QStringLiteral("terms"));
     const QCommandLineOption watchOption(
-        QStringLiteral("watch"), QStringLiteral("Start watching <path> once shown."),
+        QStringLiteral("watch"),
+        QStringLiteral("Open <path> and keep it current once shown."),
         QStringLiteral("path"));
     const QCommandLineOption grabOption(
         QStringLiteral("self-check"),
@@ -47,15 +56,25 @@ int main(int argc, char *argv[]) {
     window.resize(960, 620);
     window.show();
 
-    if (parser.isSet(watchOption)) {
-        QString error;
-        if (!window.startWatching(parser.value(watchOption), &error)) {
-            qWarning("watch failed: %s", qUtf8Printable(error));
-        }
-    }
-
     if (parser.isSet(grabOption)) {
         const QString target = parser.value(grabOption);
+        /* A windowed executable has no console, so the headless gate would otherwise prove nothing
+         * but pixels: what the view did between showing and grabbing goes to a log beside the
+         * screenshot. */
+        static QFile log(target + QStringLiteral(".log"));
+        static QTextStream out(&log);
+        if (log.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            qInstallMessageHandler([](QtMsgType type, const QMessageLogContext &,
+                                      const QString &message) {
+                const char *level = "info";
+                switch (type) {
+                case QtWarningMsg: level = "warning"; break;
+                case QtCriticalMsg: level = "error"; break;
+                default: break;
+                }
+                out << level << ": " << message << Qt::endl;
+            });
+        }
         QTimer::singleShot(2500, [&window, &app, target]() {
             if (window.grab().save(target)) {
                 qInfo("self-check wrote %s", qUtf8Printable(QDir::toNativeSeparators(target)));
@@ -66,6 +85,14 @@ int main(int argc, char *argv[]) {
         });
         // Never let a broken render hang a headless run.
         QTimer::singleShot(8000, [&app]() { app.quit(); });
+    }
+
+    if (parser.isSet(watchOption)) {
+        QString error;
+        if (!window.openFolder(parser.value(watchOption), &error)) {
+            qWarning("could not open %s: %s", qUtf8Printable(parser.value(watchOption)),
+                     qUtf8Printable(error));
+        }
     }
 
     return app.exec();
