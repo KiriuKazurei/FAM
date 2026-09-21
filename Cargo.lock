@@ -345,6 +345,8 @@ name = "fam-svc-everything"
 version = "0.1.0"
 dependencies = [
  "fam-core",
+ "thiserror",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
