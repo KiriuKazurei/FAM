@@ -33,3 +33,6 @@
 | [notify-watch-loss-is-invisible.md](notify-watch-loss-is-invisible.md) | 4 | 缓冲区溢出与"监视被悄悄撤销"都不可观测：改按目录写时间对账，并用真后端把"删除被监视目录"做成端到端正向证据 |
 | [event-carries-no-target-type.md](event-carries-no-target-type.md) | 4 | 事件只给名字不给身份：翻译处一次算清父目录与 UTF-16 名，改名不配对，`Target` 保留 `Unknown` 且不许猜 |
 | [watch-sweep-costs-a-path-lookup.md](watch-sweep-costs-a-path-lookup.md) | 4 | 一次写时间采样实测 190µs（三个 API 等价、与冷热无关），"探针比重读便宜两个量级"被否，预算改按时间 |
+| [incremental-patch-cost.md](incremental-patch-cost.md) | 5 | 计划里"定向属性查询改一行"实测约一条就回本：只有零 I/O 的消失类事件就地改行，其余交给重读 |
+| [v2-wire-and-windowing.md](v2-wire-and-windowing.md) | 5 | 行数据从 JSON 换成定长缓冲 + 窗口化模型：`open` 239µs、删 1000 个文件 3 对信号；两处只有真机能暴露的协议 bug |
+| [window-show-costs-a-second.md](window-show-costs-a-second.md) | 5 | 首屏那 1.1 秒花在 `QWidget::show()`，不在数据通路：核心启动 8ms、行到位 28ms，慢的地方被定位 |

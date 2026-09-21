@@ -20,6 +20,7 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     m_clock.start();
     QString error;
     m_bridge = std::make_unique<FamBridge>(configPath, &error);
+    qInfo("core handle ready %lldms after the window constructor started", m_clock.elapsed());
     if (!m_bridge->healthy()) {
         m_status = new QLabel(QStringLiteral("core unavailable: %1").arg(error), this);
         auto *layout = new QVBoxLayout(this);
@@ -88,6 +89,8 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
         setStatus(error);
     }
 
+    qInfo("widgets built and shown %lldms after the window constructor started",
+          m_clock.elapsed());
     m_timer = new QTimer(this);
     m_timer->setInterval(250);
     connect(m_timer, &QTimer::timeout, this, &MainWindow::pollChanges);
