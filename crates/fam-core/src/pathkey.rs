@@ -124,12 +124,40 @@ fn fold(units: &mut Vec<u16>) {
 
 fn fold_name_only(units: &mut [u16]) {
     for unit in units.iter_mut() {
-        if *unit == BACKSLASH {
-            *unit = SLASH;
-        } else if matches!(*unit, ASCII_A..=ASCII_Z) {
-            *unit -= ASCII_CASE_DELTA;
-        }
+        *unit = fold_unit(*unit);
     }
+}
+
+/// The one-unit case of the fold: separators unify, `a-z` upper-cases, everything else is verbatim.
+fn fold_unit(unit: u16) -> u16 {
+    if unit == BACKSLASH {
+        SLASH
+    } else if (ASCII_A..=ASCII_Z).contains(&unit) {
+        unit - ASCII_CASE_DELTA
+    } else {
+        unit
+    }
+}
+
+/// Whether two raw UTF-16 names are the same name to the filesystem.
+///
+/// A change event reports a name and a cached table stores a name, and the two may differ in ASCII
+/// case: `Foo.txt` is created by a program that asked for `FOO.TXT`, and NTFS keeps one file.
+/// Comparing them byte-for-byte would then fail to take the row out of the view and leave a file on
+/// screen that no longer exists. Same rule [`PathKey`] folds paths with, which is why it lives here
+/// rather than being re-derived in the cache.
+pub fn name_units_match(left: &[u16], right: &[u16]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| fold_unit(*left) == fold_unit(*right))
+}
+
+/// A name reduced to the form [`name_units_match`] compares. For a *set* of names, folding once per
+/// name and keying a map beats comparing every candidate pair.
+pub fn fold_name_units(name: &[u16]) -> Vec<u16> {
+    name.iter().map(|unit| fold_unit(*unit)).collect()
 }
 
 fn is_within_units(parent: &[u16], child: &[u16]) -> bool {
@@ -251,5 +279,50 @@ mod tests {
             second_key.to_lossy_string(),
             "the lossy string still collides, which is why it is display-only"
         );
+    }
+
+    fn units(name: &str) -> Vec<u16> {
+        name.encode_utf16().collect()
+    }
+
+    #[test]
+    fn names_match_where_ntfs_would_and_only_where_it_would() {
+        assert!(name_units_match(&units("Report.PDF"), &units("report.pdf")));
+        assert!(
+            name_units_match(&units("a\\b"), &units("a/b")),
+            "a name has no separator to begin with, but the fold is one rule for all inputs"
+        );
+        assert!(name_units_match(&units("照片"), &units("照片")));
+        assert!(!name_units_match(&units("café"), &units("CAFÉ")));
+        assert!(!name_units_match(&units("straße"), &units("STRASSE")));
+        assert!(!name_units_match(&units("a.txt"), &units("a.txtx")));
+        assert!(!name_units_match(&units("a.txt"), &units("a.tx")));
+    }
+
+    /// The compared form and the folded form are two ways of stating one rule, and the cache uses
+    /// both - a hash bucket built from the fold, a verification by comparison. If they ever
+    /// disagreed, a row could survive an event that named it.
+    #[test]
+    fn folding_and_comparing_a_name_always_agree() {
+        let names = [
+            "Report.PDF",
+            "report.pdf",
+            "REPORT.PDF",
+            "café.doc",
+            "CAFÉ.doc",
+            "straße.md",
+            "STRASSE.md",
+            "照片.png",
+            "a b c.txt",
+        ];
+        for first in names {
+            for second in names {
+                assert_eq!(
+                    fold_name_units(&units(first)) == fold_name_units(&units(second)),
+                    name_units_match(&units(first), &units(second)),
+                    "`{first}` against `{second}`"
+                );
+            }
+        }
     }
 }

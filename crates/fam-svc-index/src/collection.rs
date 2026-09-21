@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use fam_core::{Item, Kind, Order, SortKey};
 
+use crate::cache::Snapshot;
 use crate::dir_table::DirTable;
 use crate::natural::compare_units;
 
@@ -18,8 +19,15 @@ pub struct FetchedRow {
 /// A virtualised UI only ever asks for `fetch(offset, count)`, so a 100k-row directory costs one
 /// viewport's worth of work per paint. The same type backs search results, which is what keeps
 /// "collection" from being a directory-specific invention.
+///
+/// A view is *positioned*: the UI animates rows by index, so the view owns its own ordering list of
+/// record indices and can follow a table that changed underneath it without rebuilding
+/// ([`Collection::patch`]). That is only possible because record indices are stable within a table.
 pub struct Collection {
     table: Arc<DirTable>,
+    /// The version of the rows [`Collection::fetch`] serves. A view that has not been told about a
+    /// newer generation is showing rows the cache has already replaced.
+    generation: u64,
     order: Vec<u32>,
     sort: SortKey,
     direction: Order,
@@ -31,6 +39,7 @@ impl Collection {
     pub fn new(table: Arc<DirTable>) -> Self {
         let mut collection = Self {
             table,
+            generation: 0,
             order: Vec::new(),
             sort: SortKey::Name,
             direction: Order::Ascending,
@@ -39,6 +48,17 @@ impl Collection {
         };
         collection.rebuild();
         collection
+    }
+
+    /// A view over a snapshot the cache handed out, at the generation that snapshot came with.
+    pub fn from_snapshot(snapshot: Snapshot) -> Self {
+        let mut collection = Self::new(snapshot.table);
+        collection.generation = snapshot.generation;
+        collection
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn len(&self) -> usize {
@@ -71,6 +91,47 @@ impl Collection {
         self.rebuild();
     }
 
+    /// Follows the table one row-level patch produced, without rebuilding the ordering.
+    ///
+    /// Only a [`Patched`](crate::Patched) snapshot belongs here: patching copies a table and
+    /// tombstones rows where they stand, so the record indices this ordering holds still name the
+    /// same rows. Rows from a **read** are a different table with different indices, and a view takes
+    /// those with [`Collection::from_snapshot`] instead — which is why the cache drops a patch whose
+    /// generation has been superseded rather than applying it
+    /// ([`DirIndex::apply`](crate::DirIndex::apply)).
+    ///
+    /// The positions returned are where to cut, each against the view as the earlier cuts already
+    /// left it — which is what a model that removes rows one range at a time needs. They come back
+    /// in view order, because one walk of the ordering computes them; the order the events arrived in
+    /// is not preserved and cannot be, since an earlier cut shifts every position after it.
+    /// Only departures can be followed this way: the events that produced a patch say
+    /// nothing about the size, time or folder-or-not of a row that appeared, so an added row means
+    /// re-reading the directory and the view sees the result as a newer generation.
+    pub fn patch(&mut self, snapshot: &Snapshot, removed: &[u32]) -> Vec<usize> {
+        self.table = Arc::clone(&snapshot.table);
+        self.generation = snapshot.generation;
+        if removed.is_empty() {
+            return Vec::new();
+        }
+        let mut gone = vec![false; self.table.len()];
+        for &index in removed {
+            if let Some(slot) = gone.get_mut(index as usize) {
+                *slot = true;
+            }
+        }
+        let mut kept = Vec::with_capacity(self.order.len());
+        let mut positions = Vec::with_capacity(removed.len());
+        for (view_at, &index) in self.order.iter().enumerate() {
+            if gone.get(index as usize).copied().unwrap_or(false) {
+                positions.push(view_at - positions.len());
+            } else {
+                kept.push(index);
+            }
+        }
+        self.order = kept;
+        positions
+    }
+
     pub fn fetch(&self, offset: usize, count: usize) -> Vec<FetchedRow> {
         self.order
             .iter()
@@ -96,7 +157,11 @@ impl Collection {
     }
 
     fn matches(&self, index: u32) -> bool {
-        let item = self.table.item(index).expect("index in range");
+        // `item` answers `None` for a tombstone, which is how a row a change event removed stops
+        // being displayable without the record itself moving.
+        let Some(item) = self.table.item(index) else {
+            return false;
+        };
         if self.kind.is_some_and(|kind| item.kind != kind.index()) {
             return false;
         }
@@ -135,6 +200,8 @@ impl Collection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::Freshness;
+    use crate::patch::Patch;
     use fam_core::{ItemFlags, PathKey};
 
     fn table_with(entries: &[(impl AsRef<str>, Kind, u64)]) -> Arc<DirTable> {
@@ -241,5 +308,124 @@ mod tests {
                 "file10.txt"
             ]
         );
+    }
+
+    fn snapshot_at(table: &Collection, generation: u64) -> Snapshot {
+        Snapshot {
+            table: table.table.clone(),
+            generation,
+            freshness: Freshness::Current,
+        }
+    }
+
+    fn collection_of(names: &[&str]) -> Collection {
+        let entries: Vec<(&str, Kind, u64)> = names
+            .iter()
+            .map(|name| (*name, Kind::Document, 1))
+            .collect();
+        Collection::new(table_with(&entries))
+    }
+
+    fn visible(collection: &Collection) -> Vec<String> {
+        collection
+            .fetch(0, collection.len())
+            .iter()
+            .map(|row| String::from_utf16_lossy(&row.name))
+            .collect()
+    }
+
+    #[test]
+    fn a_view_remembers_the_generation_it_was_built_from() {
+        let plain = collection_of(&["a.txt"]);
+        assert_eq!(plain.generation(), 0, "a loose table has no version");
+
+        let tracked = Collection::from_snapshot(snapshot_at(&plain, 7));
+        assert_eq!(tracked.generation(), 7);
+        assert_eq!(visible(&tracked), ["a.txt"], "and it shows the same rows");
+    }
+
+    #[test]
+    fn patch_positions_are_for_applying_in_the_order_returned() {
+        let mut view = collection_of(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]);
+        let patched = view.table.patched(&Patch {
+            removed: vec![
+                "d.txt".encode_utf16().collect(),
+                "b.txt".encode_utf16().collect(),
+            ],
+            unread: 0,
+        });
+        // The names arrive in event order, so `removed` is [3, 1] - d before b.
+        assert_eq!(patched.removed, vec![3, 1]);
+
+        let positions = view.patch(
+            &Snapshot {
+                table: Arc::new(patched.table),
+                generation: 1,
+                freshness: Freshness::Current,
+            },
+            &patched.removed,
+        );
+
+        assert_eq!(
+            positions,
+            vec![1, 2],
+            "one walk of the ordering, so positions come back in view order: b at 1, then d, which
+             the first cut already moved from 3 to 2"
+        );
+        assert_eq!(visible(&view), ["a.txt", "c.txt", "e.txt"]);
+        assert_eq!(view.generation(), 1);
+    }
+
+    #[test]
+    fn a_row_cut_from_the_middle_keeps_the_rest_in_order() {
+        let mut view = collection_of(&["alpha.txt", "mid.txt", "omega.txt"]);
+        let patched = view.table.patched(&Patch {
+            removed: vec!["mid.txt".encode_utf16().collect()],
+            unread: 0,
+        });
+
+        let positions = view.patch(
+            &Snapshot {
+                table: Arc::new(patched.table),
+                generation: 4,
+                freshness: Freshness::Current,
+            },
+            &patched.removed,
+        );
+
+        assert_eq!(positions, vec![1]);
+        assert_eq!(view.len(), 2);
+        assert_eq!(visible(&view), ["alpha.txt", "omega.txt"]);
+    }
+
+    #[test]
+    fn a_filter_hides_a_row_a_patch_took_out() {
+        let mut view = Collection::new(table_with(&[
+            ("aaa.txt", Kind::Document, 1),
+            ("picture.png", Kind::Image, 1),
+            ("mmm.txt", Kind::Document, 1),
+        ]));
+        view.set_filter(Vec::new(), Some(Kind::Document));
+        assert_eq!(visible(&view), ["aaa.txt", "mmm.txt"], "two documents");
+
+        let patched = view.table.patched(&Patch {
+            removed: vec!["mmm.txt".encode_utf16().collect()],
+            unread: 0,
+        });
+        let positions = view.patch(
+            &Snapshot {
+                table: Arc::new(patched.table),
+                generation: 2,
+                freshness: Freshness::Stale,
+            },
+            &patched.removed,
+        );
+
+        assert_eq!(
+            positions,
+            vec![1],
+            "second in the filtered view, third of the three records"
+        );
+        assert_eq!(visible(&view), ["aaa.txt"]);
     }
 }

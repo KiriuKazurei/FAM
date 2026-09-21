@@ -11,6 +11,12 @@ impl ItemFlags {
     pub const DIRECTORY: ItemFlags = ItemFlags(0b001);
     pub const REPARSE: ItemFlags = ItemFlags(0b010);
     pub const EXCLUDED: ItemFlags = ItemFlags(0b100);
+    /// A row a filesystem event removed. The record stays put so every other row keeps its index -
+    /// which is what lets a view update its own ordering from the same event - and only the next
+    /// full read of the directory reclaims the space.
+    ///
+    /// A wire record never carries this bit: views hand out live rows only.
+    pub const TOMBSTONE: ItemFlags = ItemFlags(0b1000);
 
     pub const fn contains(self, other: ItemFlags) -> bool {
         self.0 & other.0 == other.0
@@ -20,12 +26,20 @@ impl ItemFlags {
         ItemFlags(self.0 | other.0)
     }
 
+    pub const fn without(self, other: ItemFlags) -> Self {
+        ItemFlags(self.0 & !other.0)
+    }
+
     pub const fn is_directory(self) -> bool {
         self.contains(Self::DIRECTORY)
     }
 
     pub const fn is_reparse(self) -> bool {
         self.contains(Self::REPARSE)
+    }
+
+    pub const fn is_tombstone(self) -> bool {
+        self.contains(Self::TOMBSTONE)
     }
 }
 
@@ -98,5 +112,14 @@ mod tests {
         assert!(both.is_reparse());
         assert!(!both.contains(ItemFlags::EXCLUDED));
         assert!(!ItemFlags::DIRECTORY.contains(ItemFlags::REPARSE));
+
+        let gone = both.union(ItemFlags::TOMBSTONE);
+        assert!(gone.is_tombstone());
+        assert_eq!(
+            gone.without(ItemFlags::TOMBSTONE),
+            both,
+            "the mark comes off alone, so a re-read of the same record keeps what it was"
+        );
+        assert!(!both.is_tombstone());
     }
 }

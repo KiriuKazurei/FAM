@@ -22,11 +22,18 @@ use fam_core::{Cancellation, Config, DirId, Item, PathKey};
 use fam_svc_enumerate::{list_one_level, EnumError};
 
 use crate::dir_table::DirTable;
+use crate::patch::Patch;
 
 /// First retry after a failed read, doubled per attempt up to [`MAX_BACKOFF`]. A directory that
 /// cannot be read - permissions, a spun-down drive - must not be rescanned on every repaint.
 const BASE_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+/// The divisor in "dead bytes may not exceed `1 / WASTE_BUDGET` of the table" - so half, here.
+/// Records are fixed size and their names stay in the arena, so a directory that churns - a build
+/// output, an extraction - would otherwise carry a dead row per deleted file forever, and the
+/// cache's byte budget would be paying for names nobody can see.
+const WASTE_BUDGET: u64 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
@@ -82,6 +89,22 @@ pub enum Opened {
     Loading,
     /// The previous attempt failed; the payload is how long is left to wait.
     CoolingDown(Duration),
+}
+
+/// What [`DirIndex::apply`] made of one patch.
+#[derive(Debug)]
+pub enum Applied {
+    /// Rows left the cached table in place. `removed` are record indices, which is what a view
+    /// needs to cut the same rows out of its own ordering
+    /// ([`Collection::patch`](crate::Collection::patch)).
+    Patched {
+        snapshot: Snapshot,
+        removed: Vec<u32>,
+    },
+    /// The cached rows are untouched — the patch named nothing that was live, or the directory is
+    /// not cached at all. `marked_stale` says whether the rows on offer were told to re-read, which
+    /// is the case whenever the patch named rows whose content no event can carry.
+    Nothing { marked_stale: bool },
 }
 
 enum Slot {
@@ -469,8 +492,8 @@ impl DirIndex {
         let mut map = self.lock();
         // Only a fresh table has something to invalidate: a reloading or failed slot already serves
         // stale rows. A read that started before this instant may still come back with rows that
-        // predate the event - increment 4 closes that window by pairing events with the generation
-        // they apply to.
+        // predate the event; [`DirIndex::apply`] closes that gap by dropping a patch whose
+        // generation has been superseded, rather than applying it to the wrong table.
         match map.slots.get_mut(key) {
             Some(Slot::Ready { stale: false, .. }) => {
                 if let Some(Slot::Ready { stale, .. }) = map.slots.get_mut(key) {
@@ -486,6 +509,97 @@ impl DirIndex {
     /// or a lease is being released. Prefer [`DirIndex::invalidate`] when stale rows may stay.
     pub fn forget(&self, key: &PathKey) -> bool {
         self.lock().take(key).is_some()
+    }
+
+    /// Folds one directory's worth of watcher rows into its cached table.
+    ///
+    /// `against` is the generation the caller's rows came from. A patch computed against a table a
+    /// refresh has since replaced names record indices that belong to the *old* table, so it is
+    /// dropped rather than applied - which is also what closes the window [`DirIndex::invalidate`]
+    /// leaves open: a read that started before an event can come back with rows that predate it, and
+    /// the generation is how the event notices.
+    ///
+    /// The record walk happens with no lock held: the table is an `Arc` snapshot, the patched copy is
+    /// installed under the lock in one pointer swap, and the swap is skipped if a refresh landed in
+    /// between. What is *not* done is marking the table recently used - residency should follow who
+    /// is looking at a directory, not how busy it is, or a build output would pin itself in the
+    /// budget ahead of the folder on screen.
+    pub fn apply(&self, key: &PathKey, against: u64, patch: &Patch) -> Applied {
+        let cached = {
+            let map = self.lock();
+            match map.slots.get(key) {
+                Some(Slot::Ready {
+                    table,
+                    generation,
+                    seen,
+                    stale,
+                }) if *generation == against => Some((Arc::clone(table), *seen, *stale)),
+                _ => None,
+            }
+        };
+        let Some((table, seen, was_stale)) = cached else {
+            // Either nothing is cached - in which case the rows will come from the read that a
+            // later `open` triggers - or a read owns the slot and its result supersedes any patch.
+            let marked = self.invalidate(key);
+            self.prune_to_budget();
+            return Applied::Nothing {
+                marked_stale: marked,
+            };
+        };
+
+        let patched = table.patched(patch);
+        let bytes = patched.table.approx_bytes() as u64;
+        let wasting = bytes > 0 && (patched.table.wasted_bytes() as u64) * WASTE_BUDGET > bytes;
+        if !patched.placed() {
+            return Applied::Nothing {
+                marked_stale: false,
+            };
+        }
+
+        let stale = was_stale || patched.unread > 0 || wasting;
+        let generation = against + 1;
+        let snapshot = Snapshot {
+            table: Arc::new(patched.table),
+            generation,
+            freshness: if stale {
+                Freshness::Stale
+            } else {
+                Freshness::Current
+            },
+        };
+        let mut map = self.lock();
+        // Re-checked under the lock: `serve` may have handed this directory to a reader in the
+        // window between the two passes, and that reader's rows are the ones we would be replacing.
+        let settled = matches!(
+            map.slots.get(key),
+            Some(Slot::Ready {
+                generation: slot_generation,
+                ..
+            }) if *slot_generation == against
+        );
+        if settled {
+            map.replace(
+                key.clone(),
+                Slot::Ready {
+                    table: Arc::clone(&snapshot.table),
+                    generation,
+                    seen,
+                    stale,
+                },
+            );
+        }
+        drop(map);
+        self.prune_to_budget();
+        if settled {
+            Applied::Patched {
+                snapshot,
+                removed: patched.removed,
+            }
+        } else {
+            Applied::Nothing {
+                marked_stale: self.invalidate(key),
+            }
+        }
     }
 
     /// Frees whole tables, least-recently-touched first, until the cache is back inside its budget.
@@ -1134,5 +1248,218 @@ mod tests {
         let snapshot = claim.fill(table);
         assert_eq!(index.loads(), 1, "exactly one read happened");
         assert_eq!(snapshot.table.len(), 30);
+    }
+
+    /// Installs a synthetic table through the same claim path a read uses, so the slot is a plain
+    /// `Ready` with no filesystem behind it.
+    fn cached(index: &DirIndex, key: &PathKey, names: &[&str]) -> Snapshot {
+        let claim = index
+            .claim(key)
+            .expect("a directory with nothing in flight can be claimed");
+        claim.fill(table_for(key, names))
+    }
+
+    fn units(name: &str) -> Vec<u16> {
+        name.encode_utf16().collect()
+    }
+
+    fn removals(names: &[&str]) -> Patch {
+        Patch {
+            removed: names.iter().map(|name| units(name)).collect(),
+            unread: 0,
+        }
+    }
+
+    fn live_names(snapshot: &Snapshot) -> Vec<String> {
+        snapshot
+            .table
+            .live_indices()
+            .map(|index| String::from_utf16_lossy(snapshot.table.name_at(index)))
+            .collect()
+    }
+
+    #[test]
+    fn a_placed_removal_advances_the_generation_and_the_rows_stay_current() {
+        let key = key_of(std::path::Path::new("D:/docs"));
+        let index = DirIndex::new();
+        let before = cached(&index, &key, &["a.txt", "b.txt", "c.txt"]);
+
+        let applied = index.apply(&key, before.generation, &removals(&["b.txt"]));
+
+        let Applied::Patched { snapshot, removed } = applied else {
+            panic!("the removal should have been placed, got {applied:?}");
+        };
+        assert_eq!(removed, vec![1]);
+        assert_eq!(snapshot.generation, before.generation + 1);
+        assert_eq!(
+            snapshot.freshness,
+            Freshness::Current,
+            "rows a patch fully accounted for are not suspect"
+        );
+        assert_eq!(live_names(&snapshot), ["a.txt", "c.txt"]);
+        assert_eq!(
+            index.loads(),
+            0,
+            "patching is not a read: installing a patch must not touch the filesystem"
+        );
+        assert_eq!(
+            index.peek(&key).expect("still cached").generation,
+            snapshot.generation,
+            "the patched table is the one the cache now serves"
+        );
+    }
+
+    #[test]
+    fn a_patch_against_rows_that_were_replaced_is_dropped_not_applied() {
+        let key = key_of(std::path::Path::new("D:/docs"));
+        let index = DirIndex::new();
+        let stale_view = cached(&index, &key, &["old-a.txt", "old-b.txt"]);
+
+        // A refresh lands while the patch was in flight. `old-a.txt` no longer names anything the
+        // new table holds, so applying the patch would have cut a live row out of the view.
+        let claim = index.claim(&key).unwrap();
+        claim.fill(table_for(&key, &["new-a.txt", "new-b.txt"]));
+
+        let applied = index.apply(&key, stale_view.generation, &removals(&["old-a.txt"]));
+
+        assert!(
+            matches!(applied, Applied::Nothing { marked_stale: true }),
+            "a superseded patch must ask for a read instead: {applied:?}"
+        );
+        let on_offer = index.peek(&key).expect("the refresh's rows");
+        assert_eq!(live_names(&on_offer), ["new-a.txt", "new-b.txt"]);
+        assert!(
+            on_offer.is_stale(),
+            "and they are suspect, because something happened"
+        );
+    }
+
+    #[test]
+    fn a_patch_naming_an_arrival_keeps_the_rows_and_asks_for_a_read() {
+        let key = key_of(std::path::Path::new("D:/docs"));
+        let index = DirIndex::new();
+        let before = cached(&index, &key, &["a.txt", "b.txt"]);
+
+        // One file deleted and one created in the same window: the deletion is exact, the creation
+        // is a row no event can describe.
+        let patch = Patch {
+            removed: vec![units("b.txt")],
+            unread: 1,
+        };
+        let applied = index.apply(&key, before.generation, &patch);
+
+        let Applied::Patched { snapshot, removed } = applied else {
+            panic!("the deletion should still have been placed: {applied:?}");
+        };
+        assert_eq!(removed, vec![1]);
+        assert_eq!(
+            live_names(&snapshot),
+            ["a.txt"],
+            "what the patch could place is on screen already"
+        );
+        assert!(
+            snapshot.is_stale(),
+            "and the missing arrival keeps the table suspect until the read lands"
+        );
+    }
+
+    #[test]
+    fn a_table_eaten_by_its_own_tombstones_is_asked_to_re_read() {
+        let key = key_of(std::path::Path::new("D:/docs"));
+        let index = DirIndex::new();
+        let mut generation = cached(&index, &key, &["a.txt", "b.txt", "c.txt", "d.txt"]).generation;
+
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let applied = index.apply(&key, generation, &removals(&[name]));
+            let Applied::Patched { snapshot, .. } = applied else {
+                panic!("{name} should have been placed");
+            };
+            generation = snapshot.generation;
+            // Three of four rows gone is more dead weight than live table, so the next ask is a
+            // read: the arena and the records have to come back compacted.
+            if name == "c.txt" {
+                assert!(snapshot.is_stale(), "waste beyond the budget must ask");
+            } else {
+                assert!(
+                    !snapshot.is_stale(),
+                    "{name} alone is not waste worth a read"
+                );
+            }
+        }
+        assert_eq!(index.state(&key), State::Stale);
+    }
+
+    #[test]
+    fn a_directory_being_read_is_left_to_its_read() {
+        let key = key_of(std::path::Path::new("D:/docs"));
+        let index = DirIndex::new();
+        let first = cached(&index, &key, &["a.txt", "b.txt"]);
+        let claim = index.claim(&key).unwrap();
+
+        let applied = index.apply(&key, first.generation, &removals(&["a.txt"]));
+
+        assert!(
+            matches!(applied, Applied::Nothing { .. }),
+            "the in-flight read owns these rows: {applied:?}"
+        );
+        drop(claim);
+        assert_eq!(
+            live_names(&index.peek(&key).expect("the abandoned read's rows")),
+            ["a.txt", "b.txt"],
+            "and nothing was cut out from under it"
+        );
+    }
+
+    #[test]
+    fn a_patch_does_not_claim_a_tables_place_in_line() {
+        // Residency follows who looks at a directory, not how busy it is: a patch must not refresh
+        // `seen`, or a build output nobody opened would evict the folder on screen.
+        let hot = key_of(std::path::Path::new("D:/hot"));
+        let cold = key_of(std::path::Path::new("D:/cold"));
+        let one = table_for(&hot, &["a.txt", "b.txt"]).approx_bytes();
+        let index = DirIndex::with_budget_bytes(one as u64 * 2);
+        let hot_rows = cached(&index, &hot, &["a.txt", "b.txt"]);
+        cached(&index, &cold, &["a.txt", "b.txt"]);
+        // Touch the cold one last, so it is the recently used of the two.
+        index.peek(&cold).unwrap();
+
+        for _ in 0..3 {
+            let applied = index.apply(&hot, hot_rows.generation, &removals(&["a.txt"]));
+            if let Applied::Patched { snapshot, .. } = applied {
+                // Re-patching the same generation would be dropped, so follow it forward.
+                index.apply(&hot, snapshot.generation, &removals(&["b.txt"]));
+            }
+        }
+
+        let budget = one as u64;
+        index.set_budget_bytes(budget);
+        assert_eq!(
+            index.state(&hot),
+            State::Empty,
+            "the patched one is the least recently *looked at*"
+        );
+        assert_eq!(index.state(&cold), State::Ready, "the looked-at one stays");
+    }
+
+    #[test]
+    fn a_patch_that_matches_nothing_changes_nothing() {
+        let key = key_of(std::path::Path::new("D:/docs"));
+        let index = DirIndex::new();
+        let before = cached(&index, &key, &["a.txt"]);
+
+        let applied = index.apply(&key, before.generation, &removals(&["ghost.txt"]));
+
+        assert!(
+            matches!(
+                applied,
+                Applied::Nothing {
+                    marked_stale: false
+                }
+            ),
+            "an event for a row that was not there is not a reason to re-read: {applied:?}"
+        );
+        let on_offer = index.peek(&key).unwrap();
+        assert_eq!(on_offer.generation, before.generation);
+        assert!(!on_offer.is_stale());
     }
 }
