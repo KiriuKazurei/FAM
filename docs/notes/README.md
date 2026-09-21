@@ -30,3 +30,6 @@
 | [per-entry-syscall-premise.md](per-entry-syscall-premise.md) | 2 | "每条目录项两次 syscall"被实测否掉（两种读者同为 1.3µs/条目），换 Win32 枚举记录买到的其实是 attrs、长路径控制权与单层原语 |
 | [row-generation-vs-load-attempt.md](row-generation-vs-load-attempt.md) | 3 | 缓存代号该描述"行"还是"尝试"：失败的刷新与放弃的读取都不该让内容看起来变了 |
 | [backoff-and-byte-accounting.md](backoff-and-byte-accounting.md) | 3 | 状态被换走时附属计数没跟着搬：退避窗口翻倍差一、tries 丢失导致不退避、失败保留行时字节漏记 |
+| [notify-watch-loss-is-invisible.md](notify-watch-loss-is-invisible.md) | 4 | 缓冲区溢出与"监视被悄悄撤销"都不可观测：改按目录写时间对账，并用真后端把"删除被监视目录"做成端到端正向证据 |
+| [event-carries-no-target-type.md](event-carries-no-target-type.md) | 4 | 事件只给名字不给身份：翻译处一次算清父目录与 UTF-16 名，改名不配对，`Target` 保留 `Unknown` 且不许猜 |
+| [watch-sweep-costs-a-path-lookup.md](watch-sweep-costs-a-path-lookup.md) | 4 | 一次写时间采样实测 190µs（三个 API 等价、与冷热无关），"探针比重读便宜两个量级"被否，预算改按时间 |
