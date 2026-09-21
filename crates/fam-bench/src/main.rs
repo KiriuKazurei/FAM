@@ -207,8 +207,10 @@ fn ratio(base: u64, now: u64) -> f64 {
 }
 
 fn describe_machine() -> String {
+    /* Rewritten by `run --write`, so anything hand-written here is lost the next time the floors are
+     * re-recorded - which is why the baseline's provenance lives in `docs/notes/` instead. */
     format!(
-        "{} {}, warm cache, fam-bench {}",
+        "{} {}, warm cache, fam-bench {} | provenance: docs/notes/",
         std::env::consts::OS,
         std::env::consts::ARCH,
         env!("CARGO_PKG_VERSION")
