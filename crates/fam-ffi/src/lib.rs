@@ -74,7 +74,14 @@ pub struct FamCore {
     views: Mutex<HashMap<u64, ViewModel>>,
     pending: Arc<Mutex<Vec<FileChange>>>,
     watchers: Mutex<HashMap<u64, Handle>>,
+    /// Events discarded since the pipeline started. v2 reads it against a per-view baseline; v1's
+    /// drain reports what has accumulated since the last drain, which is [`Self::loss_seen`].
     losses: Arc<AtomicU64>,
+    /// How much of [`Self::losses`] a v1 `fam_view_drain` has already reported.
+    ///
+    /// A second counter rather than a `swap(0)` on the first, because zeroing the shared count would
+    /// put it below every v2 view's baseline and silence `FLAG_LOSS` for the rest of the process.
+    loss_seen: AtomicU64,
     next_token: AtomicU64,
     /// v2: the cache every directory view is served from.
     index: DirIndex,
@@ -235,7 +242,14 @@ impl FamCore {
             spawn(SchedulerConfig::from_config(&config), Box::new(sink))
                 .map_err(|error| error.to_string())?,
         ));
-        let loader = Loader::start(receiver, index.clone(), v2.clone(), queue, pipeline);
+        let loader = Loader::start(
+            receiver,
+            index.clone(),
+            v2.clone(),
+            queue,
+            pipeline,
+            Arc::clone(&losses),
+        );
         Ok(Self {
             config,
             store: Mutex::new(store),
@@ -243,6 +257,7 @@ impl FamCore {
             pending,
             watchers: Mutex::new(HashMap::new()),
             losses,
+            loss_seen: AtomicU64::new(0),
             next_token: AtomicU64::new(1),
             index,
             v2,
@@ -279,6 +294,12 @@ impl FamCore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Events discarded so far. Monotonic for the life of the core: nothing resets it, which is what
+    /// lets a v2 view compare it against the baseline it was opened with.
+    fn loss_count(&self) -> u64 {
+        self.losses.load(Ordering::Relaxed)
+    }
+
     fn stats(&self) -> Result<String, String> {
         let store = self.store();
         let stats = store.stats().map_err(|error| error.to_string())?;
@@ -294,7 +315,7 @@ impl FamCore {
             tags: stats.tags,
             manual: stats.manual,
             auto: stats.auto,
-            dropped_events: self.losses.load(Ordering::Relaxed),
+            dropped_events: self.loss_count(),
         };
         serde_json::to_string(&out).map_err(|error| error.to_string())
     }
@@ -517,10 +538,12 @@ impl FamCore {
         for change in queued {
             batcher.absorb(Signal::Row(change));
         }
+        let now = self.loss_count();
+        let seen = self.loss_seen.swap(now, Ordering::Relaxed);
         let batch = fam_sched::Batch::new(
             batcher.drain_parts().0,
             Vec::new(),
-            self.losses.swap(0, Ordering::Relaxed),
+            now.saturating_sub(seen),
         );
 
         let mut views = self.views();
@@ -579,7 +602,7 @@ impl FamCore {
     /// there, and [`fam_dir_state`] is how a shell finds out they have.
     fn dir_open(&self, path: &Path) -> u64 {
         let key = PathKey::of(path);
-        let token = self.v2.open(&self.index, &key);
+        let token = self.v2.open(&self.index, &key, self.loss_count());
         self.request_load(&key);
         self.watch_one_more(&key, path);
         token
@@ -630,13 +653,13 @@ impl FamCore {
     fn dir_status(&self, token: u64) -> Result<wire::FamRowHeader, String> {
         let status = self
             .v2
-            .status(&self.index, token)
+            .status(&self.index, token, self.loss_count())
             .ok_or_else(|| format!("unknown view token {token}"))?;
         let mut flags = 0u8;
         if status.resync {
             flags |= wire::FLAG_RESYNC;
         }
-        if self.losses.load(Ordering::Relaxed) > 0 {
+        if status.loss {
             flags |= wire::FLAG_LOSS;
         }
         Ok(wire::status(

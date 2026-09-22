@@ -35,16 +35,35 @@ pub struct DirView {
     /// Set when the rows changed in a way positions cannot express - a re-read, a new sort, a patch
     /// that arrived while this view was on a superseded generation.
     resync: bool,
+    /// The core's dropped-event count as of the last moment this view was known whole: when it was
+    /// opened, or just before the read that last replaced its rows. A count above this is a loss
+    /// this view actually lived through; one below it happened to somebody else, or before this view
+    /// existed, and is not this view's business.
+    loss_baseline: u64,
 }
 
 impl DirView {
-    fn new(snapshot: Option<Snapshot>) -> Self {
+    fn new(snapshot: Option<Snapshot>, losses: u64) -> Self {
         Self {
             rows: snapshot.map(Collection::from_snapshot),
             cuts: Vec::new(),
             seq: 0,
             resync: false,
+            loss_baseline: losses,
         }
+    }
+
+    /// Moves the baseline up to a count taken *before* the read that just replaced these rows.
+    ///
+    /// Before rather than after, so a loss that lands while the read is in flight stays visible:
+    /// the read cannot have accounted for it.
+    fn advance_loss_baseline(&mut self, losses: u64) {
+        self.loss_baseline = losses;
+    }
+
+    /// Whether this view has outlived a dropped event without being re-read since.
+    fn lost_events(&self, losses: u64) -> bool {
+        losses > self.loss_baseline
     }
 
     /// Applies a sort or filter change. The ordering is about to be rebuilt, so queued positions are
@@ -186,10 +205,12 @@ impl Views {
 
     /// Starts a view of `key` at whatever the cache already holds, and hands back its token. Two
     /// tokens on one directory are allowed, and each gets its own sort, filter and cut queue while
-    /// sharing the cached rows.
-    pub fn open(&self, index: &DirIndex, key: &PathKey) -> u64 {
+    /// sharing the cached rows. `losses` is the core's dropped-event count right now, which becomes
+    /// this token's baseline: a loss that happened before the view existed is not something the view
+    /// was promised and then denied.
+    pub fn open(&self, index: &DirIndex, key: &PathKey, losses: u64) -> u64 {
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        let view = Arc::new(Mutex::new(DirView::new(index.peek(key))));
+        let view = Arc::new(Mutex::new(DirView::new(index.peek(key), losses)));
         self.lock().by_token.insert(token, (key.clone(), view));
         token
     }
@@ -257,17 +278,27 @@ impl Views {
 
     /// Points every view of `key` at the rows a read just installed, and tells their models to start
     /// over: a read is a new table, and its record indices mean something different.
-    pub fn refresh(&self, index: &DirIndex, key: &PathKey) {
+    ///
+    /// `seen` is the dropped-event count taken before that read, and is `Some` only when the read
+    /// succeeded. A completed read is the one thing that makes earlier losses moot - the table below
+    /// is whole again - so it moves each view's baseline up. A failed read leaves the old rows in
+    /// place and the warning with them.
+    pub fn refresh(&self, index: &DirIndex, key: &PathKey, seen: Option<u64>) {
         let Some(snapshot) = index.peek(key) else {
             return;
         };
         for view in self.each_view_of(key) {
-            view.lock().expect("view lock").resync_with(&snapshot);
+            let mut view = view.lock().expect("view lock");
+            view.resync_with(&snapshot);
+            if let Some(losses) = seen {
+                view.advance_loss_baseline(losses);
+            }
         }
     }
 
-    /// What one token can serve right now, which is what every header is built from.
-    pub fn status(&self, index: &DirIndex, token: u64) -> Option<Status> {
+    /// What one token can serve right now, which is what every header is built from. `losses` is the
+    /// core's dropped-event count as of this call.
+    pub fn status(&self, index: &DirIndex, token: u64, losses: u64) -> Option<Status> {
         let (key, view) = self.locate(token)?;
         let view = view.lock().expect("view lock");
         let on_offer = index.peek(&key);
@@ -296,6 +327,7 @@ impl Views {
             generation: view.generation(),
             seq: view.seq(),
             resync: view.pending_resync(),
+            loss: view.lost_events(losses),
         })
     }
 }
@@ -307,6 +339,9 @@ pub struct Status {
     pub generation: u64,
     pub seq: u64,
     pub resync: bool,
+    /// Events were discarded while this view was open and it has not been re-read since, so what is
+    /// on screen may be missing rows.
+    pub loss: bool,
 }
 
 /// Turns a scheduler's row list into what the cache can act on.
@@ -377,6 +412,7 @@ impl Loader {
         views: Views,
         queue: Arc<Mutex<Sender<Job>>>,
         pipeline: Arc<Mutex<Handle>>,
+        losses: Arc<AtomicU64>,
     ) -> Self {
         let thread = std::thread::Builder::new()
             .name("fam-loader".into())
@@ -386,15 +422,20 @@ impl Loader {
                     match job {
                         Job::Load(claim) => {
                             let key = claim.key().clone();
+                            let seen = losses.load(Ordering::Relaxed);
                             match claim.read(&Cancellation::new()) {
                                 Ok(table) => {
                                     claim.fill(table);
+                                    views.refresh(&index, &key, Some(seen));
                                 }
                                 // `fail` records the backoff, so a directory that refuses us is not
-                                // re-read on every repaint.
-                                Err(_) => claim.fail(),
+                                // re-read on every repaint. The rows a view is showing did not
+                                // change, so neither does its loss baseline.
+                                Err(_) => {
+                                    claim.fail();
+                                    views.refresh(&index, &key, None);
+                                }
                             }
-                            views.refresh(&index, &key);
                         }
                         Job::Watch(dir) | Job::Unwatch(dir) => {
                             let mut handle = pipeline
@@ -438,5 +479,84 @@ impl Loader {
         if let Some(handle) = thread.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reads a real directory into the cache the way the loader does, so the views below have a
+    /// table to serve rather than nothing.
+    fn cached(index: &DirIndex, key: &PathKey) {
+        let claim = index.claim(key).expect("nothing else is reading it");
+        let table = claim.read(&Cancellation::new()).expect("temp dir reads");
+        claim.fill(table);
+    }
+
+    fn fixture() -> (tempfile::TempDir, DirIndex, PathKey) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("payload.txt"), "x").unwrap();
+        let index = DirIndex::new();
+        let key = PathKey::of(dir.path());
+        cached(&index, &key);
+        (dir, index, key)
+    }
+
+    /// The bug this pins: `losses` is one counter for the whole core and it never goes down, so a
+    /// view that simply compared it against zero reported "events dropped" on every poll for the
+    /// rest of the process - including views opened long afterwards, which is what made the warning
+    /// worthless. A baseline taken at open is what separates "lived through a loss" from "exists".
+    #[test]
+    fn a_loss_lands_on_the_view_open_for_it_and_not_on_the_one_that_came_later() {
+        let (_dir, index, key) = fixture();
+        let views = Views::new();
+
+        let witness = views.open(&index, &key, 0);
+        let latecomer = views.open(&index, &key, 1);
+
+        assert!(
+            views.status(&index, witness, 1).unwrap().loss,
+            "one event was dropped while this token was open"
+        );
+        assert!(
+            !views.status(&index, latecomer, 1).unwrap().loss,
+            "this token was handed its rows after the loss, so it was promised nothing it missed"
+        );
+    }
+
+    #[test]
+    fn a_completed_read_clears_the_loss_it_postdates_and_a_failed_read_does_not() {
+        let (_dir, index, key) = fixture();
+        let views = Views::new();
+        let token = views.open(&index, &key, 0);
+
+        assert!(views.status(&index, token, 3).unwrap().loss);
+
+        // The count a read carries in is the one taken *before* it started, so a loss during the
+        // read is still standing afterwards.
+        views.refresh(&index, &key, Some(3));
+        assert!(
+            !views.status(&index, token, 3).unwrap().loss,
+            "the rows on offer were read after those events went missing"
+        );
+        assert!(views.status(&index, token, 4).unwrap().loss);
+
+        // A read that failed left the old rows in place, so nothing about them got more certain.
+        views.refresh(&index, &key, None);
+        assert!(views.status(&index, token, 4).unwrap().loss);
+    }
+
+    #[test]
+    fn closing_a_view_does_not_move_the_baseline_of_the_one_still_open() {
+        let (_dir, index, key) = fixture();
+        let views = Views::new();
+        let staying = views.open(&index, &key, 0);
+        let leaving = views.open(&index, &key, 0);
+
+        views.close(leaving);
+
+        assert!(views.status(&index, staying, 1).unwrap().loss);
+        assert!(views.status(&index, leaving, 1).is_none());
     }
 }
