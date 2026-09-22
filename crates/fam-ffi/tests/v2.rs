@@ -826,6 +826,36 @@ fn a_scope_is_walked_and_reported_as_it_was_spelled() {
     );
 }
 
+/// The configured roots used to be a fence: a search scoped to any folder outside them answered
+/// "nothing here" and reported the scope as covered, which is the one answer a user cannot tell apart
+/// from an empty folder. A named scope is the caller restricting themselves, not the configuration
+/// narrowing them further.
+#[test]
+fn a_search_scoped_outside_the_configured_roots_still_finds_its_rows() {
+    let configured = tree(3);
+    let elsewhere = tree(5);
+    let core = Core::with(&configured);
+
+    let token = core.search("f000", Some(&elsewhere.root), None, 0);
+    let header = core.wait_settled(token);
+    assert_eq!(
+        header.total_rows, 5,
+        "the folder holds five matching files and is not one of the roots: {header:?}"
+    );
+    assert_eq!(
+        header.flags & FLAG_INCOMPLETE,
+        0,
+        "and it did cover the scope it was handed: {header:?}"
+    );
+
+    let second = core.search("f000", None, None, 0);
+    assert_eq!(
+        core.wait_settled(second).total_rows,
+        3,
+        "the same query with no scope is still confined to the configured roots"
+    );
+}
+
 #[test]
 fn a_limited_search_is_final_but_says_the_scope_was_not_covered() {
     let tree = tree(10);
