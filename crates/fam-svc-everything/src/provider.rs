@@ -227,6 +227,9 @@ mod tests {
     /// job instead of returning zero rows - which would look to the caller like an empty disk.
     #[test]
     fn a_bound_client_with_no_service_reports_itself_unavailable() {
+        let _guard = crate::CLIENT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let api = unsafe { Api::load_from(&crate::client::vendored()) }
             .expect("the vendored client must bind");
         let provider = EverythingProvider::with_client(api);

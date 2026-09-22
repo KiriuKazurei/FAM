@@ -285,7 +285,11 @@ impl Api {
     }
 
     /// Tears down the client's process-global state (its message window and reply thread) and
-    /// unmaps the DLL. Call once, from the owner thread, before it stops.
+    /// unmaps the DLL.
+    ///
+    /// Once per process, from the thread that owns the client, with no other [`Api`] alive: the
+    /// state this cleans up is shared by every handle in the process, so a second one left holding
+    /// function pointers into an unmapped DLL is a crash rather than a leak.
     pub fn shutdown(self) {
         let library = self.library;
         unsafe {
@@ -314,10 +318,12 @@ mod tests {
 
     #[test]
     fn every_symbol_the_client_calls_resolves_in_the_shipped_dll() {
+        let _guard = crate::CLIENT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // The rename guard: this resolves each name the binding asks for against the artifact that
         // ships next to the core, so a renamed export fails here and names itself, not mid-search.
-        let api = unsafe { Api::load_from(&vendored()).expect("the vendored client must bind") };
-        api.shutdown();
+        // Binding is the whole assertion: `load_from` resolves every name in the table below, so a
+        // rename or a bitness mix-up fails here and names itself.
+        unsafe { Api::load_from(&vendored()).expect("the vendored client must bind") };
     }
 
     /// What `Everything_GetTargetMachine` is **not**, pinned because the wrong reading of it would
@@ -327,13 +333,13 @@ mod tests {
     /// and reports `LoadFailed`.
     #[test]
     fn target_machine_describes_the_service_not_the_dll() {
+        let _guard = crate::CLIENT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let api = unsafe { Api::load_from(&vendored()).expect("the vendored client must bind") };
         assert_eq!(
             api.target_machine(),
             0,
             "no Everything is installed on this machine, so there is no application to report"
         );
-        api.shutdown();
     }
 
     /// The degradation path, verified against a real service that is not there: this development
@@ -341,6 +347,7 @@ mod tests {
     /// empty result set - and the router must then answer from enumeration.
     #[test]
     fn a_machine_without_the_service_probes_as_not_running() {
+        let _guard = crate::CLIENT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let api = unsafe { Api::load_from(&vendored()).expect("the vendored client must bind") };
         let state = api.probe();
         println!("probe against the vendored client with no service: {state:?}");
@@ -349,7 +356,6 @@ mod tests {
             EverythingState::NotRunning,
             "if Everything ever answers on this machine the test is telling the truth, not the design"
         );
-        api.shutdown();
     }
 
     /// The other half of the degradation story, and the half that needs no service to exist: a

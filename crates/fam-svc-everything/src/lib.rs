@@ -16,6 +16,12 @@
 //! - [`provider`] joins them and owns the client, because the API is process-global with a single
 //!   result set: one search at a time, on one thread.
 
+/// The client is one piece of process-global state: whoever posts a query owns the answer. Tests that
+/// bind or probe take this, or one test's teardown pulls the cursor out from under another's - which
+/// showed up once as a single failure in a whole-workspace run and never reproduced.
+#[cfg(all(test, windows))]
+pub(crate) static CLIENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(not(windows))]
 mod absent;
 #[cfg(windows)]
