@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fam_core::{path_buf_from_units, path_key, Cancellation, Config, Kind};
+use fam_core::{path_buf_from_units, path_key, Cancellation, Config, Kind, Prune};
 use fam_svc_enumerate::{list_one_level, RawItem};
 
 pub const DEFAULT_MAX_ENTRIES: usize = 200_000;
@@ -25,10 +25,10 @@ const GROW_QUEUE: usize = 4;
 #[derive(Debug, Clone)]
 pub struct WalkPolicy {
     pub roots: Vec<PathBuf>,
-    /// `path_key` prefixes; anything at or below one of them is skipped.
-    pub excluded_prefixes: Vec<String>,
-    /// Upper-cased directory names skipped at any depth.
-    pub excluded_names: Vec<String>,
+    /// Which paths a listing may not report. Held as a value of its own rather than as two fields,
+    /// because the same rules now have to be applied to whatever *any* search backend answers with -
+    /// an index that lives outside this program knows nothing about them.
+    pub prune: Prune,
     pub threads: usize,
     pub max_entries: usize,
     pub include_directories: bool,
@@ -38,8 +38,7 @@ impl Default for WalkPolicy {
     fn default() -> Self {
         Self {
             roots: Vec::new(),
-            excluded_prefixes: Vec::new(),
-            excluded_names: Vec::new(),
+            prune: Prune::default(),
             threads: DEFAULT_THREADS,
             max_entries: DEFAULT_MAX_ENTRIES,
             include_directories: true,
@@ -51,8 +50,7 @@ impl WalkPolicy {
     pub fn from_config(config: &Config) -> Self {
         Self {
             roots: config.search_roots.clone(),
-            excluded_prefixes: config.excluded_dir_keys(),
-            excluded_names: config.excluded_name_keys(),
+            prune: Prune::from_config(config),
             threads: config.walk_threads.max(1),
             ..Default::default()
         }
@@ -68,29 +66,10 @@ impl WalkPolicy {
         self
     }
 
-    /// True when a walk would never reach `path`: either it sits under an excluded prefix, or one
-    /// of its components carries an excluded directory name. The walk itself prunes at the
-    /// directory level, which is cheaper than asking per file.
+    /// True when a walk would never reach `path`. The walk itself prunes at the directory level,
+    /// which is cheaper than asking per file; this is the question asked from outside.
     pub fn excludes(&self, path: &Path) -> bool {
-        self.prefix_excluded(&path_key(path))
-            || path.components().any(|component| {
-                let name = component.as_os_str().to_string_lossy().to_uppercase();
-                self.excluded_names.contains(&name)
-            })
-    }
-
-    fn prefix_excluded(&self, key: &str) -> bool {
-        self.excluded_prefixes
-            .iter()
-            .any(|prefix| fam_core::is_within(prefix, key))
-    }
-
-    fn name_excluded(&self, path: &Path) -> bool {
-        let Some(name) = path.file_name() else {
-            return false;
-        };
-        let name = name.to_string_lossy().to_uppercase();
-        self.excluded_names.contains(&name)
+        self.prune.excludes(path)
     }
 }
 
@@ -316,8 +295,7 @@ fn start_workers(
 ) -> Vec<thread::JoinHandle<()>> {
     let worker_policy = Arc::new(WalkPolicy {
         roots: Vec::new(),
-        excluded_prefixes: policy.excluded_prefixes.clone(),
-        excluded_names: policy.excluded_names.clone(),
+        prune: policy.prune.clone(),
         threads: shared.max_workers,
         max_entries: policy.max_entries,
         include_directories: policy.include_directories,
@@ -381,14 +359,16 @@ impl Ctx {
         // Both predicates allocate — an uppercase fold and a path key — so they are skipped
         // entirely when nothing is configured to exclude.
         if is_directory
-            && !self.policy.excluded_names.is_empty()
-            && self.policy.name_excluded(&path)
+            && !self.policy.prune.names().is_empty()
+            && path
+                .file_name()
+                .is_some_and(|name| self.policy.prune.excludes_name(name))
         {
             self.shared.skipped.fetch_add(1, Ordering::Relaxed);
             return true;
         }
-        if !self.policy.excluded_prefixes.is_empty()
-            && self.policy.prefix_excluded(&path_key(&path))
+        if !self.policy.prune.prefixes().is_empty()
+            && self.policy.prune.excludes_prefix(&path_key(&path))
         {
             self.shared.skipped.fetch_add(1, Ordering::Relaxed);
             return true;
@@ -459,8 +439,10 @@ mod tests {
     #[test]
     fn policy_exclusions_match_names_and_prefixes_across_separators() {
         let policy = WalkPolicy {
-            excluded_names: vec!["NODE_MODULES".to_string()],
-            excluded_prefixes: vec![path_key(Path::new(r"D:\cache"))],
+            prune: Prune::new(
+                vec![path_key(Path::new(r"D:\cache"))],
+                vec!["NODE_MODULES".to_string()],
+            ),
             ..Default::default()
         };
         assert!(policy.excludes(Path::new("D:/proj/node_modules/pkg/index.js")));

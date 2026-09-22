@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use fam_core::{Config, PathKey, SearchRequest as NameRequest};
+use fam_core::{Config, PathKey, Prune, SearchRequest as NameRequest};
 use fam_sched::{spawn, Batcher, FileChange, Handle, SchedulerConfig, Signal};
 use fam_svc_index::DirIndex;
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
@@ -41,7 +41,7 @@ mod search;
 pub mod wire;
 
 use browse::{Job, Loader, Views};
-use fam_svc_index::SearchRouter;
+use fam_svc_index::{Scope, SearchRouter};
 use search::Searches;
 
 const OK: c_int = 0;
@@ -218,15 +218,21 @@ impl FamCore {
                 queue.extend(batch.changes);
             }
         };
-        let router = Arc::new(SearchRouter::new(vec![
-            // Everything indexes local fixed NTFS volumes only, so enumeration has to stay
-            // available as the fallback rather than being a fallback of last resort.
-            Box::new(fam_svc_everything::EverythingProvider::load()),
-            Box::new(fam_svc_walk::WalkProvider::new(
-                WalkPolicy::from_config(&config),
-                config.scan_timeout(),
-            )),
-        ]));
+        let router = Arc::new(SearchRouter::scoped(
+            vec![
+                // Everything indexes local fixed NTFS volumes only, so enumeration has to stay
+                // available as the fallback rather than being a fallback of last resort.
+                Box::new(fam_svc_everything::EverythingProvider::load()),
+                Box::new(fam_svc_walk::WalkProvider::new(
+                    WalkPolicy::from_config(&config),
+                    config.scan_timeout(),
+                )),
+            ],
+            // An index of the whole volume answers from the whole volume. The roots the user
+            // configured and the subtrees they excluded are enforced here, on the way out, so that
+            // one search means the same thing whichever backend served it.
+            Scope::new(config.search_roots.clone(), Prune::from_config(&config)),
+        ));
         let searches = Searches::start(router);
 
         let pipeline = Arc::new(Mutex::new(

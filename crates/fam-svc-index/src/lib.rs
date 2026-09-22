@@ -17,4 +17,4 @@ pub use cache::{Applied, Claim, DirIndex, Freshness, OpenError, Opened, Snapshot
 pub use collection::{Collection, FetchedRow};
 pub use dir_table::DirTable;
 pub use patch::{Patch, Patched};
-pub use router::{SearchRouter, Searched};
+pub use router::{Scope, SearchRouter, Searched};

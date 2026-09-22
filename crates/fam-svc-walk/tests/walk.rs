@@ -40,8 +40,10 @@ fn sample_tree(root: &Path) -> Vec<PathBuf> {
 fn policy(root: &Path) -> WalkPolicy {
     WalkPolicy {
         roots: vec![root.to_path_buf()],
-        excluded_names: vec!["NODE_MODULES".into(), ".GIT".into()],
-        excluded_prefixes: vec![fam_core::path_key(&root.join("excluded"))],
+        prune: fam_core::Prune::new(
+            vec![fam_core::path_key(&root.join("excluded"))],
+            vec!["NODE_MODULES".into(), ".GIT".into()],
+        ),
         threads: 4,
         max_entries: 10_000,
         include_directories: true,

@@ -9,6 +9,7 @@ mod config;
 mod kind;
 mod list;
 mod pathkey;
+mod prune;
 mod search;
 mod sort;
 mod time;
@@ -25,6 +26,7 @@ pub use pathkey::{
     fold_name_units, is_within, name_units_match, path_buf_from_units, path_key, raw_name_units,
     raw_path_units, PathKey,
 };
+pub use prune::Prune;
 pub use search::{SearchError, SearchHit, SearchOutcome, SearchProvider, SearchRequest};
 pub use sort::{Order, SortKey};
 pub use time::to_epoch_ms;
