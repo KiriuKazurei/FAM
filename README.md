@@ -13,15 +13,20 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 |---|---|
 | `crates/fam-core` | 配置与 Windows 路径归一（`path_key`） |
 | `crates/fam-svc-store` | SQLite 标签存储 |
-| `crates/fam-svc-walk` | 可取消的递归遍历与名称检索 |
+| `crates/fam-svc-enumerate` | 单层目录列举（Win32 后端 + 可取消、可超时的读者） |
+| `crates/fam-svc-walk` | 递归遍历，以及"遍历"这一个名字检索后端 |
+| `crates/fam-svc-index` | 懒目录索引（定长表 + 缓存 + 按目录就地改行）、视图窗口，以及搜索后端的路由与范围规则 |
+| `crates/fam-svc-everything` | Everything 客户端：运行期绑定、状态探测、查询编译、按页取结果 |
 | `crates/fam-sched` | 监视事件 → 有界队列 → 批量合并的行变更 |
-| `crates/fam-view` | 带位置的行模型 |
-| `crates/fam-ffi` | 对 C++ 暴露的 JSON-over-C ABI（`famcore.dll`） |
+| `crates/fam-view` | 带位置的行模型（v1 视图，待拆除） |
+| `crates/fam-ffi` | 对 C++ 暴露的 ABI（`famcore.dll`）：v1 是 JSON，v2 是定长行缓冲 + 窗口化 |
+| `crates/fam-bench` | 度量台与地板门槛 |
 | `apps/fam-cli` | `fam` 命令行（无头测试台） |
 | `apps/fam-shell` | Qt6 Widgets 界面 |
 
-工程处于**资源管理器重建**的起点：当前实现是"查询即递归遍历"的检索原型，
-正在改为以懒目录索引 + 流式虚拟化为核心的浏览架构，见 `docs/legacy-specs.md` 与重构计划。
+工程处于**资源管理器重建**之中：浏览与搜索都已改为懒目录索引 + 流式虚拟化，
+名字检索按"能答全才问"在 Everything 与遍历之间路由，两者共用同一套范围规则。
+旧栈的规格见 `docs/legacy-specs.md`，逐增量的取舍见 `docs/notes/`。
 
 #### 构建
 CLI 与测试用默认工具链：
@@ -53,8 +58,12 @@ cmake --build apps/fam-shell/build
 抓界面截图验证时用原生 `windows` 平台插件——`QT_QPA_PLATFORM=offscreen` 没有字体库，
 所有字形（含 ASCII）都会渲染成豆腐块。
 
-#### 软件架构
-单进程形态，不再设网关层与多语言分层：
+#### 软件架构（旧栈，重建之前的形态）
+
+> 这一节记的是**被替换掉的那套**，保留是因为它解释了重建在避开什么坑；
+> 今天的架构看上面的 crate 表与 `docs/notes/`。当前实现与这里相反的一点是：
+> 索引确实自建了（`fam-svc-index`），Everything 只是其中一个可选后端。
+
 
 > 核心逻辑
 >> Rust 单体，文件监视采用有界队列 + 满即丢弃 + 单消费者串行化，向界面回推变更

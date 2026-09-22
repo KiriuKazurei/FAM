@@ -6,7 +6,7 @@
 //! enumeration? - unanswerable, and answering them with a provider written from scratch would test a
 //! shape that does not exist.
 //!
-//! So the fake is the *other* half of the real thing. Everything below [`drain`](crate::drain) is
+//! So the fake is the *other* half of the real thing. Everything below [`drain`](crate::search::drain) is
 //! untouched: the fake supplies rows the way the service's result list does, and the paging loop,
 //! the offset arithmetic, the ceiling, the cancellation checks, the kind bucket and the re-check all
 //! run as they do against a bound DLL.
@@ -15,7 +15,7 @@
 //! volume and knows nothing about the caller's roots or exclusions, so a fake that filtered its own
 //! corpus to fit the request would hide exactly the hole the router's own scope check has to close.
 //! Rows that do not match the request are dropped by
-//! [`to_hit`](crate::to_hit) instead - which is what happens to the query layer's
+//! [`to_hit`](crate::search::to_hit) instead - which is what happens to the query layer's
 //! over-approximation, so the two are tested by the same path.
 //!
 //! Public because the crate that routes between providers uses it, and `#[cfg(test)]` would not
@@ -89,7 +89,7 @@ impl FakeEverything {
     }
 
     /// Rows from `offset`, at most `want` of them - and fewer only when the list has run out, which
-    /// is the whole contract [`drain`](crate::drain) depends on.
+    /// is the whole contract [`drain`](crate::search::drain) depends on.
     fn whole_list(&self, offset: u32, want: u32) -> Vec<RawRow> {
         let start = offset as usize;
         let end = start.saturating_add(want as usize).min(self.rows.len());
@@ -136,7 +136,7 @@ impl SearchProvider for FakeEverything {
 /// One result row, from the path a test spelled it as.
 ///
 /// The size is the length of that spelling, which is all a test needs it to be: sizes and dates are
-/// the service's business, and [`to_hit`](crate::to_hit) has its own tests for passing them through.
+/// the service's business, and [`to_hit`](crate::search::to_hit) has its own tests for passing them through.
 fn row(spec: &str) -> RawRow {
     let folder = spec.ends_with('/');
     let full = spec.trim_end_matches('/').replace('/', "\\");

@@ -435,7 +435,12 @@ impl FamCore {
         if let Some(within) = within {
             request = request.scope(within);
         }
-        request = request.limit(limit.unwrap_or(LEGACY_SEARCH_LIMIT).max(1));
+        request = request.limit(
+            limit
+                .unwrap_or(LEGACY_SEARCH_LIMIT)
+                .min(MAX_SEARCH_LIMIT as usize)
+                .max(1),
+        );
 
         let mut hits: Vec<SearchHit> = Vec::new();
         let searched = self
@@ -854,7 +859,10 @@ impl FamCore {
             names.extend_from_slice(&path);
             items.push(item);
         }
-        if (first as usize) + items.len() < head.total_rows as usize {
+        // Only a request that asked for rows can be told it got fewer of them. `count` 0 is the
+        // cheap way to poll a search's state, and a flag on that would read as "rows were dropped
+        // from the buffer you asked for" - and make the shell retry for a bigger buffer every poll.
+        if count > 0 && (first as usize) + items.len() < head.total_rows as usize {
             head.flags |= wire::FLAG_TRUNCATED;
         }
         Ok(wire::encode(

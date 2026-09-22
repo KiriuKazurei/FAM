@@ -43,7 +43,8 @@ pub struct RawRow {
 }
 
 impl RawRow {
-    /// A row for tests and for callers that have a name and nothing else.
+    /// A row for the paging tests, which have a name and nothing else.
+    #[cfg(test)]
     pub fn file(name: &str, path: &str) -> Self {
         Self {
             name: name.encode_utf16().collect(),

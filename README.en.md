@@ -9,13 +9,18 @@ inference are out of scope and handled by a separate project. File tags are pers
 #### Status
 The Go / Java / Electron / C++ stacks were removed and the code rebuilt as a Rust workspace plus a
 Qt front-end: `fam-core` (config, Windows path keys), `fam-svc-store` (SQLite tags),
-`fam-svc-walk` (cancellable enumeration and name search), `fam-sched` (events merged into batched
-row deltas), `fam-view` (positioned row model), `fam-ffi` (JSON-over-C ABI producing
-`famcore.dll`), `apps/fam-cli` and `apps/fam-shell` (Qt6 Widgets).
+`fam-svc-enumerate` (one-level directory reads), `fam-svc-walk` (recursive enumeration, and the
+enumeration search backend), `fam-svc-index` (the lazy directory index, view windows, and the search
+router with its scope rules), `fam-svc-everything` (the Everything client: runtime binding, state
+probe, query compilation, paged results), `fam-sched` (events merged into batched row deltas),
+`fam-view` (positioned row model - v1, awaiting removal), `fam-ffi` (the ABI producing
+`famcore.dll`: v1 JSON, v2 fixed-size row buffers with windowed reads), `fam-bench` (measurements
+and the floor gate), `apps/fam-cli` and `apps/fam-shell` (Qt6 Widgets).
 
-The rebuild is just beginning: what exists today is a "walk the tree per query" search prototype,
-and it is being turned into a browsing architecture built on a lazy directory index with streamed,
-virtualised results. See `docs/legacy-specs.md`.
+The rebuild is under way: browsing and search both run on the lazy directory index with streamed,
+virtualised results, and a name search is routed between Everything and enumeration by which of them
+can answer the whole request - under one shared set of scope rules. `docs/legacy-specs.md` records
+what the old system was; `docs/notes/` records what each increment decided.
 
 #### Build
 The CLI and tests use the default toolchain:
@@ -37,7 +42,12 @@ cargo +stable-x86_64-pc-windows-gnu build -p fam-ffi --target x86_64-pc-windows-
 For UI screenshots use the native `windows` platform plugin: `QT_QPA_PLATFORM=offscreen` has no
 font database, so every glyph including ASCII renders as a tofu box.
 
-#### Software Architecture
+#### Software Architecture (the legacy system, as it was before the rebuild)
+
+This section describes what was **replaced**. It is kept because it explains what the rebuild is
+avoiding; one point is now the opposite of the code: the index *is* self-built (`fam-svc-index`),
+and Everything is one optional backend behind it.
+
 Single process, no gateway layer and no multi-language tiering:
 
 - **Core** — Rust monolith; file watching uses a bounded queue that drops when full, consumed

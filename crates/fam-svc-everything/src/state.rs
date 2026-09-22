@@ -22,10 +22,13 @@ pub enum EverythingState {
     NotRunning,
     /// A service answered and its database is still being built.
     Indexing,
-    /// Ready to answer for exactly these volumes. Everything indexes local fixed NTFS only, so this
-    /// list is what the router in `fam-svc-index` narrows its choice by. An empty list is still
-    /// `Ready`: reachable, indexing nothing, which routes every query to the walker anyway.
-    Ready { volumes: Vec<String> },
+    /// A service answered and its database is loaded, so a query will come back.
+    ///
+    /// This says nothing about *which* volumes are answered for, because the client API cannot say:
+    /// there is no "what do you index" call (`Everything_IsVolumeResult` is per result row). What is
+    /// indexed is decided from the local drive scan in [`crate::volumes`], and that is what the
+    /// router narrows by - not this state.
+    Ready,
 }
 
 /// Everything one probe step can observe, as data.
@@ -37,7 +40,6 @@ pub struct Probe {
     pub last_error: u32,
     /// `Everything_IsDBLoaded()`.
     pub db_loaded: bool,
-    pub volumes: Vec<String>,
 }
 
 impl Probe {
@@ -48,7 +50,6 @@ impl Probe {
             query_succeeded: false,
             last_error: ERROR_IPC,
             db_loaded: false,
-            volumes: Vec::new(),
         }
     }
 }
@@ -68,9 +69,7 @@ pub fn judge(probe: &Probe) -> EverythingState {
     if !probe.db_loaded {
         return EverythingState::Indexing;
     }
-    EverythingState::Ready {
-        volumes: probe.volumes.clone(),
-    }
+    EverythingState::Ready
 }
 
 /// The first probe delay after start-up, and after a state change.
@@ -89,13 +88,12 @@ pub fn next_probe_delay(previous: Duration) -> Duration {
 mod tests {
     use super::*;
 
-    fn answered(db_loaded: bool, volumes: Vec<String>) -> Probe {
+    fn answered(db_loaded: bool) -> Probe {
         Probe {
             dll_loaded: true,
             query_succeeded: true,
             last_error: 0,
             db_loaded,
-            volumes,
         }
     }
 
@@ -107,7 +105,6 @@ mod tests {
             query_succeeded: true,
             last_error: 0,
             db_loaded: true,
-            volumes: vec!["C:\\".into()],
         };
         assert_eq!(judge(&probe), EverythingState::DllMissing);
         assert_eq!(judge(&Probe::no_dll()), EverythingState::DllMissing);
@@ -120,7 +117,6 @@ mod tests {
             query_succeeded: false,
             last_error: ERROR_IPC,
             db_loaded: false,
-            volumes: Vec::new(),
         };
         assert_eq!(judge(&probe), EverythingState::NotRunning);
     }
@@ -134,7 +130,6 @@ mod tests {
                 query_succeeded: false,
                 last_error: error,
                 db_loaded: true,
-                volumes: Vec::new(),
             };
             assert_eq!(judge(&probe), EverythingState::NotRunning, "error {error}");
         }
@@ -142,31 +137,12 @@ mod tests {
 
     #[test]
     fn an_answering_service_still_building_its_index_is_indexing() {
-        assert_eq!(
-            judge(&answered(false, vec!["C:\\".into()])),
-            EverythingState::Indexing
-        );
+        assert_eq!(judge(&answered(false)), EverythingState::Indexing);
     }
 
     #[test]
-    fn ready_carries_the_volumes_the_router_needs_to_narrow_by() {
-        assert_eq!(
-            judge(&answered(true, vec!["C:\\".into(), "D:\\".into()])),
-            EverythingState::Ready {
-                volumes: vec!["C:\\".into(), "D:\\".into()]
-            }
-        );
-    }
-
-    #[test]
-    fn reachable_but_indexing_nothing_is_still_ready() {
-        // Collapsing this to `NotRunning` would make the log lie: the service *is* answering.
-        assert_eq!(
-            judge(&answered(true, Vec::new())),
-            EverythingState::Ready {
-                volumes: Vec::new()
-            }
-        );
+    fn an_answering_service_with_its_database_loaded_is_ready() {
+        assert_eq!(judge(&answered(true)), EverythingState::Ready);
     }
 
     #[test]

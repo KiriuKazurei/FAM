@@ -151,7 +151,7 @@ impl SearchProvider for EverythingProvider {
         // Goes through `state`, which refreshes on its own schedule and never waits for the client:
         // the router asks this on the way to a search, and a first-ever ask has to be able to find
         // out the truth rather than read a cache nobody has filled yet.
-        matches!(self.state(), EverythingState::Ready { .. })
+        matches!(self.state(), EverythingState::Ready)
     }
 
     fn search(
@@ -184,7 +184,7 @@ impl SearchProvider for EverythingProvider {
         let state = api.probe();
         session.state = state.clone();
         *Self::lock(&self.observed) = state.clone();
-        if !matches!(state, EverythingState::Ready { .. }) {
+        if !matches!(state, EverythingState::Ready) {
             return Err(SearchError::Unavailable {
                 provider: self.id(),
                 reason: format!("the service is {state:?}"),

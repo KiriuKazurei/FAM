@@ -874,6 +874,42 @@ fn a_limited_search_is_final_but_says_the_scope_was_not_covered() {
     assert_eq!(rows.len(), 3, "exactly the ceiling, no more");
 }
 
+/// A status poll asks for no rows, so there is no "you got fewer than you asked for" to report -
+/// and a shell that retries when it sees that flag on an empty page pays two IPC round trips per
+/// poll, forever. The flag has to mean something only when rows were asked for.
+#[test]
+fn a_status_poll_says_nothing_about_truncation_while_a_short_page_does() {
+    let tree = tree(10);
+    let core = Core::with(&tree);
+    let token = core.search("f000", None, None, 0);
+    assert_eq!(
+        core.wait_settled(token).total_rows,
+        10,
+        "the poll below is only meaningful with rows to withhold"
+    );
+
+    assert_eq!(
+        core.search_state(token).flags & FLAG_TRUNCATED,
+        0,
+        "count 0 asked for nothing, so nothing was left out"
+    );
+
+    let (header, rows) = core.search_page(token, 0, 3, 4096);
+    assert_eq!(rows.len(), 3);
+    assert_ne!(
+        header.flags & FLAG_TRUNCATED,
+        0,
+        "a page that stopped short of the total says so: {header:?}"
+    );
+
+    let (last, _) = core.search_page(token, 7, 3, 4096);
+    assert_eq!(
+        last.flags & FLAG_TRUNCATED,
+        0,
+        "and the page that reaches the end does not: {last:?}"
+    );
+}
+
 #[test]
 fn a_cancelled_search_stops_and_frees_the_thread_that_ran_it() {
     let tree = tree(1500);

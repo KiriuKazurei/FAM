@@ -4,6 +4,8 @@
 //! provider unconditionally - still compiles elsewhere, answering the only question it can: not
 //! available, so name search is served by enumeration.
 
+use std::path::PathBuf;
+
 use fam_core::{
     Cancellation, SearchError, SearchHit, SearchOutcome, SearchProvider, SearchRequest,
 };
@@ -13,7 +15,14 @@ use crate::state::EverythingState;
 pub struct EverythingProvider;
 
 impl EverythingProvider {
-    pub fn load() -> Self {
+    /// The same constructor the Windows provider offers, with the same argument ignored: there is no
+    /// index here to decide coverage for, so which roots were configured cannot change any answer.
+    pub fn load(_roots: &[PathBuf]) -> Self {
+        Self
+    }
+
+    /// The Windows crate's "no client was found" provider. Same answer, no session to hold.
+    pub fn without_client() -> Self {
         Self
     }
 

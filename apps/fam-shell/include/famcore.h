@@ -162,6 +162,13 @@ int fam_find(FamCore *core, const char *tags_json, int match_all, const char *wi
 
 /* Tokens identify live view models. 0 signals failure. */
 uint64_t fam_view_new(FamCore *core, const char *sort, const char *order, char **err);
+/*
+ * fam_view_search is the one v1 call that can block: it runs the search on the calling thread, and
+ * the backends it shares with v2 are not all free to run at once - the Everything client holds one
+ * result set for the whole process, so a v2 search in flight makes this wait for it. v2's
+ * fam_search_begin exists precisely so a UI thread never waits on a search; calling the v1 form from
+ * a paint or a scroll is not safe in the way the v2 group above is.
+ */
 int fam_view_search(FamCore *core, uint64_t view, const char *query, const char *within,
                     const char *kind, uint32_t limit, char **out, char **err);
 int fam_view_drain(FamCore *core, uint64_t view, char **out, char **err);

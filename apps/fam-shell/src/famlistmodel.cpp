@@ -181,6 +181,7 @@ int FamListModel::applyCuts(const QVector<quint32> &positions) {
     /* Positions are already relative to the view as the earlier ones left it, so a run of equal
      * numbers is a block of neighbours and one pair of signals covers all of it. */
     int pairs = 0;
+    quint32 removed = 0;
     for (int index = 0; index < positions.size();) {
         const int first = qMin(int(positions.at(index)), int(m_total));
         int run = 1;
@@ -192,10 +193,15 @@ int FamListModel::applyCuts(const QVector<quint32> &positions) {
             beginRemoveRows(QModelIndex(), first, last);
             endRemoveRows();
             ++pairs;
+            /* Counted here rather than taken from `positions.size()`: a position at or past the end
+             * is clamped away above, and subtracting it anyway would underflow an unsigned total
+             * into a negative `rowCount()`. The model's total can lag the core's - `fetchAt` adopts
+             * a new one without signals - so "past the end" is a real state, not a corrupted call. */
+            removed += quint32(last - first + 1);
         }
         index += run;
     }
-    m_total -= quint32(positions.size());
+    m_total -= qMin(removed, m_total);
     /* The window is dropped once the burst is over, not between ranges: a repaint that lands inside
      * the loop would otherwise refetch against a row count that is still mid-update. */
     m_first = -1;

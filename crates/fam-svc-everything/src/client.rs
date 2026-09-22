@@ -212,9 +212,9 @@ impl Api {
     /// running. Waiting is not an option - this runs on the search owner thread, and a service that
     /// is starting up must not stall it.
     ///
-    /// `Ready { volumes }` comes back with an empty list: the client API has no "which volumes do you
-    /// index" call (`Everything_IsVolumeResult` is per result row), so the volume set is gathered
-    /// from the local drive scan in `crate::volumes` and attached by the caller.
+    /// `Ready` says a query would come back, not which volumes it would come back for: the client
+    /// API has no "which volumes do you index" call (`Everything_IsVolumeResult` is per result row),
+    /// so that set comes from the local drive scan in `crate::volumes` instead.
     pub fn probe(&self) -> EverythingState {
         // Reset the shared search string first: the client holds one, and a probe that re-sent the
         // last real query would report whatever that one's answer was.
@@ -225,7 +225,6 @@ impl Api {
             query_succeeded: unsafe { (self.query)(0) != 0 },
             last_error: unsafe { (self.last_error)() },
             db_loaded: unsafe { (self.is_db_loaded)() != 0 },
-            volumes: Vec::new(),
         };
         judge(&probe)
     }
@@ -358,22 +357,28 @@ mod tests {
         );
     }
 
-    /// The other half of the degradation story, and the half that needs no service to exist: a
-    /// machine where the client is not deployed beside the application at all. `DllMissing` is the
-    /// one state no amount of waiting turns into `Ready`, which is why the owner thread stops
-    /// probing when it sees it.
+    /// The precondition the rest of this file's degradation tests stand on: nothing named
+    /// `Everything64.dll` sits beside the test binary, so `load()` on this machine has no client to
+    /// find. `DllMissing` is the one state no amount of waiting turns into `Ready`, which is why the
+    /// owner thread stops probing when it sees it - and why it has to be reachable at all.
     ///
-    /// This asserts something about the test environment - no `Everything64.dll` beside the test
-    /// binary - which is true of `target/<profile>/deps` and would only break if a build step started
-    /// copying the client there.
+    /// This checks the directory rather than calling `load_from_application_dir` and asserting the
+    /// error. The latter is what stood here until it failed once in about thirty workspace runs and
+    /// never in a single-crate one, with no such file present: a base-name load can be answered by a
+    /// module some *other* test in the same process already mapped by full path, and nothing in this
+    /// test can prevent or detect that. The mechanism was never pinned down, which is itself the
+    /// reason - an assertion whose failure cannot be explained does not belong in a gate. What the
+    /// loader does when the file really is missing is covered by
+    /// [`a_path_that_is_not_a_dll_fails_to_load_rather_than_panicking`], on a path no other test
+    /// touches.
     #[test]
-    fn a_machine_without_the_client_deployed_fails_to_load() {
+    fn no_client_is_deployed_beside_the_test_binary() {
+        let exe = std::env::current_exe().expect("a test binary has a path");
+        let directory = exe.parent().expect("a test binary sits in a directory");
+        let deployed = directory.join(CLIENT_DLL);
         assert!(
-            matches!(
-                unsafe { Api::load_from_application_dir() },
-                Err(ClientError::LoadFailed { .. })
-            ),
-            "the client should not be sitting next to the test binary"
+            !deployed.exists(),
+            "{deployed:?} is deployed beside the test binary, so `DllMissing` is not what this              machine is reporting"
         );
     }
 

@@ -45,10 +45,10 @@ pub use client::{Api, ClientError, CLIENT_DLL};
 #[cfg(windows)]
 pub use provider::EverythingProvider;
 pub use query::compile;
-/// The paging loop and the row conversion, public because a second implementation of the same
-/// contract - the deterministic fake in this crate's tests - is exercised against these rather than
-/// against the DLL.
-pub use search::{drain, to_hit, RawRow, PAGE};
+/// How many rows one request asks for. Public because the router's tests size their fakes by it;
+/// the paging loop and the row conversion next to it are not, because nothing outside this crate
+/// reaches past the [`SearchProvider`](fam_core::SearchProvider) trait.
+pub use search::PAGE;
 pub use state::{
     judge, next_probe_delay, EverythingState, Probe, ERROR_IPC, PROBE_FIRST, PROBE_MAX,
 };
