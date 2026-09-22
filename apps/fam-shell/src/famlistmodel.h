@@ -8,6 +8,8 @@
 
 #include "bridge.h"
 
+class IconCache;
+
 /* A listing painted from a v2 view without ever holding the whole thing: a directory, or a search's
  * rows as they arrive.
  *
@@ -19,6 +21,11 @@
  * Change events arrive as positions to cut, in the order they must be applied. Consecutive equal
  * positions are a run of neighbours and become one beginRemoveRows, so deleting a thousand adjacent
  * files is one signal pair rather than a thousand.
+ *
+ * Icons are a join over data each row already carries - extension and attributes - never a field of
+ * the row: the cache hands back a placeholder while a worker resolves the real glyph, and when a
+ * batch lands only the window currently on screen is repainted, with DecorationRole named so that
+ * delegates listening for text alone skip the signal entirely.
  */
 class FamListModel final : public QAbstractListModel {
     Q_OBJECT
@@ -55,12 +62,21 @@ public:
     /* Rows around `row` are pulled in one fetch; the viewport is what a screenful needs. */
     void setViewport(int rows) { m_viewport = qMax(rows, 16); }
 
+    /* Where icons come from. Without one, DecorationRole answers empty and rows paint text-only. */
+    void setIconCache(IconCache *cache);
+
     quint32 totalRows() const { return m_total; }
     QString pathAt(int index) const;
     int count() const { return int(m_total); }
 
     /* Test seam: how many rows the model has materialised right now. */
     int materialised() const { return m_rows.size(); }
+
+private slots:
+    /* A batch of icons landed. Only the window currently materialised can be on screen, so that is
+     * the range repainted - O(viewport), never O(rows) - and DecorationRole is named in the signal
+     * so a delegate that only reads text skips it. */
+    void iconsResolved();
 
 private:
     const FamViewRow *rowAt(int index) const;
@@ -70,6 +86,7 @@ private:
     QStringList m_kinds;
     quint64 m_token = 0;
     Fetcher m_fetch;
+    IconCache *m_icons = nullptr;
 
     /* Painting is what triggers a fetch, so the window it fills is mutable state - rows the core
      * already served, never guesses about rows it did not. */

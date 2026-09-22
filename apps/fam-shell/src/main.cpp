@@ -8,6 +8,7 @@
 #include <QTimer>
 
 #include "famcore.h"
+#include "iconcache.h"
 #include "mainwindow.h"
 
 int main(int argc, char *argv[]) {
@@ -83,7 +84,15 @@ int main(int argc, char *argv[]) {
 
     if (parser.isSet(grabOption)) {
         const QString target = parser.value(grabOption);
+        /* Scroll first, grab a second later: the scroll is what makes every paint ask the icon
+         * worker for its extension, and the second is what lets the answers land, so the counters
+         * below are read after the code path that could leak an HICON has actually run. */
+        QTimer::singleShot(1500, [&window]() { window.scrollForSelfCheck(); });
         QTimer::singleShot(2500, [&window, &app, &boot, target]() {
+            if (window.icons() != nullptr) {
+                qInfo("icons: extracted=%d destroyed=%d cached=%d", window.icons()->extracted(),
+                      window.icons()->destroyed(), window.icons()->cached());
+            }
             if (window.grab().save(target)) {
                 qInfo("self-check wrote %s at %lldms",
                       qUtf8Printable(QDir::toNativeSeparators(target)), boot.elapsed());

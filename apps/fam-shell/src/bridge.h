@@ -27,6 +27,10 @@ struct FamViewRow {
     qint64 modifiedMs = 0;
     quint8 kind = 0;
     bool directory = false;
+    /* The raw dwFileAttributes the enumeration recorded. Nothing in the shell reads it but the icon
+     * layer, which needs the directory/offline bits to ask the shell's image list about a name
+     * without opening it. */
+    quint32 attrs = 0;
 };
 
 /* A v2 header plus whatever the call that produced it put behind it. */

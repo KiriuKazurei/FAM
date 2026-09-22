@@ -9,6 +9,7 @@
 #include "bridge.h"
 #include "famlistmodel.h"
 
+class IconCache;
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -29,6 +30,13 @@ public:
      * is the whole of the subscription. Returns false with `error` set on failure. */
     bool openFolder(const QString &dir, QString *error);
 
+    IconCache *icons() const { return m_icons; }
+
+    /* Drives the list through several viewports and lets the paints settle. The headless gate uses
+     * it to make the icon worker touch every extension in a folder before the HICON counters are
+     * read: a leak is only visible after the code path has actually run. */
+    void scrollForSelfCheck();
+
 private slots:
     void runSearch();
     void pollChanges();
@@ -43,6 +51,7 @@ private:
 
     std::unique_ptr<FamBridge> m_bridge;
     FamListModel *m_model = nullptr;
+    IconCache *m_icons = nullptr;
     QLineEdit *m_search = nullptr;
     QComboBox *m_kind = nullptr;
     QListView *m_list = nullptr;

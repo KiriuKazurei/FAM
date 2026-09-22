@@ -29,9 +29,12 @@ add_executable(fam-shell WIN32
     src/main.cpp
     src/mainwindow.cpp
     src/bridge.cpp
-    src/famlistmodel.cpp)
+    src/famlistmodel.cpp
+    src/iconcache.cpp)
 target_include_directories(fam-shell PRIVATE include src)
-target_link_libraries(fam-shell PRIVATE Qt6::Widgets famcore)
+# The icon layer talks to the shell's image lists directly: shell32 for SHGetFileInfoW and
+# SHGetImageList, comctl32 for the IImageList vtable, ole32 for the STA the worker lives in.
+target_link_libraries(fam-shell PRIVATE Qt6::Widgets famcore shell32 comctl32 ole32)
 
 # Console target so the ABI can be verified without a display server.
 add_executable(abi-smoke

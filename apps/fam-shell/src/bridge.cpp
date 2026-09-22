@@ -297,6 +297,7 @@ bool FamBridge::decode(const unsigned char *buffer, int written, FamWindow *wind
         row.modifiedMs = record.modified_ms;
         row.kind = record.kind;
         row.directory = (record.flags & 0x1u) != 0;
+        row.attrs = record.attrs;
         window->rows.append(row);
     }
     return true;

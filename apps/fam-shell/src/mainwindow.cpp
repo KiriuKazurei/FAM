@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -11,9 +12,12 @@
 #include <QLineEdit>
 #include <QListView>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
+
+#include "iconcache.h"
 
 MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, QWidget *parent)
     : QWidget(parent) {
@@ -33,6 +37,10 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     m_bridge->coreKinds(&m_kinds, &error);
 
     m_model = new FamListModel(this);
+    /* The icon layer outlives every view and is shared by all of them: one worker thread, one
+     * extension table, one cache. */
+    m_icons = new IconCache(this);
+    m_model->setIconCache(m_icons);
 
     m_search = new QLineEdit(this);
     m_search->setPlaceholderText(QStringLiteral("name terms — every word must appear"));
@@ -360,4 +368,31 @@ void MainWindow::setStatus(const QString &text) {
     if (m_status != nullptr) {
         m_status->setText(text);
     }
+}
+
+void MainWindow::scrollForSelfCheck() {
+    if (m_list == nullptr || m_list->verticalScrollBar() == nullptr) {
+        return;
+    }
+    QScrollBar *bar = m_list->verticalScrollBar();
+    const int max = bar->maximum();
+    /* Four stops, three viewports' worth of rows: enough paints to have asked the icon worker about
+     * every extension the folder holds, which is what the HICON counters are read against a moment
+     * later. processEvents is what lets each stop actually paint - and therefore actually request
+     * icons - before the next one replaces it. The range is logged because a storm over a zero
+     * range would prove nothing and look identical in the counters. */
+    /* Nine stops then home: a viewport shows about seventeen rows, so fewer stops would leave bands
+     * of the folder unpainted - and an extension nobody painted is an extension the icon worker was
+     * never asked about, which is exactly what the HICON counters are meant to have exercised.
+     * processEvents plus repaint is what makes each stop actually paint: a deferred paint would
+     * collapse all nine into one paint of wherever the bar ended. */
+    for (int step = 0; step <= 8; ++step) {
+        bar->setValue(max * step / 8);
+        QCoreApplication::processEvents();
+        m_list->viewport()->repaint();
+    }
+    bar->setValue(0);
+    QCoreApplication::processEvents();
+    m_list->viewport()->repaint();
+    qInfo("self-check scrolled a %d-step range, ended at %d", max, bar->value());
 }

@@ -3,6 +3,8 @@
 #include <QDateTime>
 #include <QDir>
 
+#include "iconcache.h"
+
 QString formatSize(quint64 bytes) {
     static const char *units[] = {"B", "K", "M", "G", "T"};
     if (bytes < 1024) {
@@ -18,6 +20,26 @@ QString formatSize(quint64 bytes) {
 }
 
 FamListModel::FamListModel(QObject *parent) : QAbstractListModel(parent) {}
+
+void FamListModel::setIconCache(IconCache *cache) {
+    m_icons = cache;
+    if (m_icons != nullptr) {
+        connect(m_icons, &IconCache::resolved, this, &FamListModel::iconsResolved);
+    }
+}
+
+void FamListModel::iconsResolved() {
+    if (m_first < 0 || m_rows.isEmpty() || m_total == 0) {
+        return;
+    }
+    /* The materialised window is exactly what a paint can put on screen, so it is exactly what a
+     * batch of new icons can change. Rows outside it fetch - and find their icon already cached -
+     * when they are painted. */
+    const int last = qMin(int(m_total) - 1, m_first + int(m_rows.size()) - 1);
+    if (m_first <= last) {
+        emit dataChanged(index(m_first), index(last), {Qt::DecorationRole});
+    }
+}
 
 int FamListModel::rowCount(const QModelIndex &parent) const {
     return parent.isValid() ? 0 : int(m_total);
@@ -126,6 +148,19 @@ QVariant FamListModel::data(const QModelIndex &index, int role) const {
             display += QStringLiteral("  [%1]").arg(m_kinds.at(row->kind));
         }
         return display;
+    }
+    case Qt::DecorationRole: {
+        if (m_icons == nullptr) {
+            return {};
+        }
+        /* The key is built from what the row already carries - name, attributes - so a paint never
+         * opens a path. Only a tier 2 key, whose icon is not a function of its extension, needs the
+         * composed path, and only then is it composed. */
+        IconKey key = iconKeyFor(row->name, QString(), row->attrs, row->directory);
+        if (key.tier2) {
+            key.path = pathAt(index.row());
+        }
+        return m_icons->iconFor(key);
     }
     case Qt::ToolTipRole:
     case PathRole:
