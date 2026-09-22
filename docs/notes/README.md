@@ -44,3 +44,4 @@
 | [increment-6-what-this-machine-can-prove.md](increment-6-what-this-machine-can-prove.md) | 6 | Everything 客户端的账：哪些代码真跑过（真 DLL 绑定与退化、真卷扫描、真 `drain` 分页/取消/复核），这台机器上永远验证不到的五条各错了会怎样，以及拆掉 v1 搜索面时随 v2 走齐的两处语义 |
 | [increment-6-review-findings.md](increment-6-review-findings.md) | 6 复查 | 全面复查的账：修 9 处（含一处实测的跨平台编译断裂、一处 unsigned 剪裁计数可绕回、一处让每次状态轮询白跑两趟 IPC 的协议位），驳回 1 条"limit 不生效"的高危误报，10 处确认不修并标归属 |
 | [flag-loss-was-a-latch.md](flag-loss-was-a-latch.md) | 6 复查欠账 #1 | `FLAG_LOSS` 是全 core 单调计数而 v2 只比 0：丢过一次事件后每次浏览都永久报"events dropped"。改为每视图基线（打开时记、成功重读抬），v1 drain 的 `swap(0)` 换成自己的记账以免清零把 v2 静音 |
+| [shell-icons-never-open-a-path.md](shell-icons-never-open-a-path.md) | 7 | 壳的图标层：第一层每行一次哈希（`SHGFI_USEFILEATTRIBUTES` 不打开路径），第二层仅白名单走真实路径；STA worker 上 `HICON→QImage→DestroyIcon`，重画只打物化窗口。闸门是提取/销毁计数相等（9/9/9 两次复现） |
