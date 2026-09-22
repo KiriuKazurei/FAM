@@ -119,7 +119,7 @@ fn allows(&self, wanted: Option<&PathKey>, key: &PathKey) -> bool {
 - 真机：`fam search notes --in D:/Datas/fam-gate-6d/tree` → `hits=1`；
   `--self-check --query notes` → `search settled at 386ms: 1 row(s)`，截图里是
   `notes.txt  1 B  [document]`。
-- 全仓 334 条绿，clippy/fmt 干净。
+- 全仓 333 条绿，clippy/fmt 干净。
 
 **代价。**
 

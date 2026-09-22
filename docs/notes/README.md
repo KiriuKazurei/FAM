@@ -42,3 +42,4 @@
 | [benchmark-floors-are-machine-state.md](benchmark-floors-are-machine-state.md) | 5 | 三条地板不可复现（写下它们的提交今天自己也只测出 61µs vs 记录的 13µs），A/B 对照后重录；补记两处工具修正：选批按 p50 而门槛只看 min、`--write` 会删掉没跑的用例的地板 |
 | [scoped-search-was-empty-and-said-so.md](scoped-search-was-empty-and-said-so.md) | 6 | 配置根被当成栅栏：`--in`/`within` 指向根外的目录时返回 0 行还报"已覆盖"。改为指名的子树**替换**根列表，并把两条排除规则在边界处分开问（绝对前缀看整条路径，目录名只看边界以下） |
 | [increment-6-what-this-machine-can-prove.md](increment-6-what-this-machine-can-prove.md) | 6 | Everything 客户端的账：哪些代码真跑过（真 DLL 绑定与退化、真卷扫描、真 `drain` 分页/取消/复核），这台机器上永远验证不到的五条各错了会怎样，以及拆掉 v1 搜索面时随 v2 走齐的两处语义 |
+| [increment-6-review-findings.md](increment-6-review-findings.md) | 6 复查 | 全面复查的账：修 9 处（含一处实测的跨平台编译断裂、一处 unsigned 剪裁计数可绕回、一处让每次状态轮询白跑两趟 IPC 的协议位），驳回 1 条"limit 不生效"的高危误报，10 处确认不修并标归属 |

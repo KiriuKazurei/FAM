@@ -105,7 +105,7 @@ v1 自己保留的只剩**答案的形状**：默认 200 行（`LEGACY_SEARCH_LI
 - **纯函数层**：`query::compile` 的引号/切分/`path:` 前缀、`state::judge` 的四态判定、
   `search::to_hit` 的 FILETIME 换epoch（`filetimes_cross_the_epoch_boundary_the_way_windows_means`：
   134116992000000000 → 1767225600000）。
-- **端到端**：全仓 **334 条**绿（`fam-svc-everything` 46、`fam-svc-index` 68、
+- **端到端**：全仓 **333 条**绿（`fam-svc-everything` 45、`fam-svc-index` 68、
   `fam-ffi` v2 19、`fam-cli` 12），clippy 与 fmt 干净，GNU `famcore.dll` 可编
   （只有既有的 `corrupt .drectve` 链接器提示）。
 - **真机两道闸门**：`abi-smoke` 退出 0，v1 的 JSON 搜索经路由器仍回
