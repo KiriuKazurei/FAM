@@ -32,6 +32,9 @@ mod query;
 mod search;
 mod state;
 
+/// Which volumes an outside index can answer for, and the scan that finds them.
+pub mod volumes;
+
 #[cfg(not(windows))]
 pub use absent::EverythingProvider;
 #[cfg(windows)]
@@ -46,3 +49,4 @@ pub use search::{drain, to_hit, RawRow, PAGE};
 pub use state::{
     judge, next_probe_delay, EverythingState, Probe, ERROR_IPC, PROBE_FIRST, PROBE_MAX,
 };
+pub use volumes::{indexes_volume, scan, Volumes};

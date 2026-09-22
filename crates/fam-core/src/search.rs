@@ -105,6 +105,18 @@ pub enum SearchError {
 pub trait SearchProvider: Send + Sync {
     fn id(&self) -> &'static str;
     fn is_available(&self) -> bool;
+
+    /// Whether this backend can answer **all** of `request`.
+    ///
+    /// A backend that reaches only part of a scope says no rather than answering what it can and
+    /// calling that complete: a shorter list that looks exhaustive is worse than a slower one that is
+    /// not. (Merging several partial answers is a different thing, and is not implemented anywhere
+    /// yet - so there is no third state to name.)
+    fn covers(&self, request: &SearchRequest) -> bool {
+        let _ = request;
+        true
+    }
+
     fn search(
         &self,
         request: &SearchRequest,

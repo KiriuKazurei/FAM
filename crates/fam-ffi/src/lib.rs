@@ -222,7 +222,9 @@ impl FamCore {
             vec![
                 // Everything indexes local fixed NTFS volumes only, so enumeration has to stay
                 // available as the fallback rather than being a fallback of last resort.
-                Box::new(fam_svc_everything::EverythingProvider::load()),
+                Box::new(fam_svc_everything::EverythingProvider::load(
+                    &config.search_roots,
+                )),
                 Box::new(fam_svc_walk::WalkProvider::new(
                     WalkPolicy::from_config(&config),
                     config.scan_timeout(),

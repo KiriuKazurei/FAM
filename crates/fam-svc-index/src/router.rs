@@ -56,7 +56,7 @@ pub struct SearchRouter {
 }
 
 impl SearchRouter {
-    /// A router that reports whatever its providers answer.
+    /// A router that reports whatever its providers answer, in the order they were given.
     pub fn new(providers: Vec<Box<dyn SearchProvider>>) -> Self {
         Self {
             providers,
@@ -95,7 +95,9 @@ impl SearchRouter {
     ) -> Result<Searched, SearchError> {
         let mut last: Option<SearchError> = None;
         for provider in &self.providers {
-            if !provider.is_available() {
+            // Available and able to answer the whole request: a backend that covers part of a
+            // scope would return a shorter list that reads as exhaustive.
+            if !provider.is_available() || !provider.covers(request) {
                 continue;
             }
             let scope = &self.scope;
@@ -301,6 +303,61 @@ mod tests {
         assert!(
             !scope.allows(&neighbour),
             "a shared prefix is not a parent - the same boundary `is_within` keeps everywhere else"
+        );
+    }
+    /// A backend that is up and reachable but cannot answer this request in full. Its `search` panics,
+    /// so the test fails loudly if the router ever asks it anyway.
+    struct PartialProvider {
+        id: &'static str,
+    }
+
+    impl SearchProvider for PartialProvider {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn covers(&self, _request: &SearchRequest) -> bool {
+            false
+        }
+
+        fn search(
+            &self,
+            _request: &SearchRequest,
+            _cancel: &Cancellation,
+            _sink: &mut dyn FnMut(SearchHit) -> bool,
+        ) -> Result<SearchOutcome, SearchError> {
+            panic!("a backend that said it cannot answer the whole request was asked anyway")
+        }
+    }
+
+    #[test]
+    fn a_backend_that_cannot_answer_the_whole_request_is_not_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("needle.txt"), "x").unwrap();
+        let router = SearchRouter::new(vec![
+            Box::new(PartialProvider { id: "half" }),
+            Box::new(WalkProvider::new(
+                WalkPolicy::default().rooted_at(dir.path()),
+                std::time::Duration::from_secs(30),
+            )),
+        ]);
+
+        let searched = router
+            .search(
+                &SearchRequest::new("needle"),
+                &Cancellation::new(),
+                &mut |_| true,
+            )
+            .expect("enumeration answers");
+        assert_eq!(searched.provider, "walk");
+        assert_eq!(
+            router.available(),
+            vec!["half", "walk"],
+            "being available is not the same as being able to answer"
         );
     }
 }

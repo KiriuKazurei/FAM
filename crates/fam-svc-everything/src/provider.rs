@@ -5,17 +5,19 @@
 //! a copy of the last probe rather than by waiting on the client, and the probe itself runs on the
 //! thread that is about to use the answer.
 
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use fam_core::{
-    Cancellation, SearchError, SearchHit, SearchOutcome, SearchProvider, SearchRequest,
+    Cancellation, PathKey, SearchError, SearchHit, SearchOutcome, SearchProvider, SearchRequest,
 };
 
 use crate::client::Api;
 use crate::query::compile;
 use crate::search::drain;
 use crate::state::{next_probe_delay, EverythingState, PROBE_FIRST};
+use crate::volumes::{self, scan, Volumes};
 
 /// The client, and what was last known about it.
 struct Session {
@@ -31,38 +33,67 @@ pub struct EverythingProvider {
     session: Mutex<Option<Session>>,
     /// The last observed state, readable without touching the client.
     observed: Mutex<EverythingState>,
+    /// The volumes an index covers, and the roots this caller may search: together they decide
+    /// whether a given request can be answered in full, which is the only kind of answer worth
+    /// routing to an outside index.
+    indexed: Volumes,
+    roots: Vec<PathKey>,
 }
 
 impl EverythingProvider {
-    /// Binds the client if this machine has one deployed beside the application. Not having one is
-    /// the ordinary case, and it is a state rather than an error: every search reports itself
-    /// unavailable and the router answers from enumeration.
-    pub fn load() -> Self {
+    /// Binds the client if this machine has one deployed beside the application, and asks the volume
+    /// scan what an outside index could answer for. Not having a client is the ordinary case, and it
+    /// is a state rather than an error: every search reports itself unavailable and the router
+    /// answers from enumeration.
+    pub fn load(roots: &[PathBuf]) -> Self {
+        let roots = roots.iter().map(|root| PathKey::of(root)).collect();
+        let indexed = Volumes::new(scan());
         match unsafe { Api::load_from_application_dir() } {
-            Ok(api) => Self::with_client(api),
-            Err(_) => Self::without_client(),
+            Ok(api) => Self::serving(api, roots, indexed),
+            Err(_) => Self::assembled(None, EverythingState::DllMissing, roots, indexed),
         }
     }
 
     /// A provider over an already-bound client, for a caller that found the DLL somewhere else.
+    /// It claims to index nothing: a caller that knows what the index covers uses [`Self::serving`],
+    /// and one that does not should not be routing to it.
     pub fn with_client(api: Api) -> Self {
+        Self::serving(api, Vec::new(), Volumes::default())
+    }
+
+    /// A provider that answers for `roots` given that the index covers `indexed`.
+    pub fn serving(api: Api, roots: Vec<PathKey>, indexed: Volumes) -> Self {
         let state = api.probe();
-        Self {
-            session: Mutex::new(Some(Session {
-                api,
-                state: state.clone(),
-                delay: PROBE_FIRST,
-                next_probe: Instant::now() + PROBE_FIRST,
-            })),
-            observed: Mutex::new(state),
-        }
+        let session = Session {
+            api,
+            state: state.clone(),
+            delay: PROBE_FIRST,
+            next_probe: Instant::now() + PROBE_FIRST,
+        };
+        Self::assembled(Some(session), state, roots, indexed)
     }
 
     /// A provider for a machine with no client at all.
     pub fn without_client() -> Self {
+        Self::assembled(
+            None,
+            EverythingState::DllMissing,
+            Vec::new(),
+            Volumes::default(),
+        )
+    }
+
+    fn assembled(
+        session: Option<Session>,
+        state: EverythingState,
+        roots: Vec<PathKey>,
+        indexed: Volumes,
+    ) -> Self {
         Self {
-            session: Mutex::new(None),
-            observed: Mutex::new(EverythingState::DllMissing),
+            session: Mutex::new(session),
+            observed: Mutex::new(state),
+            indexed,
+            roots,
         }
     }
 
@@ -110,6 +141,10 @@ impl EverythingProvider {
 impl SearchProvider for EverythingProvider {
     fn id(&self) -> &'static str {
         "everything"
+    }
+
+    fn covers(&self, request: &SearchRequest) -> bool {
+        volumes::covers(&self.indexed, &self.roots, request)
     }
 
     fn is_available(&self) -> bool {
@@ -171,7 +206,27 @@ impl SearchProvider for EverythingProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
+
+    /// `covers` is the volume decision table with this provider's own two inputs; the table itself is
+    /// tested in [`crate::volumes`].
+    #[test]
+    fn a_provider_only_offers_requests_its_index_covers() {
+        let provider = EverythingProvider::assembled(
+            None,
+            EverythingState::NotRunning,
+            vec![PathKey::of(Path::new("E:/games"))],
+            Volumes::new([PathBuf::from("D:\\")]),
+        );
+        assert!(provider.covers(&SearchRequest::new("x").scope(PathBuf::from("D:/docs"))));
+        assert!(!provider.covers(&SearchRequest::new("x").scope(PathBuf::from("E:/games"))));
+        assert!(
+            !provider.covers(&SearchRequest::new("x")),
+            "its configured roots are on a volume nobody indexes"
+        );
+    }
 
     /// The state a machine without the client deployed settles into, and what a search does about
     /// it: `Unavailable`, which is the router's cue to enumerate - never an empty result set that
