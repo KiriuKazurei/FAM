@@ -95,6 +95,47 @@ impl Prune {
     pub fn excludes_key(&self, key: &PathKey) -> bool {
         self.excludes(&PathBuf::from(key.to_lossy_string()))
     }
+
+    /// Whether `key` is excluded **as part of a search rooted at `boundary`**.
+    ///
+    /// The two rule lists answer differently once someone names the subtree they want, because they
+    /// claim different things. An excluded *prefix* is an absolute subtree - "never show me
+    /// `D:/secret`" - and a search rooted inside it is still inside it, so that rule keeps seeing the
+    /// whole path. An excluded *name* is a rule about descending ("stop at `.git`"), which the walk
+    /// enforces only on directories it enters and never on the root it was given. Naming
+    /// `D:/proj/node_modules` as where to search is not a descent into it, so the name rule sees only
+    /// the components below the boundary.
+    ///
+    /// Getting this wrong in either direction is invisible to the user: the search returns nothing and
+    /// says it looked.
+    pub fn excludes_below(&self, boundary: &PathKey, key: &PathKey) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        if !boundary.is_within(key) {
+            // None of this row lies below the boundary the caller named, so there is no reading of
+            // the rules narrower than the plain one, and answering "clear" here would be a claim
+            // about a path this method has no business vouching for.
+            return self.excludes_key(key);
+        }
+        if self.excludes_prefix(&key.to_lossy_string()) {
+            return true;
+        }
+        if self.names.is_empty() {
+            return false;
+        }
+        // Both keys are already folded, so the boundary really is a prefix of the key and the
+        // remainder is exactly what lies below it.
+        let full = key.to_path_buf();
+        let below = full.strip_prefix(boundary.to_path_buf()).unwrap_or(&full);
+        // `parent()` drops the last component, which is the file's own name: the list is of directory
+        // names, for the reason given on [`Prune::excludes`].
+        below.parent().is_some_and(|parent| {
+            parent
+                .components()
+                .any(|component| self.excludes_name(component.as_os_str()))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -161,5 +202,51 @@ mod tests {
         let rules = rules(Path::new("D:/proj"));
         assert!(rules.excludes_name(OsStr::new("node_modules")));
         assert!(!rules.excludes_name(OsStr::new("src")));
+    }
+
+    /// The rule a scoped search depends on: the directory someone named is not one they descended
+    /// into, so its own name cannot disqualify the search. Getting this wrong returns zero rows from
+    /// `fam search react --in D:\proj\node_modules` and claims the folder was searched.
+    #[test]
+    fn a_named_boundary_is_not_excluded_by_its_own_name() {
+        let rules = rules(Path::new("D:/proj"));
+        let boundary = PathKey::of(Path::new("D:/proj/node_modules"));
+        assert!(
+            !rules.excludes_below(
+                &boundary,
+                &PathKey::of(Path::new("D:/proj/node_modules/react/index.js"))
+            ),
+            "the only excluded name on this path is the boundary itself"
+        );
+        assert!(
+            rules.excludes_below(
+                &boundary,
+                &PathKey::of(Path::new("D:/proj/node_modules/react/.git/hooks/x"))
+            ),
+            "one *below* the boundary is a descent, and descents are still pruned"
+        );
+    }
+
+    /// The other half: an excluded prefix is an absolute place, and naming your way into it does not
+    /// un-exclude it.
+    #[test]
+    fn an_excluded_prefix_holds_inside_a_named_boundary() {
+        let rules = rules(Path::new("D:/proj"));
+        let boundary = PathKey::of(Path::new("D:/proj/excluded/deep"));
+        assert!(rules.excludes_below(
+            &boundary,
+            &PathKey::of(Path::new("D:/proj/excluded/deep/x.bin"))
+        ));
+    }
+
+    #[test]
+    fn a_path_outside_the_boundary_is_answered_for_rather_than_silently_passed() {
+        let rules = rules(Path::new("D:/proj"));
+        // Not a case the router creates - it checks the boundary first - but a rule that quietly
+        // said "fine" here would be a rule nobody could trust.
+        assert!(rules.excludes_below(
+            &PathKey::of(Path::new("D:/proj/src")),
+            &PathKey::of(Path::new("D:/other/a/node_modules/x.js"))
+        ));
     }
 }

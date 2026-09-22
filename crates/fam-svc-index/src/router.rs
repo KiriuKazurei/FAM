@@ -29,11 +29,22 @@ impl Scope {
         Self::default()
     }
 
-    fn allows(&self, key: &PathKey) -> bool {
-        if self.prune.excludes_key(key) {
-            return false;
+    /// Whether a row may be reported, for a request that named `wanted` as the subtree to search.
+    ///
+    /// A named subtree **replaces** the root list rather than being intersected with it. The roots say
+    /// where a search with no stated scope may look; someone standing in `E:\Downloads` and asking for
+    /// one file has already restricted the search themselves, and intersecting that with the roots
+    /// answers "there is nothing here" about the folder they are looking at - the one answer you cannot
+    /// tell apart from an empty directory. The exclusions still apply, and apply below the named
+    /// boundary the same way a walk applies them while descending.
+    fn allows(&self, wanted: Option<&PathKey>, key: &PathKey) -> bool {
+        match wanted {
+            Some(scope) => scope.is_within(key) && !self.prune.excludes_below(scope, key),
+            None => {
+                !self.prune.excludes_key(key)
+                    && (self.roots.is_empty() || self.roots.iter().any(|root| root.is_within(key)))
+            }
         }
-        self.roots.is_empty() || self.roots.iter().any(|root| root.is_within(key))
     }
 }
 
@@ -112,6 +123,9 @@ impl SearchRouter {
         sink: &mut dyn FnMut(SearchHit) -> bool,
     ) -> Result<Searched, SearchError> {
         let mut last: Option<SearchError> = None;
+        // Folded once, because every row has to be compared against it and the request keeps the
+        // caller's own spelling for the sake of anything that restarts the walk.
+        let named = request.scope.as_deref().map(PathKey::of);
         for provider in &self.providers {
             // Available and able to answer the whole request: a backend that covers part of a
             // scope would return a shorter list that reads as exhaustive.
@@ -120,7 +134,7 @@ impl SearchRouter {
             }
             let scope = &self.scope;
             match provider.search(request, cancel, &mut |hit| {
-                if scope.allows(&hit.key) {
+                if scope.allows(named.as_ref(), &hit.key) {
                     sink(hit)
                 } else {
                     true
@@ -438,10 +452,86 @@ mod tests {
         );
         let inside = PathKey::of(std::path::Path::new("D:/docs/a/b.txt"));
         let neighbour = PathKey::of(std::path::Path::new("D:/docs_sibling/a.txt"));
-        assert!(scope.allows(&inside));
+        assert!(scope.allows(None, &inside));
         assert!(
-            !scope.allows(&neighbour),
+            !scope.allows(None, &neighbour),
             "a shared prefix is not a parent - the same boundary `is_within` keeps everywhere else"
+        );
+    }
+
+    /// The CLI's `--in`, and every caller that names a folder of its own: the configured roots are not
+    /// a fence. Intersecting a named scope with them answers "nothing here" about a directory the user
+    /// is standing in, which is the one answer indistinguishable from an empty folder.
+    #[test]
+    fn a_named_subtree_replaces_the_configured_roots() {
+        let scope = Scope::new(
+            [std::path::PathBuf::from("D:/docs")],
+            fam_core::Prune::default(),
+        );
+        let downloads = PathKey::of(std::path::Path::new("E:/downloads"));
+        let wanted = PathKey::of(std::path::Path::new("E:/downloads/setup-report.txt"));
+        assert!(
+            !scope.allows(None, &wanted),
+            "the same row is out of bounds for a search that named no scope"
+        );
+        assert!(
+            scope.allows(Some(&downloads), &wanted),
+            "…and in bounds once the caller says where to look"
+        );
+        assert!(
+            !scope.allows(
+                Some(&downloads),
+                &PathKey::of(std::path::Path::new("E:/other/x.txt"))
+            ),
+            "and the named subtree is a bound of its own, not a hint"
+        );
+    }
+
+    #[test]
+    fn a_scoped_search_outside_the_configured_roots_still_answers() {
+        let router = SearchRouter::scoped(
+            vec![Box::new(FakeEverything::indexing(&[
+                "E:/downloads/setup-report.txt",
+                "D:/docs/keep-report.txt",
+            ]))],
+            Scope::new(
+                [std::path::PathBuf::from("D:/docs")],
+                fam_core::Prune::default(),
+            ),
+        );
+
+        let (names, _) = delivered(&router, &SearchRequest::new("report").scope("E:/downloads"));
+        assert_eq!(
+            names,
+            vec![r"E:\downloads\setup-report.txt"],
+            "the row inside the named scope survives, and the one in the roots does not"
+        );
+    }
+
+    /// Both directions at once, because the two are one rule seen from either side: a directory the
+    /// caller named is not a directory they descended into, and one they passed *through* on the way
+    /// down still is.
+    #[test]
+    fn a_scope_rooted_inside_an_excluded_directory_keeps_its_own_rows() {
+        let router = SearchRouter::scoped(
+            vec![Box::new(FakeEverything::indexing(&[
+                "D:/proj/node_modules/react/index-report.js",
+                "D:/proj/node_modules/react/.git/hooks/report.sh",
+            ]))],
+            Scope::new(
+                [std::path::PathBuf::from("D:/proj")],
+                fam_core::Prune::new(Vec::new(), vec!["NODE_MODULES".into(), ".GIT".into()]),
+            ),
+        );
+
+        let (names, _) = delivered(
+            &router,
+            &SearchRequest::new("report").scope("D:/proj/node_modules"),
+        );
+        assert_eq!(
+            names,
+            vec![r"D:\proj\node_modules\react\index-report.js"],
+            "the boundary's own name is not a descent; the `.git` below it still is"
         );
     }
     /// A scoped request is the other half of the same rule: an index of `D:` is not asked about a
