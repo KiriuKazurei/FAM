@@ -280,6 +280,7 @@ dependencies = [
  "env_logger",
  "fam-core",
  "fam-sched",
+ "fam-svc-index",
  "fam-svc-store",
  "fam-svc-walk",
  "log",

@@ -29,6 +29,19 @@ impl Scope {
         Self::default()
     }
 
+    /// The rules this product searches under: the roots it was configured with, and the subtrees it
+    /// was told to keep out.
+    ///
+    /// A value rather than something each front end assembles, because the two halves have to agree
+    /// for every backend and every entry point - a shell that enforces them and a CLI that does not
+    /// is two answers to one question.
+    pub fn from_config(config: &fam_core::Config) -> Self {
+        Self::new(
+            config.search_roots.clone(),
+            fam_core::Prune::from_config(config),
+        )
+    }
+
     /// Whether a row may be reported, for a request that named `wanted` as the subtree to search.
     ///
     /// A named subtree **replaces** the root list rather than being intersected with it. The roots say
@@ -55,8 +68,8 @@ pub struct Searched {
     pub outcome: SearchOutcome,
 }
 
-/// Tries providers in order and returns the first that succeeds, keeping the ordered-fallback
-/// shape the old `SearchService` already had.
+/// Tries providers in order and returns the first that succeeds.
+///
 ///
 /// A provider is asked only when it is up *and* able to answer the whole request, so an index over
 /// part of the machine is skipped rather than believed. Which one answered comes back with the
@@ -79,6 +92,49 @@ impl SearchRouter {
     /// indexes the volume does not know them.
     pub fn scoped(providers: Vec<Box<dyn SearchProvider>>, scope: Scope) -> Self {
         Self { providers, scope }
+    }
+
+    /// The router this product searches with: the outside index first, enumeration behind it, and the
+    /// configuration's roots and exclusions enforced on whichever one answers.
+    ///
+    /// Every front end is built from here rather than assembling the list itself. The order is a claim
+    /// about which answer is better, the timeout a claim about how long a walk may take, and the scope
+    /// a claim about what may be reported - three things worth agreeing about instead of restating.
+    pub fn from_config(config: &fam_core::Config) -> Self {
+        Self::scoped(
+            vec![
+                // Enumeration has to stay in the list rather than being a last resort: Everything
+                // indexes local fixed NTFS volumes and nothing else.
+                Box::new(fam_svc_everything::EverythingProvider::load(
+                    &config.search_roots,
+                )),
+                Box::new(walking_provider(config)),
+            ],
+            Scope::from_config(config),
+        )
+    }
+
+    /// Enumeration and nothing else, for a caller that wants the walk's own answer.
+    pub fn walking(config: &fam_core::Config) -> Self {
+        Self::scoped(
+            vec![Box::new(walking_provider(config))],
+            Scope::from_config(config),
+        )
+    }
+
+    /// The index and nothing else, **and asked even when it says it cannot help**.
+    ///
+    /// Routing around a backend that declined is the right default and the wrong answer to "search
+    /// with Everything": the caller named it, so what they need is its own reason - not deployed, not
+    /// running, a subtree on a share nobody indexes - rather than a list that quietly came from
+    /// somewhere else.
+    pub fn indexed(config: &fam_core::Config) -> Self {
+        Self::scoped(
+            vec![Box::new(Insisted(Box::new(
+                fam_svc_everything::EverythingProvider::load(&config.search_roots),
+            )))],
+            Scope::from_config(config),
+        )
     }
 
     pub fn available(&self) -> Vec<&'static str> {
@@ -153,6 +209,45 @@ impl SearchRouter {
             provider: "none",
             reason: "no search provider is available".into(),
         }))
+    }
+}
+
+/// Both halves of the enumeration backend come from the same config: which roots and which rules, and
+/// how long one walk may run before it reports what it has.
+fn walking_provider(config: &fam_core::Config) -> fam_svc_walk::WalkProvider {
+    fam_svc_walk::WalkProvider::new(
+        fam_svc_walk::WalkPolicy::from_config(config),
+        config.scan_timeout(),
+    )
+}
+
+/// A provider that insists on being asked. See [`SearchRouter::indexed`].
+struct Insisted(Box<dyn SearchProvider>);
+
+impl SearchProvider for Insisted {
+    fn id(&self) -> &'static str {
+        self.0.id()
+    }
+
+    /// The point of the wrapper.
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    /// Also forced, and for the same reason: a backend that is up but cannot cover this request would
+    /// otherwise be stepped over before it could say so, and the caller would hear "nothing is
+    /// available" instead of the actual obstacle.
+    fn covers(&self, _request: &SearchRequest) -> bool {
+        true
+    }
+
+    fn search(
+        &self,
+        request: &SearchRequest,
+        cancel: &Cancellation,
+        sink: &mut dyn FnMut(SearchHit) -> bool,
+    ) -> Result<SearchOutcome, SearchError> {
+        self.0.search(request, cancel, sink)
     }
 }
 
@@ -534,22 +629,65 @@ mod tests {
             "the boundary's own name is not a descent; the `.git` below it still is"
         );
     }
-    /// A scoped request is the other half of the same rule: an index of `D:` is not asked about a
-    /// subtree of `E:`, however sure it is that the file is there.
+    /// A scoped request is the other half of the same rule: an index of one volume is not asked about
+    /// a subtree of another, however sure it is that the file is there. The volumes here are spelled
+    /// `Z:` rather than `D:`/`C:` so the temporary directory cannot land inside the index on some
+    /// other machine and quietly make the test pass for the wrong reason.
     #[test]
     fn a_scope_on_a_volume_the_index_does_not_hold_goes_to_enumeration() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("needle.txt"), "x").unwrap();
         let router = SearchRouter::new(vec![
             Box::new(
-                FakeEverything::indexing(&["D:/index/needle-indexed-by-everything.txt"])
-                    .indexed_on(&["D:\\"]),
+                FakeEverything::indexing(&["Z:/index/needle-indexed-by-everything.txt"])
+                    .indexed_on(&["Z:\\"]),
             ),
             walking(dir.path()),
         ]);
 
         let (names, searched) = delivered(&router, &SearchRequest::new("needle").scope(dir.path()));
         assert_eq!(searched.provider, "walk");
-        assert_eq!(names, vec![dir.path().join("needle.txt").to_string_lossy()]);
+        assert_eq!(
+            names,
+            vec![dir.path().join("needle.txt").to_string_lossy()],
+            "and the index's row never arrived"
+        );
+    }
+
+    /// The three routings a config can name, and the order the product claims is better.
+    #[test]
+    fn a_config_selects_the_backends_once_for_every_front_end() {
+        let config = fam_core::Config::default();
+        assert_eq!(
+            SearchRouter::from_config(&config).ids(),
+            vec!["everything", "walk"],
+            "the index first, enumeration behind it - restated by no caller"
+        );
+        assert_eq!(SearchRouter::walking(&config).ids(), vec!["walk"]);
+        assert_eq!(SearchRouter::indexed(&config).ids(), vec!["everything"]);
+    }
+
+    /// What "the caller named this backend" has to mean: the answer is that backend's own reason, not
+    /// the generic one the router falls back to when nothing was even tried.
+    #[test]
+    fn a_backend_named_by_the_caller_explains_its_own_failure() {
+        let config = fam_core::Config::default();
+        let error = SearchRouter::indexed(&config)
+            .search(
+                &SearchRequest::new("anything"),
+                &Cancellation::new(),
+                &mut |_| true,
+            )
+            .unwrap_err();
+        match error {
+            SearchError::Unavailable { provider, reason } => {
+                assert_eq!(provider, "everything");
+                assert!(
+                    !reason.contains("no search provider"),
+                    "the router's own excuse reached the caller instead: {reason}"
+                );
+            }
+            other => panic!("expected Everything's own reason, got {other:?}"),
+        }
     }
 }

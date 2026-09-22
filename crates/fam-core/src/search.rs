@@ -98,10 +98,10 @@ pub enum SearchError {
 
 /// A name-search backend that pushes results instead of returning a collection.
 ///
-/// The previous contract returned `SearchResults { entries: Vec<Entry> }`, which made streaming
-/// impossible by construction: no provider could hand a result to the caller before the whole
-/// search finished. Returning `false` from `sink` stops the provider, and `limit` on the request
-/// bounds how much a provider may visit.
+/// A contract whose answer *is* a `Vec` makes streaming impossible by construction: no backend could
+/// hand a result to the caller before its whole search finished, however soon the first match was
+/// known, and a search of `D:\` is not something to make a user wait out. Returning `false` from
+/// `sink` stops the provider, and `limit` on the request bounds how much a provider may visit.
 pub trait SearchProvider: Send + Sync {
     fn id(&self) -> &'static str;
     fn is_available(&self) -> bool;

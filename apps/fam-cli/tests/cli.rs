@@ -138,15 +138,26 @@ fn search_can_be_scoped_to_one_directory() {
     assert!(text.contains("hits=0"), "{text}");
 }
 
+/// What `--backend everything` owes the caller: that backend's own obstacle, not the router's generic
+/// "nothing was available". Which obstacle depends on the machine - no client DLL beside the binary,
+/// or a DLL and no service - so the assertion is about the one thing that must never appear.
 #[test]
-fn the_unimplemented_index_backend_reports_itself_as_unavailable() {
+fn a_backend_named_by_the_caller_reports_why_it_could_not_answer() {
     let cli = Cli::new();
 
     let root = cli.root.to_str().unwrap();
     let stderr = cli.failure(&["search", "report", "--in", root, "--backend", "everything"]);
 
     assert!(stderr.contains("everything"), "{stderr}");
-    assert!(stderr.contains("not implemented"), "{stderr}");
+    assert!(
+        !stderr.contains("no search provider"),
+        "the router's own excuse reached the caller instead of Everything's: {stderr}"
+    );
+    assert!(
+        stderr.contains("not deployed") || stderr.contains("NotRunning"),
+        "neither of the two real reasons: {stderr}"
+    );
+    println!("everything said: {stderr}");
 }
 
 #[test]

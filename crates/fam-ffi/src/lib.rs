@@ -25,11 +25,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use fam_core::{Config, PathKey, Prune, SearchRequest as NameRequest};
+use fam_core::{path_buf_from_units, Config, PathKey, SearchHit, SearchRequest as NameRequest};
 use fam_sched::{spawn, Batcher, FileChange, Handle, SchedulerConfig, Signal};
 use fam_svc_index::DirIndex;
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
-use fam_svc_walk::{Cancellation, Kind, SearchQuery, SearchService, WalkPolicy};
+use fam_svc_walk::{Cancellation, Kind};
 use fam_view::{row_for_path, Delta, Filter, Order, Row, SortKey, ViewModel};
 use serde::Serialize;
 
@@ -41,7 +41,7 @@ mod search;
 pub mod wire;
 
 use browse::{Job, Loader, Views};
-use fam_svc_index::{Scope, SearchRouter};
+use fam_svc_index::SearchRouter;
 use search::Searches;
 
 const OK: c_int = 0;
@@ -61,6 +61,13 @@ const DEFAULT_SEARCH_LIMIT: u32 = 500;
 /// Ceiling on an explicit `limit`, so a caller cannot ask for the unbounded case by name.
 const MAX_SEARCH_LIMIT: u32 = 20_000;
 
+/// The row count [`fam_view_search`] asks for when the caller names none.
+///
+/// v1's own number, kept rather than folded into [`DEFAULT_SEARCH_LIMIT`]: a frozen ABI's observable
+/// answer is not changed on the way to deleting the entry point that gives it. The ceiling above
+/// *is* shared, because there the two versions agree on what must not happen.
+const LEGACY_SEARCH_LIMIT: usize = 200;
+
 pub struct FamCore {
     config: Config,
     store: Mutex<TagStore>,
@@ -74,6 +81,9 @@ pub struct FamCore {
     v2: Views,
     /// v2's one pipeline, shared with the loader thread that registers and withdraws its watches.
     loader: Loader,
+    /// Which backends can answer a name search, and what they say about themselves. Held here as
+    /// well as in [`Searches`] because v1's `fam_view_search` asks the same question synchronously.
+    router: Arc<SearchRouter>,
     /// v2's paged name search: the router, and the one thread allowed to run a search on it.
     searches: Searches,
     /// Directories with an open view, so the last one to close can stop its watch. `Handle` dedupes
@@ -218,24 +228,8 @@ impl FamCore {
                 queue.extend(batch.changes);
             }
         };
-        let router = Arc::new(SearchRouter::scoped(
-            vec![
-                // Everything indexes local fixed NTFS volumes only, so enumeration has to stay
-                // available as the fallback rather than being a fallback of last resort.
-                Box::new(fam_svc_everything::EverythingProvider::load(
-                    &config.search_roots,
-                )),
-                Box::new(fam_svc_walk::WalkProvider::new(
-                    WalkPolicy::from_config(&config),
-                    config.scan_timeout(),
-                )),
-            ],
-            // An index of the whole volume answers from the whole volume. The roots the user
-            // configured and the subtrees they excluded are enforced here, on the way out, so that
-            // one search means the same thing whichever backend served it.
-            Scope::new(config.search_roots.clone(), Prune::from_config(&config)),
-        ));
-        let searches = Searches::start(router);
+        let router = Arc::new(SearchRouter::from_config(&config));
+        let searches = Searches::start(Arc::clone(&router));
 
         let pipeline = Arc::new(Mutex::new(
             spawn(SchedulerConfig::from_config(&config), Box::new(sink))
@@ -252,6 +246,7 @@ impl FamCore {
             next_token: AtomicU64::new(1),
             index,
             v2,
+            router,
             searches,
             loader,
             watched: Mutex::new(HashMap::new()),
@@ -413,6 +408,13 @@ impl FamCore {
         Ok(token)
     }
 
+    /// v1's synchronous search: one call, the whole answer as JSON.
+    ///
+    /// It now runs on the same [`SearchRouter`] the paged v2 entries use, which is the point of this
+    /// method existing at all - the two versions of "search" cannot disagree about which backend
+    /// answers, what the exclusion rules are, or how long an enumeration may take. What stays v1's
+    /// own is only the shape of the answer: a ceiling of [`LEGACY_SEARCH_LIMIT`] unless the caller
+    /// names one, and every row collected before the JSON is written.
     fn view_search(
         &self,
         token: u64,
@@ -422,8 +424,8 @@ impl FamCore {
         limit: Option<usize>,
     ) -> Result<String, String> {
         let kind = kind.map(parse_kind).transpose()?;
-        let request = SearchQuery::new(query);
-        if request.is_empty() && kind.is_none() {
+        let request = NameRequest::new(query);
+        if request.is_empty() {
             return Err("query carries no search terms".into());
         }
         let mut request = request;
@@ -431,26 +433,27 @@ impl FamCore {
             request = request.kind(kind);
         }
         if let Some(within) = within {
-            request = request.within(within);
+            request = request.scope(within);
         }
-        if let Some(limit) = limit {
-            request = request.limit(limit);
-        }
+        request = request.limit(limit.unwrap_or(LEGACY_SEARCH_LIMIT).max(1));
 
-        let service = SearchService::default_with(WalkPolicy::from_config(&self.config));
-        let results = service
-            .search(&request, &Cancellation::new(), self.config.scan_timeout())
+        let mut hits: Vec<SearchHit> = Vec::new();
+        let searched = self
+            .router
+            .search(&request, &Cancellation::new(), &mut |hit| {
+                hits.push(hit);
+                true
+            })
             .map_err(|error| error.to_string())?;
 
-        let mut rows: Vec<Row> = results
-            .entries
+        let mut rows: Vec<Row> = hits
             .iter()
-            .map(|entry| {
+            .map(|hit| {
                 Row::new(
-                    &entry.path,
-                    entry.kind,
-                    entry.size,
-                    entry.modified_ms.unwrap_or(0),
+                    &path_buf_from_units(&hit.path),
+                    hit.kind,
+                    hit.size,
+                    hit.mtime_ms,
                 )
             })
             .collect();
@@ -478,8 +481,8 @@ impl FamCore {
         });
         view.replace_all(rows);
         let out = RowsOut {
-            backend: results.backend.to_string(),
-            incomplete: results.incomplete,
+            backend: searched.provider.to_string(),
+            incomplete: !searched.outcome.complete,
             rows: view.rows().iter().map(RowOut::from).collect(),
         };
         serde_json::to_string(&out).map_err(|error| error.to_string())
@@ -780,10 +783,9 @@ impl FamCore {
     /// those names would start labelling rows wrong the day a bucket is inserted, so the list is part
     /// of the ABI rather than a comment.
     fn backends_json(&self) -> String {
-        let service = SearchService::default_with(WalkPolicy::from_config(&self.config));
         serde_json::to_string(&serde_json::json!({
-            "backends": service.backend_ids(),
-            "available": service.available_backends(),
+            "backends": self.router.ids(),
+            "available": self.router.available(),
             "kinds": fam_core::KIND_ORDER
                 .iter()
                 .map(|kind| kind.as_str())

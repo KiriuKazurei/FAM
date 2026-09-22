@@ -1,251 +1,26 @@
-use std::path::PathBuf;
+//! The enumeration search backend.
+//!
+//! Everything's contract is a pushed stream, not a returned collection, so a caller sees rows while
+//! the walk is still running and can stop it. The vocabulary (`SearchRequest`, `SearchHit`,
+//! `SearchOutcome`) is `fam-core`'s; this file is only the one implementation that reads a disk.
+//!
+//! The router that chooses between this and an outside index lives in `fam-svc-index`, and so do the
+//! scope rules enforced on the way out - which is why neither the roots nor the exclusions are
+//! re-checked here beyond the request's own scope.
+
 use std::time::Duration;
 
 use fam_core::{
-    raw_path_units, Cancellation, Kind, PathKey, SearchError as ProviderError, SearchHit,
-    SearchOutcome, SearchProvider, SearchRequest,
+    raw_path_units, Cancellation, PathKey, SearchError as ProviderError, SearchHit, SearchOutcome,
+    SearchProvider, SearchRequest,
 };
 
-use crate::walk::{walk, Entry, WalkPolicy, WalkReport};
+use crate::walk::{walk, WalkPolicy};
 
-pub const DEFAULT_LIMIT: usize = 200;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchQuery {
-    /// Lower-cased terms; every one must appear somewhere in the file name.
-    pub terms: Vec<String>,
-    pub within: Option<PathBuf>,
-    pub kind: Option<Kind>,
-    pub limit: usize,
-}
-
-impl SearchQuery {
-    pub fn new(text: &str) -> Self {
-        Self {
-            terms: text
-                .split_whitespace()
-                .map(str::to_lowercase)
-                .filter(|term| !term.is_empty())
-                .collect(),
-            within: None,
-            kind: None,
-            limit: DEFAULT_LIMIT,
-        }
-    }
-
-    pub fn within(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.within = Some(dir.into());
-        self
-    }
-
-    pub fn kind(mut self, kind: Kind) -> Self {
-        self.kind = Some(kind);
-        self
-    }
-
-    pub fn limit(mut self, limit: usize) -> Self {
-        self.limit = limit.max(1);
-        self
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.terms.is_empty()
-    }
-
-    fn matches(&self, entry: &Entry) -> bool {
-        if let Some(kind) = self.kind {
-            if entry.kind != kind {
-                return false;
-            }
-        }
-        let name = entry.file_name().to_lowercase();
-        self.terms.iter().all(|term| name.contains(term))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchResults {
-    pub backend: &'static str,
-    pub entries: Vec<Entry>,
-    pub report: WalkReport,
-    /// True when the search stopped before covering the requested scope.
-    pub incomplete: bool,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum SearchError {
-    #[error("query carries no search terms")]
-    Empty,
-    #[error("backend {backend} is unavailable: {reason}")]
-    Unavailable {
-        backend: &'static str,
-        reason: String,
-    },
-}
-
-pub trait SearchBackend: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn is_available(&self) -> bool;
-    fn search(
-        &self,
-        query: &SearchQuery,
-        cancel: &Cancellation,
-        timeout: Duration,
-    ) -> Result<SearchResults, SearchError>;
-}
-
-/// Always-available fallback: enumerate the configured roots and match names. Everything only
-/// indexes local fixed NTFS volumes, so this path has to stay (`docs/legacy-specs.md` §2).
-pub struct WalkBackend {
-    policy: WalkPolicy,
-}
-
-impl WalkBackend {
-    pub fn new(policy: WalkPolicy) -> Self {
-        Self { policy }
-    }
-}
-
-impl SearchBackend for WalkBackend {
-    fn id(&self) -> &'static str {
-        "walk"
-    }
-
-    /// Enumeration can always answer for an explicitly scoped query, so availability does not
-    /// depend on configured roots; the scope check happens in `search`.
-    fn is_available(&self) -> bool {
-        true
-    }
-
-    fn search(
-        &self,
-        query: &SearchQuery,
-        cancel: &Cancellation,
-        timeout: Duration,
-    ) -> Result<SearchResults, SearchError> {
-        if query.is_empty() {
-            return Err(SearchError::Empty);
-        }
-        let mut policy = self.policy.clone();
-        if let Some(within) = &query.within {
-            policy.roots = vec![within.clone()];
-        }
-        if policy.roots.is_empty() {
-            return Err(SearchError::Unavailable {
-                backend: self.id(),
-                reason: "no search_roots configured; pass --in <dir>".into(),
-            });
-        }
-        let mut entries: Vec<Entry> = Vec::new();
-        let mut at_limit = false;
-        let report = walk(&policy, cancel, timeout, |entry| {
-            if !query.matches(entry) {
-                return true;
-            }
-            entries.push(entry.clone());
-            if entries.len() >= query.limit {
-                at_limit = true;
-                return false;
-            }
-            true
-        });
-        Ok(SearchResults {
-            backend: self.id(),
-            entries,
-            incomplete: report.stopped_early() && !at_limit,
-            report,
-        })
-    }
-}
-
-/// Integration point for the Everything SDK. Left deliberately inert: the SDK client (shared-memory
-/// request/response against the running Everything service) is not written yet, so callers must not
-/// mistake a stub for results.
-pub struct EverythingBackend;
-
-impl SearchBackend for EverythingBackend {
-    fn id(&self) -> &'static str {
-        "everything"
-    }
-
-    fn is_available(&self) -> bool {
-        false
-    }
-
-    fn search(
-        &self,
-        _query: &SearchQuery,
-        _cancel: &Cancellation,
-        _timeout: Duration,
-    ) -> Result<SearchResults, SearchError> {
-        Err(SearchError::Unavailable {
-            backend: self.id(),
-            reason: "the Everything SDK client is not implemented".into(),
-        })
-    }
-}
-
-pub struct SearchService {
-    backends: Vec<Box<dyn SearchBackend>>,
-}
-
-impl SearchService {
-    /// Backends are tried in the given order, so prefer the index and keep enumeration last.
-    pub fn new(backends: Vec<Box<dyn SearchBackend>>) -> Self {
-        Self { backends }
-    }
-
-    pub fn walk_only(policy: WalkPolicy) -> Self {
-        Self::new(vec![Box::new(WalkBackend::new(policy))])
-    }
-
-    pub fn default_with(policy: WalkPolicy) -> Self {
-        Self::new(vec![
-            Box::new(EverythingBackend),
-            Box::new(WalkBackend::new(policy)),
-        ])
-    }
-
-    pub fn backend_ids(&self) -> Vec<&'static str> {
-        self.backends.iter().map(|backend| backend.id()).collect()
-    }
-
-    pub fn available_backends(&self) -> Vec<&'static str> {
-        self.backends
-            .iter()
-            .filter(|backend| backend.is_available())
-            .map(|backend| backend.id())
-            .collect()
-    }
-
-    pub fn search(
-        &self,
-        query: &SearchQuery,
-        cancel: &Cancellation,
-        timeout: Duration,
-    ) -> Result<SearchResults, SearchError> {
-        let mut last: Option<SearchError> = None;
-        for backend in &self.backends {
-            if !backend.is_available() {
-                continue;
-            }
-            match backend.search(query, cancel, timeout) {
-                Ok(results) => return Ok(results),
-                Err(error) => last = Some(error),
-            }
-        }
-        Err(last.unwrap_or(SearchError::Unavailable {
-            backend: "none",
-            reason: "no search backend is available".into(),
-        }))
-    }
-}
-
-/// The recursive-walk provider behind the new sink-based contract.
+/// Enumeration as a search backend: walk the scope, match names, push what matches.
 ///
-/// The `SearchBackend`/`SearchQuery`/`SearchResults` types above are the transitional v1 surface
-/// still used by `fam-ffi` and `fam-cli`; they are deleted in increment 6 once the Everything
-/// client and the index router take over. This provider is the shape both will implement.
+/// This is the answer that is always available, and the only one that reaches a volume no outside
+/// index covers - which is why it sits behind the index in the router rather than replacing it.
 pub struct WalkProvider {
     policy: WalkPolicy,
     timeout: Duration,
@@ -328,53 +103,9 @@ impl SearchProvider for WalkProvider {
 
 #[cfg(test)]
 mod tests {
+    use fam_core::Kind;
+
     use super::*;
-
-    #[test]
-    fn query_terms_are_lowercased_and_split() {
-        let query = SearchQuery::new("Contract  2026");
-        assert_eq!(query.terms, vec!["contract", "2026"]);
-        assert!(SearchQuery::new("   ").is_empty());
-    }
-
-    #[test]
-    fn every_term_must_appear_in_the_name() {
-        let query = SearchQuery::new("pdf invoice");
-        let hit = |name: &str| {
-            query.matches(&Entry {
-                path: PathBuf::from(name),
-                kind: Kind::Document,
-                size: 1,
-                modified_ms: None,
-            })
-        };
-        assert!(hit("INVOICE-2026.PDF"));
-        assert!(!hit("invoice-list.txt"));
-    }
-
-    #[test]
-    fn kind_filter_narrows_results() {
-        let query = SearchQuery::new("a").kind(Kind::Image);
-        let image = Entry {
-            path: PathBuf::from("a.png"),
-            kind: Kind::Image,
-            size: 1,
-            modified_ms: None,
-        };
-        let text = Entry {
-            path: PathBuf::from("a.txt"),
-            kind: Kind::Document,
-            size: 1,
-            modified_ms: None,
-        };
-        assert!(query.matches(&image));
-        assert!(!query.matches(&text));
-    }
-
-    #[test]
-    fn limit_never_collapses_to_zero() {
-        assert_eq!(SearchQuery::new("x").limit(0).limit, 1);
-    }
 
     fn provider(root: &std::path::Path) -> WalkProvider {
         WalkProvider::new(
@@ -505,6 +236,35 @@ mod tests {
         assert_eq!(
             outcome.visited, 1,
             "the walk never descends outside the requested scope"
+        );
+    }
+
+    /// The bucket filter, which the query layer deliberately does not push down as an `ext:` list: a
+    /// search for a name is not a search for a suffix, so rows arrive and are sorted here.
+    #[test]
+    fn a_kind_narrows_the_hits_without_narrowing_the_query() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "sunset.png");
+        write(dir.path(), "sunset-plans.txt");
+
+        let mut images = Vec::new();
+        let outcome = provider(dir.path())
+            .search(
+                &SearchRequest::new("sunset").kind(Kind::Image),
+                &Cancellation::new(),
+                &mut |hit| {
+                    images.push(hit);
+                    true
+                },
+            )
+            .unwrap();
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(base(&images[0]), "sunset.png");
+        assert_eq!(outcome.matched, 1);
+        assert_eq!(
+            outcome.visited, 2,
+            "the .txt was looked at and then sorted out, never skipped"
         );
     }
 

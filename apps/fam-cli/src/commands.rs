@@ -3,39 +3,18 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
-use fam_core::{AppPaths, Config};
+use fam_core::{path_buf_from_units, AppPaths, Config, SearchHit, SearchRequest as NameRequest};
 use fam_sched::{spawn, Batch, SchedulerConfig};
+use fam_svc_index::SearchRouter;
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
 use fam_svc_walk::KIND_ORDER;
-use fam_svc_walk::{
-    collect, Cancellation, Entry, EverythingBackend, Kind, SearchBackend, SearchError, SearchQuery,
-    SearchResults, SearchService, WalkBackend, WalkPolicy, WalkReport,
-};
+use fam_svc_walk::{collect, Cancellation, Entry, Kind, WalkPolicy, WalkReport};
 
 use crate::{ConfigAction, TagAction};
 
-/// Wrapper that reports itself as available so an explicitly requested backend explains its own
-/// failure rather than being skipped as unusable.
-struct Forced<B: SearchBackend>(B);
-
-impl<B: SearchBackend> SearchBackend for Forced<B> {
-    fn id(&self) -> &'static str {
-        self.0.id()
-    }
-
-    fn is_available(&self) -> bool {
-        true
-    }
-
-    fn search(
-        &self,
-        query: &SearchQuery,
-        cancel: &Cancellation,
-        timeout: Duration,
-    ) -> std::result::Result<SearchResults, SearchError> {
-        self.0.search(query, cancel, timeout)
-    }
-}
+/// How many hits `search` accumulates unless `--limit` says otherwise. A ceiling rather than none,
+/// because every row is held in memory until it is printed and a root like `D:\` does not run out.
+const DEFAULT_SEARCH_LIMIT: usize = 200;
 
 pub fn config(config: &Config, action: &ConfigAction) -> Result<()> {
     match action {
@@ -117,42 +96,72 @@ pub fn search(
     backend: Option<&str>,
 ) -> Result<()> {
     let kind = parse_kind(kind)?;
-    let service = match backend {
-        None | Some("auto") | Some("walk") => SearchService::default_with(walk_policy(config)),
-        Some("walk-only") => {
-            SearchService::new(vec![Box::new(WalkBackend::new(walk_policy(config)))])
-        }
-        Some("everything") => SearchService::new(vec![Box::new(Forced(EverythingBackend))]),
+    // Which backends exist, in what order, and what may be reported is the router's own answer, so a
+    // CLI search and a shell search cannot drift apart over the same question.
+    let router = match backend {
+        None | Some("auto") | Some("walk") => SearchRouter::from_config(config),
+        Some("walk-only") => SearchRouter::walking(config),
+        Some("everything") => SearchRouter::indexed(config),
         Some(other) => {
             bail!("unknown backend {other:?}; expected auto, walk, walk-only or everything")
         }
     };
 
-    let mut request = SearchQuery::new(query);
+    let request = NameRequest::new(query);
+    if request.is_empty() {
+        bail!("query carries no search terms");
+    }
+    let mut request = request;
     if let Some(kind) = kind {
         request = request.kind(kind);
     }
     if let Some(within) = within {
-        request = request.within(within);
+        request = request.scope(within);
     }
-    if let Some(limit) = limit {
-        request = request.limit(limit);
-    }
+    request = request.limit(limit.unwrap_or(DEFAULT_SEARCH_LIMIT).max(1));
 
     let started = Instant::now();
-    let results = service.search(&request, &Cancellation::new(), config.scan_timeout())?;
+    let mut entries: Vec<Entry> = Vec::new();
+    let searched = router.search(&request, &Cancellation::new(), &mut |hit| {
+        entries.push(entry_of(&hit));
+        true
+    })?;
+    let outcome = searched.outcome;
     println!(
         "backend={} hits={} in {}ms",
-        results.backend,
-        results.entries.len(),
+        searched.provider,
+        entries.len(),
         started.elapsed().as_millis()
     );
-    render_entries(&results.entries);
-    if results.incomplete {
+    render_entries(&entries);
+    if !outcome.complete {
         println!("incomplete: the scope was not fully covered");
     }
-    render_report(&results.report);
+    // What the backend saw, as distinct from what it matched: the number that says a search was slow
+    // rather than empty. v1 printed the walk's own counters here, which only enumeration had.
+    println!(
+        "searched: matched={} visited={} in {}ms{}",
+        outcome.matched,
+        outcome.visited,
+        started.elapsed().as_millis(),
+        if outcome.complete {
+            ""
+        } else {
+            " (stopped early)"
+        }
+    );
     Ok(())
+}
+
+/// A search hit in the row shape `render_entries` prints.
+fn entry_of(hit: &SearchHit) -> Entry {
+    Entry {
+        path: path_buf_from_units(&hit.path),
+        kind: hit.kind,
+        size: hit.size,
+        // `i64::MIN` is how every backend in this program says "no date"; `Entry` says it with `None`.
+        modified_ms: (hit.mtime_ms != i64::MIN).then_some(hit.mtime_ms),
+    }
 }
 
 pub fn tag(config: &Config, action: &TagAction) -> Result<()> {

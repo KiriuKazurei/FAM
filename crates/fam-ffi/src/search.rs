@@ -1,9 +1,9 @@
 //! Paged name search: one owner thread, one result set per token, rows handed out in windows.
 //!
-//! v1's search returned everything at once - a JSON array of every hit - because that is all
-//! [`fam_svc_walk::SearchService`] could express. The newer
-//! [`SearchProvider`](fam_core::SearchProvider) contract pushes hits at a sink, so a search can be
-//! read *while it runs*: `fam_search_page` hands out the prefix found so far with
+//! v1's search returned everything at once - a JSON array of every hit - because the backend it was
+//! built on had no other shape to give. The
+//! [`SearchProvider`](fam_core::SearchProvider) contract pushes hits at a sink instead, so a search
+//! can be read *while it runs*: `fam_search_page` hands out the prefix found so far with
 //! `state = LOADING`, and the set flips to `READY` when the provider says it covered the scope.
 //!
 //! Sorting happens once, at the end. While rows are arriving they stay in discovery order, and

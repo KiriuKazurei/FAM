@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 fam-core.workspace = true
 fam-svc-enumerate.workspace = true
+fam-svc-everything.workspace = true
+fam-svc-walk.workspace = true
 log.workspace = true
 thiserror.workspace = true
 
@@ -16,6 +18,4 @@ thiserror.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
-fam-svc-everything.workspace = true
-fam-svc-walk.workspace = true
 tempfile.workspace = true

@@ -3,10 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use fam_svc_walk::{
-    collect, to_epoch_ms, walk, Cancellation, Kind, SearchBackend, SearchError, SearchQuery,
-    SearchService, WalkBackend, WalkPolicy,
-};
+use fam_svc_walk::{collect, to_epoch_ms, walk, Cancellation, Kind, WalkPolicy};
 
 fn write_file(path: &Path, body: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -238,113 +235,6 @@ fn callback_can_stop_the_walk_immediately() {
 
     assert_eq!(seen, 1);
     assert!(report.cancelled);
-}
-
-#[test]
-fn search_matches_substrings_and_filters_by_kind() {
-    let dir = tempfile::tempdir().unwrap();
-    sample_tree(dir.path());
-    let service = SearchService::walk_only(policy(dir.path()));
-
-    let hits = service
-        .search(
-            &SearchQuery::new("c.mp3"),
-            &Cancellation::new(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-    assert_eq!(hits.entries.len(), 1);
-    assert_eq!(hits.entries[0].file_name(), "c.mp3");
-    assert!(!hits.incomplete);
-    assert_eq!(hits.backend, "walk");
-
-    let images = service
-        .search(
-            &SearchQuery::new("").kind(Kind::Image),
-            &Cancellation::new(),
-            Duration::from_secs(30),
-        )
-        .unwrap_err();
-    assert!(matches!(images, SearchError::Empty));
-
-    let scoped = service
-        .search(
-            &SearchQuery::new("b").within(dir.path().join("sub")),
-            &Cancellation::new(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-    assert_eq!(scoped.entries.len(), 1);
-    assert_eq!(scoped.entries[0].file_name(), "b.JPG");
-}
-
-#[test]
-fn search_stops_at_the_limit_without_marking_results_incomplete() {
-    let dir = tempfile::tempdir().unwrap();
-    for index in 0..30 {
-        write_file(&dir.path().join(format!("shot-{index:02}.png")), "x");
-    }
-    let service = SearchService::walk_only(policy(dir.path()));
-
-    let hits = service
-        .search(
-            &SearchQuery::new("shot").limit(7),
-            &Cancellation::new(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-
-    assert_eq!(hits.entries.len(), 7);
-    assert!(
-        !hits.incomplete,
-        "reaching the limit is not an incomplete search"
-    );
-}
-
-#[test]
-fn service_skips_unavailable_backends_and_reaches_the_fallback() {
-    let dir = tempfile::tempdir().unwrap();
-    sample_tree(dir.path());
-    let service = SearchService::default_with(policy(dir.path()));
-
-    assert_eq!(service.available_backends(), vec!["walk"]);
-    let hits = service
-        .search(
-            &SearchQuery::new("notes"),
-            &Cancellation::new(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-    assert_eq!(hits.backend, "walk");
-    assert_eq!(hits.entries.len(), 1);
-}
-
-#[test]
-fn a_search_without_any_scope_says_so() {
-    let backend = WalkBackend::new(WalkPolicy::default());
-    let cancel = Cancellation::new();
-
-    let error = backend
-        .search(&SearchQuery::new("x"), &cancel, Duration::from_secs(1))
-        .unwrap_err();
-    assert!(
-        matches!(error, SearchError::Unavailable { .. }),
-        "got {error:?}"
-    );
-    assert!(error.to_string().contains("--in"), "{error}");
-
-    let dir = tempfile::tempdir().unwrap();
-    write_file(&dir.path().join("scoped.txt"), "x");
-    let scoped = backend
-        .search(
-            &SearchQuery::new("scoped").within(dir.path()),
-            &cancel,
-            Duration::from_secs(5),
-        )
-        .unwrap();
-
-    assert_eq!(scoped.entries.len(), 1);
-    assert_eq!(scoped.entries[0].file_name(), "scoped.txt");
 }
 
 #[test]
