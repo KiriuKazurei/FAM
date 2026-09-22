@@ -32,6 +32,9 @@ mod query;
 mod search;
 mod state;
 
+/// A deterministic stand-in for the service, for the tests a machine without one cannot otherwise
+/// run. See the module documentation for what it does and does not reproduce.
+pub mod testing;
 /// Which volumes an outside index can answer for, and the scan that finds them.
 pub mod volumes;
 
