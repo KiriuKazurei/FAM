@@ -108,9 +108,13 @@ int main(int argc, char *argv[]) {
                                [&window]() { window.runSelfCheckSearch(QStringLiteral("zip")); });
             QTimer::singleShot(4300, [&window]() { window.clearSelfCheckSearch(); });
             QTimer::singleShot(4700, [&window]() { window.sortDeepestForSelfCheck(); });
-            QTimer::singleShot(5300, [&window]() { window.removeSelfCheckProbe(); });
+            QTimer::singleShot(5000, [&window]() { window.goUpForSelfCheck(); });
+            QTimer::singleShot(5500, [&window]() { window.removeSelfCheckProbe(); });
+            /* Last, because it replaces the chain: a drive pick is the sidebar doing its only job,
+             * and the frame after it shows what the reader would see. */
+            QTimer::singleShot(6100, [&window]() { window.pickFirstDriveForSelfCheck(); });
         }
-        const int grabAt = mutate ? 6400 : 2500;
+        const int grabAt = mutate ? 7200 : 2500;
         QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so

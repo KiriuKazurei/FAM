@@ -20,6 +20,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include "drivelist.h"
 #include "iconcache.h"
 
 MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, QWidget *parent)
@@ -91,9 +92,22 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     m_status = new QLabel(this);
     m_status->setWordWrap(true);
 
+    m_drives = new DriveList(this);
+    connect(m_drives, &DriveList::drivePicked, this, [this](const QString &root) {
+        QString error;
+        if (!openFolder(root, &error)) {
+            setStatus(error);
+        }
+    });
+
+    auto *body = new QHBoxLayout;
+    body->setContentsMargins(0, 0, 0, 0);
+    body->addWidget(m_drives);
+    body->addWidget(m_pages, 1);
+
     auto *layout = new QVBoxLayout(this);
     layout->addLayout(controls);
-    layout->addWidget(m_pages, 1);
+    layout->addLayout(body, 1);
     layout->addWidget(m_status);
     setLayout(layout);
 
@@ -513,4 +527,15 @@ void MainWindow::descendForSelfCheck() {
 void MainWindow::sortDeepestForSelfCheck() {
     const QString applied = m_chain->sortDeepest();
     qInfo("self-check sorted the deepest column by %s", qUtf8Printable(applied));
+}
+
+void MainWindow::pickFirstDriveForSelfCheck() {
+    const QString root = m_drives->selectFirst();
+    qInfo("self-check picked drive %s, chain depth %d", qUtf8Printable(root), m_chain->depth());
+}
+
+void MainWindow::goUpForSelfCheck() {
+    const QString remained = m_chain->goBack();
+    qInfo("self-check went up to %s, chain depth %d",
+          qUtf8Printable(QDir::toNativeSeparators(remained)), m_chain->depth());
 }

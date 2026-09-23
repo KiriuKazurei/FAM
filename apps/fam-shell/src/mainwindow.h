@@ -10,6 +10,7 @@
 #include "columnchain.h"
 #include "famlistmodel.h"
 
+class DriveList;
 class IconCache;
 class QComboBox;
 class QLabel;
@@ -64,6 +65,12 @@ public:
     /* Clicks the deepest column's sort control once. */
     void sortDeepestForSelfCheck();
 
+    /* Picks the first reachable drive in the sidebar. */
+    void pickFirstDriveForSelfCheck();
+
+    /* Drops the deepest column, as Backspace would. */
+    void goUpForSelfCheck();
+
 protected:
     /* Unhandled key events reach here: Backspace and Alt+Left go up one column. */
     void keyPressEvent(QKeyEvent *event) override;
@@ -95,6 +102,8 @@ private:
     QString deepestFolder() const { return m_chain->deepestPath(); }
 
     std::unique_ptr<FamBridge> m_bridge;
+    /* The volumes this machine has. Choosing one starts a chain from its root. */
+    DriveList *m_drives = nullptr;
     /* The Miller columns. Owns one v2 token and one model per directory it shows. */
     ColumnChain *m_chain = nullptr;
     /* Search results get their own list and model rather than borrowing a column's: the columns stay
