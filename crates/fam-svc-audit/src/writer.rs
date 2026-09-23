@@ -73,7 +73,14 @@ pub struct Health {
     pub file: Option<PathBuf>,
     pub records: u64,
     pub bytes_today: u64,
+    /// What one day's file may reach before the `Read` stream stops - the number
+    /// `bytes_today` only means something next to this.
+    pub daily_limit_bytes: u64,
+    /// Lines not written since the last one that landed.
     pub dropped: u64,
+    /// The session's whole toll: `dropped` resets when a record carries it forward,
+    /// this does not, so a day that ran out of room keeps saying so.
+    pub dropped_total: u64,
     pub dropped_because: Option<String>,
     pub writing: bool,
     pub last_error: Option<String>,
@@ -94,7 +101,11 @@ struct Writer {
     seq: u64,
     prev: String,
     dropped: u64,
+    dropped_total: u64,
     dropped_because: Option<&'static str>,
+    /// The last reason seen, which outlives the pending count: a health readout that clears
+    /// when the next line lands cannot answer "did this session ever lose records".
+    last_dropped_because: Option<&'static str>,
     records: u64,
     last_error: Option<String>,
     /// Whether the console has been told yet. A log that cannot write says so once, because saying
@@ -121,7 +132,9 @@ impl AuditLog {
             seq: 0,
             prev: GENESIS.into(),
             dropped: 0,
+            dropped_total: 0,
             dropped_because: None,
+            last_dropped_because: None,
             records: 0,
             last_error: None,
             warned: false,
@@ -179,8 +192,10 @@ impl Writer {
             file: self.path.clone(),
             records: self.records,
             bytes_today: self.bytes_today,
+            daily_limit_bytes: self.options.daily_limit_bytes,
             dropped: self.dropped,
-            dropped_because: self.dropped_because.map(str::to_owned),
+            dropped_total: self.dropped_total,
+            dropped_because: self.last_dropped_because.map(str::to_owned),
             writing: self.file.is_some(),
             last_error: self.last_error.clone(),
         }
@@ -194,15 +209,20 @@ impl Writer {
             None => return self.lost("clock", "the system clock is before 1970"),
         };
         let day = utc_date(at);
-        if self.file.is_none() || self.day != Some(day) {
+        // Rotating *backwards* is what a clock that stepped across midnight would do, and appending
+        // into yesterday's file would put this session's newest line before its older ones on disk -
+        // which `verify` can only read as a broken chain. So a healthy handle for a later day is
+        // kept and the name lags; a handle that has to be opened is opened wherever we are, because
+        // refusing to write at all would lose the record rather than merely date it oddly.
+        let clock_went_backwards = self.file.is_some() && day < self.day.unwrap_or(day);
+        if !clock_went_backwards && (self.file.is_none() || self.day != Some(day)) {
             if let Err(error) = self.rotate_to(day) {
                 return self.lost("io", &error.to_string());
             }
         }
         if draft.op().weight() == Weight::Read && self.bytes_today >= self.options.daily_limit_bytes
         {
-            self.dropped += 1;
-            self.dropped_because = Some("cap");
+            self.suppressed("cap");
             return;
         }
 
@@ -251,13 +271,28 @@ impl Writer {
     /// Records that a line was wanted and not written. The count rides on the next record that does
     /// land, so the hole in the log says how big it is and why.
     fn lost(&mut self, because: &'static str, message: &str) {
-        self.dropped += 1;
-        self.dropped_because = Some(because);
+        self.suppressed(because);
         self.last_error = Some(clip(message, 240));
         if !self.warned {
             self.warned = true;
             log::warn!("audit log is not writing: {message}");
         }
+    }
+
+    /// Counts a line that was not written. Two counters, because they answer different questions:
+    /// `dropped` is what the next record carries and resets when it does, `dropped_total` is the
+    /// session's whole toll and survives - otherwise a day that hit its cap and then kept answering
+    /// would look, from `fam_stats`, exactly like a day that never did.
+    fn suppressed(&mut self, because: &'static str) {
+        self.dropped += 1;
+        self.dropped_total += 1;
+        // The reason that started the hole, not the last one to fall into it: fifty cap suppressions
+        // followed by one failed write are still a day that ran out of room. `last_dropped_because`
+        // is kept as well, because the pending pair resets with the record that carries it.
+        if self.dropped_because.is_none() {
+            self.dropped_because = Some(because);
+        }
+        self.last_dropped_because = Some(because);
     }
 
     fn rotate_to(&mut self, day: (i64, u32, u32)) -> Result<(), crate::Error> {
@@ -308,7 +343,11 @@ impl Drop for AuditLog {
         };
         // The seal counts itself, so `verify` can compare one number against the lines that survived
         // without knowing which side of the append the count was taken from.
-        let summary = format!("records={} dropped={}", writer.records + 1, writer.dropped);
+        let summary = format!(
+            "records={} dropped={}",
+            writer.records + 1,
+            writer.dropped_total
+        );
         writer.append(
             &Actor::System,
             self.session,
@@ -565,6 +604,76 @@ mod tests {
     /// The failure a full or read-only disk actually produces: the writes stop, every later call
     /// counts itself lost, and the next line that lands carries the total. Recovery is not a
     /// special case - the handle is dropped, so the following call opens one again.
+    /// A clock that steps back across midnight must not send this session's newest line into
+    /// yesterday's file: `verify` reads files in date order, so that line would arrive before the
+    /// older ones and look like a broken chain. The day in the name lags instead.
+    #[test]
+    fn a_clock_that_steps_backwards_keeps_the_chain_intact() {
+        let scratch = Scratch::new();
+        let millis = at(DAY_TWO);
+        let log = AuditLog::open(scratch.options(millis.clone())).expect("opens");
+        log.record(Draft::new(Op::DirOpen).target(Path::new("d:/later")));
+        millis.store(DAY_ONE, std::sync::atomic::Ordering::SeqCst);
+        log.record(Draft::new(Op::DirOpen).target(Path::new("d:/earlier")));
+        drop(log);
+
+        assert_eq!(
+            scratch.files(),
+            vec!["audit-2025-09-24.jsonl"],
+            "yesterday's file is not reopened for a later line"
+        );
+        let lines = scratch.lines();
+        assert_eq!(lines.len(), 4);
+        for index in 1..lines.len() {
+            assert_eq!(
+                record_at(&lines, index).prev,
+                chain::link_of(lines[index - 1].as_bytes()),
+                "link {index}"
+            );
+        }
+        assert_eq!(record_at(&lines, 3).seq, 4);
+    }
+
+    /// Fifty suppressions from the cap and one from a failed write are a day that ran out of room,
+    /// and `dropped_total` is the number that survives the next line landing.
+    #[test]
+    fn the_reason_that_opened_a_hole_is_the_one_the_log_reports() {
+        let scratch = Scratch::new();
+        let mut options = scratch.options(at(DAY_ONE));
+        options.daily_limit_bytes = 300;
+        let log = AuditLog::open(options).expect("opens");
+        for _ in 0..5 {
+            log.record(Draft::new(Op::DirFetch).args("0+80"));
+        }
+        // An ask still lands after the cap, and carrying the count resets the pending pair.
+        log.record(Draft::new(Op::DirOpen).target(Path::new("d:/x")));
+
+        let health = log.health();
+        assert_eq!(
+            health.records, 3,
+            "open, one fetch before the cap, and the ask"
+        );
+        assert_eq!(
+            health.dropped, 0,
+            "the ask carried the four out and reset the pending count"
+        );
+        assert_eq!(
+            health.dropped_total, 4,
+            "and the session's toll stays visible"
+        );
+        assert_eq!(
+            health.dropped_because.as_deref(),
+            Some("cap"),
+            "the reason outlives the count that rode with it"
+        );
+        assert_eq!(health.daily_limit_bytes, 300);
+        assert!(
+            health.bytes_today >= 300,
+            "the file is at {}",
+            health.bytes_today
+        );
+    }
+
     #[test]
     fn a_write_failure_is_counted_and_the_log_recovers_on_its_own() {
         let scratch = Scratch::new();

@@ -107,6 +107,10 @@ pub struct WalkReport {
     pub emitted: u64,
     pub directories: u64,
     pub skipped: u64,
+    /// Seeds refused because they sit under an exclusion. A search whose whole scope was
+    /// refused covered none of what it was asked to cover, which is not the same answer as
+    /// "nothing matched" - so it is reported separately from `skipped`, which counts entries.
+    pub excluded_roots: u64,
     pub errors: u64,
     pub cancelled: bool,
     pub timed_out: bool,
@@ -211,6 +215,7 @@ where
 
     report.directories = shared.directories.load(Ordering::Relaxed);
     report.skipped = shared.skipped.load(Ordering::Relaxed) + root_skips;
+    report.excluded_roots = root_skips;
     report.errors = root_errors + shared.errors.load(Ordering::Relaxed);
     report.elapsed_ms = started.elapsed().as_millis() as u64;
     report

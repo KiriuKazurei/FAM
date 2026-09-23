@@ -62,13 +62,6 @@ pub fn conflicting_root(directory: &Path, roots: &[PathBuf]) -> Option<PathBuf> 
         .cloned()
 }
 
-/// Whether the audit directory lies inside something the tool indexes. Worth reporting in `stats`,
-/// because the exclusion that makes it safe is easy to configure away.
-pub fn inside_a_root(directory: &Path, roots: &[PathBuf]) -> bool {
-    let key = PathKey::of(directory);
-    roots.iter().any(|root| PathKey::of(root).is_within(&key))
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("cannot use {}: {source}", path.display())]
@@ -109,27 +102,26 @@ mod tests {
 
     /// The default Windows layout, and the reason "refuse whenever the log is inside a root" is not
     /// the rule: the data directory is under the home directory, and the home directory is the
-    /// default root. That case is the exclusion's job, not a reason to refuse to start.
+    /// default root. That case is the exclusion's job - the reverse one, a root placed inside the
+    /// log, is what refuses to start, and `a_root_underneath_the_audit_directory_conflicts` has it.
     #[test]
     fn a_log_inside_a_root_is_the_ordinary_case() {
         let audit = Path::new("C:/Users/Kirig/AppData/Roaming/FileAutoManage/audit");
-        let home = PathBuf::from("C:/Users/Kirig");
-        assert_eq!(conflicting_root(audit, std::slice::from_ref(&home)), None);
-        assert!(inside_a_root(audit, &[home]));
-    }
-
-    #[test]
-    fn a_log_on_a_volume_of_its_own_is_in_no_root() {
-        let audit = Path::new("D:/fam-audit");
-        assert!(!inside_a_root(audit, &[PathBuf::from("C:/Users/Kirig")]));
         assert_eq!(
             conflicting_root(audit, &[PathBuf::from("C:/Users/Kirig")]),
-            None
+            None,
+            "the data directory is under the default home root, and that is the exclusion's job"
+        );
+        assert_eq!(
+            conflicting_root(
+                Path::new("D:/fam-audit"),
+                &[PathBuf::from("C:/Users/Kirig")]
+            ),
+            None,
+            "a log on a volume of its own is in no one's root"
         );
     }
 
-    /// `conflicting_root` compares identity, not spelling: a root written with backslashes and a
-    /// differently-cased audit path are still the same place.
     #[test]
     fn the_comparison_is_the_folded_one() {
         let audit = Path::new("d:\\FAM-AUDIT");

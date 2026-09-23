@@ -169,9 +169,14 @@ struct AuditOut {
     records: u64,
     bytes_today: u64,
     dropped: u64,
+    /// The session's whole toll, which outlives the count a record carries away.
+    dropped_total: u64,
     dropped_because: Option<String>,
     writing: bool,
     record_reads: bool,
+    /// What `bytes_today` has to be read against: a day at its ceiling is a day whose read
+    /// stream stopped, and without this number a reader cannot tell the two apart.
+    daily_limit_bytes: u64,
     last_error: Option<String>,
 }
 
@@ -344,6 +349,8 @@ impl FamCore {
                     dropped_because: health.dropped_because,
                     writing: health.writing,
                     record_reads: self.config.audit_record_reads,
+                    daily_limit_bytes: health.daily_limit_bytes,
+                    dropped_total: health.dropped_total,
                     last_error: health.last_error,
                 }
             },
@@ -759,8 +766,9 @@ impl FamCore {
         }
     }
 
-    fn search_close(&self, token: u64) {
-        self.searches.close(token);
+    /// `false` for a token this core never handed out, or has already released.
+    fn search_close(&self, token: u64) -> bool {
+        self.searches.close(token)
     }
 }
 
@@ -938,6 +946,29 @@ where
                 ERR
             }
         },
+    }
+}
+
+/// The shape of the two calls that release something and answer nothing.
+///
+/// They have no `err` slot in their signatures, so the audit line is the only record either one
+/// leaves - which is the reason the line is written from what actually happened rather than flatly
+/// `ok`: a close that found no token by that name has to read differently from one that released a
+/// view, or the trail would claim releases that never occurred. It is also why the body runs under
+/// `catch_unwind` like the other three shapes, rather than being the only two entry points that
+/// could unwind straight into C++ frames.
+unsafe fn with_core_void<F>(core: *mut FamCore, mut call: Call, body: F)
+where
+    F: FnOnce(&FamCore, &mut Call) -> Result<bool, String>,
+{
+    let Ok(borrow) = borrow_core(core) else {
+        return;
+    };
+    match catch_unwind(AssertUnwindSafe(|| body(borrow, &mut call))) {
+        Ok(Ok(true)) => borrow.record(&call, "ok"),
+        Ok(Ok(false)) => borrow.record(&call, "error nothing was held by that token"),
+        Ok(Err(message)) => borrow.record(&call, format!("error {message}")),
+        Err(_) => borrow.record(&call, "panic"),
     }
 }
 
@@ -1281,11 +1312,11 @@ pub unsafe extern "C" fn fam_dir_set_filter(
 /// Ends a view. The directory stops being watched when this was the last view of it.
 #[no_mangle]
 pub unsafe extern "C" fn fam_dir_close(core: *mut FamCore, token: u64) {
-    // No `err` slot in this signature, so the audit line is the only record the call leaves.
-    if let Ok(borrow) = unsafe { borrow_core(core) } {
-        borrow.dir_close(token);
-        borrow.record(&Call::new(Op::DirClose).with_token(token), "ok");
-    }
+    with_core_void(
+        core,
+        Call::new(Op::DirClose).with_token(token),
+        |borrow, _| Ok(borrow.dir_close(token)),
+    );
 }
 
 /// Which search backends exist and which are usable now, as JSON.
@@ -1370,8 +1401,9 @@ pub unsafe extern "C" fn fam_search_cancel(
 /// Ends a search and releases its rows.
 #[no_mangle]
 pub unsafe extern "C" fn fam_search_close(core: *mut FamCore, token: u64) {
-    if let Ok(borrow) = unsafe { borrow_core(core) } {
-        borrow.search_close(token);
-        borrow.record(&Call::new(Op::SearchClose).with_token(token), "ok");
-    }
+    with_core_void(
+        core,
+        Call::new(Op::SearchClose).with_token(token),
+        |borrow, _| Ok(borrow.search_close(token)),
+    );
 }

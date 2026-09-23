@@ -95,8 +95,10 @@ impl SearchProvider for WalkProvider {
             sink(hit) && (limit == 0 || outcome.matched < limit as u64)
         });
         // Stopping on the sink counts as incomplete too: the caller asked for a bounded answer, so
-        // there may be matches it never saw.
-        outcome.complete = !report.stopped_early();
+        // there may be matches it never saw. A refused root counts the same way: naming a subtree
+        // that an exclusion covers is not a request this provider can answer, and reporting zero
+        // hits as a complete sweep is the failure `Prune::excludes_below` exists to avoid.
+        outcome.complete = !report.stopped_early() && report.excluded_roots == 0;
         Ok(outcome)
     }
 }
@@ -127,6 +129,44 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// The name of the answer matters as much as the answer: a scope an exclusion covers is not an
+    /// empty folder, and "0 hits, fully covered" is the lie `Prune::excludes_below` was extracted to
+    /// stop. This is reachable from a default configuration, because the audit directory is one of
+    /// those exclusions.
+    #[test]
+    fn a_scope_that_was_refused_says_it_was_not_covered() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "secret.txt");
+        let policy = WalkPolicy {
+            prune: fam_core::Prune::new(vec![fam_core::path_key(dir.path())], Vec::new()),
+            ..WalkPolicy::default()
+        }
+        .rooted_at(dir.path());
+        let provider = WalkProvider::new(policy, Duration::from_secs(5));
+
+        let mut hits = Vec::new();
+        let outcome = provider
+            .search(
+                &SearchRequest::new("secret"),
+                &Cancellation::new(),
+                &mut |hit| {
+                    hits.push(hit);
+                    true
+                },
+            )
+            .expect("the provider answers");
+
+        assert!(
+            hits.is_empty(),
+            "nothing under an exclusion may be reported"
+        );
+        assert_eq!(outcome.matched, 0);
+        assert!(
+            !outcome.complete,
+            "the answer is 'not covered', not 'searched and empty'"
+        );
     }
 
     #[test]

@@ -8,6 +8,15 @@ use serde::{Deserialize, Serialize};
 use crate::pathkey::path_key;
 
 pub const APP_ID: &str = "FileAutoManage";
+
+/// Where the three directories go when the platform cannot name them - a service account, a
+/// container, a deleted working directory. Anchored at the current directory rather than left
+/// relative: `audit_dir` has to be an absolute path to mean anything to the exclusion that keeps the
+/// audit log out of the indexed set, and a relative default would make the program refuse to start on
+/// the very machine it is trying to be usable on.
+fn fallback_root() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".fam"))
+}
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 
 pub const DEFAULT_SCAN_TIMEOUT_SECS: u64 = 30;
@@ -51,7 +60,7 @@ impl AppPaths {
         let suffix = PathBuf::from(APP_ID);
         let base = |dir: Option<PathBuf>| match dir {
             Some(root) => root.join(&suffix),
-            None => PathBuf::from(".fam").join(&suffix),
+            None => fallback_root().join(&suffix),
         };
         Self {
             config_dir: base(dirs::config_dir()),
@@ -256,6 +265,18 @@ impl Config {
                 "audit_dir must not be empty: the audit log has no optional location".into(),
             ));
         }
+        // A relative one would be resolved against whatever the process's working directory happens
+        // to be, and the two guards that matter - the exclusion prefix that keeps the log out of the
+        // indexed set, and the check that no search root sits inside it - both compare path identity.
+        // A relative key matches no absolute walk key, so the log would silently be searchable, and
+        // on a machine with no known data directory that is the *default*: `AppPaths` falls back to
+        // `.fam/FileAutoManage` when `dirs` cannot answer.
+        if !self.audit_dir.is_absolute() {
+            return Err(ConfigError::Invalid(format!(
+                "audit_dir must be an absolute path, got {}",
+                self.audit_dir.display()
+            )));
+        }
         Ok(())
     }
 
@@ -339,6 +360,16 @@ mod tests {
     #[test]
     fn defaults_are_valid() {
         Config::default().validate().unwrap();
+    }
+
+    /// The audit directory has to be absolute to be comparable against a search root at all, and the
+    /// platform-not-answering fallback is the only way it could have been relative.
+    #[test]
+    fn every_default_location_is_absolute() {
+        assert!(AppPaths::default_audit_dir().is_absolute());
+        assert!(AppPaths::default_database_file().is_absolute());
+        assert!(AppPaths::config_file().is_absolute());
+        assert!(AppPaths::resolve().cache_dir.is_absolute());
     }
 
     #[test]
@@ -456,6 +487,14 @@ mod tests {
         assert!(matches!(
             no_directory.validate(),
             Err(ConfigError::Invalid(message)) if message.contains("audit_dir")
+        ));
+        let relative = Config {
+            audit_dir: PathBuf::from("audit"),
+            ..Config::default()
+        };
+        assert!(matches!(
+            relative.validate(),
+            Err(ConfigError::Invalid(message)) if message.contains("absolute")
         ));
         let no_ceiling = Config {
             audit_daily_limit_mb: 0,

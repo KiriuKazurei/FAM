@@ -422,7 +422,7 @@ fn render_entries(entries: &[Entry]) {
 
 fn render_report(report: &WalkReport) {
     println!(
-        "walked: dirs={} emitted={} skipped={} errors={} in {}ms{}",
+        "walked: dirs={} emitted={} skipped={} errors={} in {}ms{}{}",
         report.directories,
         report.emitted,
         report.skipped,
@@ -432,6 +432,14 @@ fn render_report(report: &WalkReport) {
             " (stopped early)"
         } else {
             ""
+        },
+        // Separate from "stopped early" because it is a different answer: nothing ran out of budget,
+        // one or more of the directories this was asked to search was refused by an exclusion.
+        if report.excluded_roots > 0 {
+            " ({} root(s) excluded: the scope was not covered)"
+                .replace("{}", &report.excluded_roots.to_string())
+        } else {
+            String::new()
         }
     );
 }

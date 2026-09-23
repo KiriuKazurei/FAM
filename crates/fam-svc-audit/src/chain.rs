@@ -138,11 +138,15 @@ pub fn sha256_hex(data: &[u8]) -> String {
 ///
 /// Chaining over the serialized line - rather than over selected fields - is what makes the check
 /// independent of this crate's own reader: any line the log did not write fails to hash to the
-/// `prev` of the line after it. It catches a line that was edited, a line that was deleted, and a
-/// line that was moved between files. It does not catch a rewrite: whoever can write the file can
-/// recompute every link in it, at which point the log is a self-consistent lie and only a copy held
-/// somewhere else would say so. That is the whole of the guarantee, and the note for this increment
-/// states it in the same words.
+/// `prev` of the line after it.
+///
+/// What that catches: a line edited, a line deleted, a line removed from the tail (the session then
+/// has no seal), and a session whose seal no longer matches the lines under it. What it does not
+/// catch: a line moved to another day's file, which leaves every link and every count intact because
+/// nothing here ties a `ts` to the file it sits in - and a full rewrite, since whoever can write the
+/// file can recompute the chain, at which point the log is a self-consistent lie and only a copy held
+/// somewhere else would say so. Both gaps are listed in the note for this increment; the second is
+/// the reason this says tamper-*evident* and never tamper-*proof*.
 pub fn link_of(line: &[u8]) -> String {
     sha256_hex(line)
 }

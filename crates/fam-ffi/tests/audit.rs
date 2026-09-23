@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use fam_svc_audit::{verify, Record, FILE_PREFIX, FILE_SUFFIX};
 use famcore::{
-    fam_abi_version, fam_core_free, fam_core_new, fam_dir_fetch, fam_dir_set_sort, fam_dir_state,
-    fam_open_dir, fam_search_begin, fam_stats, FamCore,
+    fam_abi_version, fam_core_free, fam_core_new, fam_dir_close, fam_dir_fetch, fam_dir_set_sort,
+    fam_dir_state, fam_open_dir, fam_search_begin, fam_stats, FamCore,
 };
 
 /// Forward slashes keep TOML basic strings free of escape headaches, and Windows accepts them.
@@ -137,6 +137,11 @@ impl Session {
         let code =
             unsafe { fam_dir_set_sort(self.handle, token, sort.ptr(), order.ptr(), &mut error) };
         (code, text(error))
+    }
+
+    /// The void entry point: no `err` slot, so the audit line is the only thing it says.
+    fn close(&self, token: u64) {
+        unsafe { fam_dir_close(self.handle, token) };
     }
 
     fn search(&self, query: &str) -> u64 {
@@ -374,6 +379,24 @@ fn a_session_that_asked_for_nothing_is_still_an_accountable_session() {
     let records = session.sealed();
     let ops: Vec<&str> = records.iter().map(|record| record.op.as_str()).collect();
     assert_eq!(ops, vec!["session.open", "session.close"]);
+}
+
+/// A close that released nothing must not read like one that did. These two entry points have no
+/// `err` slot, so the audit line is the only difference a reader ever sees between them.
+#[test]
+fn a_close_that_released_nothing_says_so() {
+    let session = Session::start(true);
+    let token = session.open(&session.root);
+    session.close(token + 1000);
+    session.close(token);
+    let records = session.sealed();
+    let closes: Vec<&Record> = records
+        .iter()
+        .filter(|record| record.op == "dir.close")
+        .collect();
+    assert_eq!(closes.len(), 2, "both calls are lines: {records:?}");
+    assert_eq!(closes[0].result, "error nothing was held by that token");
+    assert_eq!(closes[1].result, "ok");
 }
 
 /// The file-name constants are the contract between the writer and a reader that is a different

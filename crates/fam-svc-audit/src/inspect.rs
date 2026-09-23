@@ -15,6 +15,8 @@ use crate::writer::{FILE_PREFIX, FILE_SUFFIX};
 /// Where a line of the log disagrees with the log around it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
+    /// The log holds no record at all: nothing was ever written, or what was written is gone.
+    NoRecords { files: usize },
     /// Not a record at all: a hand-edited line, or a partial write from a power cut mid-append.
     Unparsable { detail: String },
     /// A session's first line links to something other than nothing.
@@ -34,6 +36,10 @@ pub enum Problem {
 impl Problem {
     fn describe(&self) -> String {
         match self {
+            Self::NoRecords { files } => format!(
+                "no records in {files} file(s): nothing was ever audited, or the log was removed - \
+                 neither is a clean bill of health"
+            ),
             Self::Unparsable { detail } => format!("unreadable line: {detail}"),
             Self::DoesNotStartAtGenesis { found } => {
                 format!("first line of the session links to {found}, not {GENESIS}")
@@ -128,8 +134,11 @@ pub fn files(directory: &Path) -> Result<Vec<PathBuf>, crate::Error> {
 pub fn tail(directory: &Path, count: usize) -> Result<Vec<String>, crate::Error> {
     let mut lines: Vec<String> = Vec::new();
     for file in files(directory)?.into_iter().rev() {
-        let text = read(&file)?;
-        let mut here: Vec<String> = text.lines().map(str::to_owned).collect();
+        let bytes = read(&file)?;
+        let mut here: Vec<String> = split_lines(&bytes)
+            .iter()
+            .map(|line| String::from_utf8_lossy(line).into_owned())
+            .collect();
         here.reverse();
         let take = count.saturating_sub(lines.len()).min(here.len());
         lines.extend(here.into_iter().take(take));
@@ -141,12 +150,28 @@ pub fn tail(directory: &Path, count: usize) -> Result<Vec<String>, crate::Error>
     Ok(lines)
 }
 
-/// Every line in the log with the place it came from, oldest file first.
-fn read(path: &Path) -> Result<String, crate::Error> {
-    fs::read_to_string(path).map_err(|source| crate::Error::Io {
+/// A file, as bytes. Reading it as text would be the wrong contract: whoever edits the log can put a
+/// byte there that no UTF-8 decoder accepts, and if that made the reader give up, one `0xFF` appended
+/// would be enough to switch the audit off - for `verify` *and* for `tail`, which is the command a
+/// person reaches for precisely when `verify` complains.
+fn read(path: &Path) -> Result<Vec<u8>, crate::Error> {
+    fs::read(path).map_err(|source| crate::Error::Io {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// The lines of a file, keyed by their exact bytes.
+///
+/// Split on `\n` only, and nothing is trimmed: a line's bytes are what its successor hashes, so
+/// "repairing" a stray `\r` here would destroy the very evidence the chain carries. A file that does
+/// not end in a newline leaves its partial tail as a line, which is right: that is a write cut short,
+/// and `verify` reports it rather than losing it.
+fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect()
 }
 
 /// Recompute every link and every count the log claims.
@@ -163,15 +188,15 @@ pub fn verify(directory: &Path) -> Result<Report, crate::Error> {
     // Which lines belong to which session, as file-and-number positions. A `BTreeMap` keyed by
     // session id keeps the findings in the order the sessions started, so two runs of `verify` on
     // the same file print the same thing.
-    let mut lines: Vec<(PathBuf, usize, String)> = Vec::new();
+    let mut lines: Vec<(PathBuf, usize, Vec<u8>)> = Vec::new();
     for path in &paths {
-        for (index, raw) in read(path)?.lines().enumerate() {
-            lines.push((path.clone(), index + 1, raw.to_owned()));
+        for (index, raw) in split_lines(&read(path)?).into_iter().enumerate() {
+            lines.push((path.clone(), index + 1, raw.to_vec()));
         }
     }
     let mut sessions: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     for (index, (_, _, raw)) in lines.iter().enumerate() {
-        match serde_json::from_str::<Record>(raw) {
+        match serde_json::from_slice::<Record>(raw) {
             Ok(record) => {
                 report.records += 1;
                 sessions.entry(record.session).or_default().push(index);
@@ -189,13 +214,26 @@ pub fn verify(directory: &Path) -> Result<Report, crate::Error> {
         }
     }
     report.sessions = sessions.len();
+    if report.records == 0 {
+        // The distinction this command exists to make is between "checked and whole" and "nothing to
+        // check". A directory that is empty, or holds only files whose names this crate did not
+        // write, is the second one - and deleting the log is such an obvious way to silence it that
+        // reporting it clean would be the one answer worse than no answer.
+        report.findings.push(Finding {
+            session: None,
+            file: directory.to_path_buf(),
+            line: 0,
+            problem: Problem::NoRecords { files: paths.len() },
+        });
+        return Ok(report);
+    }
 
     for (session, group) in sessions {
         let mut previous: Option<usize> = None;
         for current in group.iter().copied() {
             let record = record_of(&lines[current]);
             if let Some(before) = previous {
-                let expected = chain::link_of(lines[before].2.as_bytes());
+                let expected = chain::link_of(&lines[before].2);
                 if record.prev != expected {
                     report.findings.push(Finding {
                         session: Some(session),
@@ -261,8 +299,8 @@ pub fn verify(directory: &Path) -> Result<Report, crate::Error> {
     Ok(report)
 }
 
-fn record_of(line: &(PathBuf, usize, String)) -> Record {
-    serde_json::from_str(&line.2).expect("only parsed lines are indexed by session")
+fn record_of(line: &(PathBuf, usize, Vec<u8>)) -> Record {
+    serde_json::from_slice(&line.2).expect("only parsed lines are indexed by session")
 }
 
 /// The line count written into a session's seal: how many records that session believes it wrote,
@@ -352,15 +390,20 @@ pub fn summary(directory: &Path, top: usize) -> Result<Summary, crate::Error> {
     let mut ops: BTreeMap<String, u64> = BTreeMap::new();
     let mut actors: BTreeMap<String, u64> = BTreeMap::new();
     let mut targets: BTreeMap<String, u64> = BTreeMap::new();
-    let mut sessions: BTreeMap<u64, u64> = BTreeMap::new();
+
+    // Records per session, and whether the last line seen for it was its seal. Files are read in date
+    // order, so "last seen" is "last written" for a log our own writer produced. Counting seals by
+    // session rather than by "the tail of each file" matters: a day's file can hold any number of
+    // sessions, and only the last one of them ends at its end.
+    let mut sessions: BTreeMap<u64, SessionTally> = BTreeMap::new();
 
     for file in files(directory)? {
         let bytes = fs::metadata(&file).map(|meta| meta.len()).unwrap_or(0);
-        let text = read(&file)?;
+        let contents = read(&file)?;
         let mut records_in_file = 0u64;
-        for (index, raw) in text.lines().enumerate() {
+        for (index, raw) in split_lines(&contents).into_iter().enumerate() {
             let record =
-                serde_json::from_str::<Record>(raw).map_err(|source| crate::Error::Line {
+                serde_json::from_slice::<Record>(raw).map_err(|source| crate::Error::Line {
                     path: file.clone(),
                     line: index + 1,
                     reason: source.to_string(),
@@ -372,19 +415,14 @@ pub fn summary(directory: &Path, top: usize) -> Result<Summary, crate::Error> {
             if let Some(target) = record.target {
                 *targets.entry(target).or_default() += 1;
             }
-            *sessions.entry(record.session).or_default() += 1;
+            let session = sessions.entry(record.session).or_default();
+            session.records += 1;
+            session.sealed = record.op == "session.close";
             summary.dropped += record.dropped;
             if summary.first_ts.is_none() {
                 summary.first_ts = Some(record.ts.clone());
             }
             summary.last_ts = Some(record.ts.clone());
-        }
-        if let Some(last) = text.lines().last() {
-            if let Ok(record) = serde_json::from_str::<Record>(last) {
-                if record.op == "session.close" {
-                    summary.sealed_sessions += 1;
-                }
-            }
         }
         summary.bytes += bytes;
         summary.files.push(FileSummary {
@@ -394,10 +432,17 @@ pub fn summary(directory: &Path, top: usize) -> Result<Summary, crate::Error> {
         });
     }
     summary.sessions = sessions.len();
+    summary.sealed_sessions = sessions.values().filter(|tally| tally.sealed).count();
     summary.per_op = ranked(ops, top);
     summary.per_actor = ranked(actors, top);
     summary.per_target = ranked(targets, top);
     Ok(summary)
+}
+
+#[derive(Debug, Default)]
+struct SessionTally {
+    records: u64,
+    sealed: bool,
 }
 
 fn ranked(counts: BTreeMap<String, u64>, top: usize) -> Vec<(String, u64)> {
@@ -473,10 +518,9 @@ mod tests {
         }
 
         fn lines(&self) -> Vec<String> {
-            read(&self.only_file())
-                .expect("readable")
-                .lines()
-                .map(str::to_owned)
+            split_lines(&read(&self.only_file()).expect("readable"))
+                .into_iter()
+                .map(|line| String::from_utf8_lossy(line).into_owned())
                 .collect()
         }
 
@@ -675,6 +719,73 @@ mod tests {
         let text = summary.lines().join("\n");
         assert!(text.contains("dir.fetch"), "text was {text}");
         assert!(text.contains("D:/DATAS/TREE"), "text was {text}");
+    }
+
+    /// Deleting the log is the most obvious way to make it say nothing, so "no records" must not read
+    /// as "verified".
+    #[test]
+    fn an_empty_log_is_not_a_clean_bill_of_health() {
+        let scratch = Scratch::new();
+        std::fs::create_dir_all(scratch.directory()).expect("the directory exists");
+        let report = verify(&scratch.directory()).expect("reads");
+        assert_eq!(report.records, 0);
+        assert!(!report.intact(), "an empty log must not pass");
+        assert_eq!(
+            report.findings[0].problem,
+            Problem::NoRecords { files: 0 },
+            "{:?}",
+            report.findings
+        );
+
+        // A file we did not name is not part of the log either: same answer, not a pass.
+        std::fs::write(scratch.directory().join("notes.txt"), b"whatever").expect("writable");
+        let report = verify(&scratch.directory()).expect("reads");
+        assert_eq!(report.files, 0, "only audit-*.jsonl counts as a log file");
+        assert!(!report.intact());
+    }
+
+    /// One byte nobody can decode must not switch the auditor off. Before the reader worked in bytes
+    /// this made both `verify` and `tail` return an I/O error, which is a remote-quality way to
+    /// silence the check: append `0xFF` and stop being able to ask.
+    #[test]
+    fn a_byte_that_is_not_utf8_is_reported_rather_than_refused() {
+        let scratch = Scratch::new();
+        drop(scratch.log());
+        let path = scratch.only_file();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("appendable");
+        std::io::Write::write_all(&mut file, &[0xff, 0xfe, b'\n']).expect("writable");
+        drop(file);
+
+        let report = verify(&scratch.directory()).expect("verify still runs");
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| matches!(finding.problem, Problem::Unparsable { .. })),
+            "{:?}",
+            report.findings
+        );
+        let lines = tail(&scratch.directory(), 99).expect("tail still reads the file");
+        assert_eq!(lines.len(), 6, "five records and the byte that is not one");
+        assert!(lines[5].contains(char::REPLACEMENT_CHARACTER));
+    }
+
+    #[test]
+    fn the_summary_counts_seals_by_session_not_by_file() {
+        let scratch = Scratch::new();
+        drop(scratch.log());
+        scratch.millis.store(DAY + 60_000, Ordering::SeqCst);
+        drop(scratch.log());
+        let summary = summary(&scratch.directory(), 5).expect("reads");
+        assert_eq!(summary.files.len(), 1, "one day's file, two sessions");
+        assert_eq!(summary.sessions, 2);
+        assert_eq!(
+            summary.sealed_sessions, 2,
+            "counting the tail of each file would say one"
+        );
     }
 
     #[test]
