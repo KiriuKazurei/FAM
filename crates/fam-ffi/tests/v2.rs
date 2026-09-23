@@ -25,7 +25,6 @@ use famcore::wire::{
 
 const ABI: u32 = 2;
 const READY: u8 = famcore::wire::state::READY;
-const STALE: u8 = famcore::wire::state::STALE;
 const LOADING: u8 = famcore::wire::state::LOADING;
 
 fn toml_path(path: &Path) -> String {
@@ -542,7 +541,7 @@ fn two_cuts_in_one_window_come_back_in_the_order_they_must_be_applied() {
 }
 
 #[test]
-fn a_file_created_behind_the_view_is_a_resync_not_an_invented_row() {
+fn a_file_created_while_a_view_is_open_reaches_that_view_without_a_reopen() {
     let tree = tree(3);
     let core = Core::with(&tree);
     let token = core.open(&tree.root);
@@ -550,35 +549,35 @@ fn a_file_created_behind_the_view_is_a_resync_not_an_invented_row() {
 
     fs::write(tree.root.join("brand-new.txt"), "x").expect("create a file");
     // A create cannot be placed from an event - the event carries no size, no time and no answer to
-    // "directory?" - so the rows are marked suspect rather than patched.
+    // "directory?" - so the rows are marked suspect rather than patched. What they must *not* be is
+    // suspect forever: the sweep stays quiet about a change an event already explained, so if the
+    // watch does not ask for the re-read, the new file only appears when somebody opens the folder
+    // again - and the folder is being watched precisely because somebody is looking at it.
     let deadline = Instant::now() + Duration::from_secs(10);
-    while core.state(token).state != STALE && Instant::now() < deadline {
+    let mut resynced = false;
+    while Instant::now() < deadline {
+        if core.state(token).flags & FLAG_RESYNC != 0 {
+            resynced = true;
+            break;
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(
-        core.state(token).state,
-        STALE,
-        "a row the event cannot describe leaves the table stale"
-    );
-
-    // Opening again is what asks for the re-read; the loader does it, and the first view is then
-    // told to rebuild because its rows were replaced rather than patched.
-    let second = core.open(&tree.root);
-    core.wait_ready(second);
-
-    let (header, cuts) = core.poll(token, 4096);
     assert!(
-        header.flags & FLAG_RESYNC != 0,
-        "expected the resync flag: {header:?}"
+        resynced,
+        "the watch alone must bring the new file into the open view"
     );
-    assert!(cuts.is_empty(), "a resync reports no positions");
+
+    // A resync reports no positions: the rows were replaced, so there is nothing for a position to
+    // point at, and a model that cut rows here would cut the wrong ones.
+    let (header, cuts) = core.poll(token, 4096);
+    assert!(header.flags & FLAG_RESYNC != 0, "{header:?}");
+    assert!(cuts.is_empty(), "a resync reports no positions: {cuts:?}");
     let (_, rows) = core.fetch(token, 0, 10, 4096);
     assert!(
         rows.iter().any(|row| row.name == "brand-new.txt"),
         "and the view follows the new table: {:?}",
         rows.iter().map(|row| &row.name).collect::<Vec<_>>()
     );
-    core.close(second);
 }
 
 #[test]

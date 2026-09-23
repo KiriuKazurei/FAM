@@ -192,6 +192,27 @@ struct StatsOut {
     dropped_events: u64,
 }
 
+/// The read `key` owes right now: `None` when the cached rows are current, when a read is already
+/// running, or when a failure is still cooling down. `claim` is the arbiter of the last two, so this
+/// is the whole of the "should somebody re-read this directory" question everywhere it is asked.
+fn owed_read(index: &DirIndex, key: &PathKey) -> Option<fam_svc_index::Claim> {
+    if matches!(index.state(key), fam_svc_index::State::Ready) {
+        return None;
+    }
+    index.claim(key)
+}
+
+/// Hands that read to the loader thread over the queue the caller already holds. The sink cannot go
+/// through [`Loader::post`] - it is built before the loader, which needs the pipeline it posts into -
+/// so the queue is passed rather than the loader.
+fn ask_for_read(index: &DirIndex, queue: &Arc<Mutex<std::sync::mpsc::Sender<Job>>>, key: &PathKey) {
+    if let Some(claim) = owed_read(index, key) {
+        if let Ok(sender) = queue.lock() {
+            let _ = sender.send(Job::Load(claim));
+        }
+    }
+}
+
 impl FamCore {
     fn create(config_path: Option<&Path>) -> Result<Self, String> {
         let config = match config_path {
@@ -222,13 +243,16 @@ impl FamCore {
                     // A lost watch or a moved write time: the only safe instruction is to re-read,
                     // and `claim` is what decides whether anyone is already doing it.
                     sink_index.invalidate(&delta.dir);
-                    if let Some(claim) = sink_index.claim(&delta.dir) {
-                        if let Ok(queue) = sink_queue.lock() {
-                            let _ = queue.send(Job::Load(claim));
-                        }
-                    }
+                    ask_for_read(&sink_index, &sink_queue, &delta.dir);
                 }
                 sink_views.absorb(&sink_index, delta);
+                // A create or a modification is a row the patch cannot place - the event says that
+                // something happened, not what it looks like - so absorbing it leaves the table
+                // stale. Nothing else will ever re-read it: the sweep stays quiet about exactly the
+                // changes an event already explained, and this is the one place that still knows
+                // about the directory. Without this the new file appears when the folder is
+                // reopened and never while it is being watched.
+                ask_for_read(&sink_index, &sink_queue, &delta.dir);
             }
             // v1 still wants the raw changes, and gets them off the same batch.
             if let Ok(mut queue) = sink_pending.lock() {
@@ -613,10 +637,7 @@ impl FamCore {
     /// `claim` is the arbiter of everything else: a read already running, or a failure still cooling
     /// down, gets `None` and this posts nothing.
     fn request_load(&self, key: &PathKey) {
-        if matches!(self.index.state(key), fam_svc_index::State::Ready) {
-            return;
-        }
-        if let Some(claim) = self.index.claim(key) {
+        if let Some(claim) = owed_read(&self.index, key) {
             self.loader.post(Job::Load(claim));
         }
     }
