@@ -51,6 +51,11 @@ void DriveWorker::run() {
         if ((mask & (1u << bit)) == 0) {
             continue;
         }
+        /* Checked per drive, not per batch of syscalls: the shutdown path waits for this thread, and
+         * one hung volume should not cost more than one call's worth of waiting. */
+        if (isInterruptionRequested()) {
+            return;
+        }
         const QChar letter = QChar(u'A' + bit);
         const QString win = winRoot(letter);
         DriveInfo info;
@@ -104,8 +109,12 @@ DriveList::DriveList(QWidget *parent) : QWidget(parent) {
 }
 
 DriveList::~DriveList() {
-    /* Bounded by design: the worker never asks a network drive for its capacity, which is the one
-     * question here that could take seconds. Destroying a running QThread is not an option. */
+    /* A QThread must not be destroyed while running, so this waits - and the wait is only as bounded
+     * as one Win32 call. Skipping the capacity question for network drives removes the known hang,
+     * but `GetDriveTypeW` itself goes through the redirector for a dead mapped share, and this
+     * machine has no network drive to measure that on. So: not "bounded by design", just bounded by
+     * one call, untested for the case that would actually block. */
+    m_worker.requestInterruption();
     m_worker.wait();
 }
 

@@ -33,13 +33,18 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
         m_status = new QLabel(QStringLiteral("core unavailable: %1").arg(error), this);
         auto *layout = new QVBoxLayout(this);
         layout->addWidget(m_status);
-        setLayout(layout);
         return;
     }
 
     /* The kind names come from the core, in the order its records' `kind` byte means them, and with
-     * them the backends it has and which can answer now. */
-    m_bridge->coreBackends(&m_kinds, &m_backends, &m_available, &error);
+     * them the backends it has and which can answer now. The last two are logged rather than kept:
+     * availability is probed in the background and changes while the window is open, so the only
+     * honest reading of it is a fresh one - which is what `searchBackendNote` does per search. */
+    QStringList backends, available;
+    m_bridge->coreBackends(&m_kinds, &backends, &available, &error);
+    qInfo("search backends: %s; answering now: %s", qUtf8Printable(backends.join(QStringLiteral(", "))),
+          available.isEmpty() ? qUtf8Printable(QStringLiteral("none"))
+                              : qUtf8Printable(available.join(QStringLiteral(", "))));
 
     /* The icon layer outlives every column and is shared by all of them: one worker thread, one
      * extension table, one cache. */
@@ -109,7 +114,6 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     layout->addLayout(controls);
     layout->addLayout(body, 1);
     layout->addWidget(m_status);
-    setLayout(layout);
 
     connect(searchButton, &QPushButton::clicked, this, &MainWindow::runSearch);
     connect(m_search, &QLineEdit::returnPressed, this, &MainWindow::runSearch);
@@ -143,6 +147,9 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     m_timer->setInterval(250);
     connect(m_timer, &QTimer::timeout, this, &MainWindow::pollChanges);
     m_timer->start();
+    /* Everything the slots and the self-check steps touch exists from here on, and not before: the
+     * early return above leaves the window with a status label and no chain. */
+    m_healthy = true;
 
     if (!initialQuery.isEmpty()) {
         m_search->setText(initialQuery);
@@ -151,7 +158,8 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
 }
 
 MainWindow::~MainWindow() {
-    if (m_bridge == nullptr) {
+    if (!m_healthy) {
+        /* The chain was never built; there is nothing to close and `m_chain` is null. */
         return;
     }
     /* The chain closes the directories it holds, and that has to happen here rather than in its own
@@ -165,7 +173,7 @@ MainWindow::~MainWindow() {
 }
 
 bool MainWindow::openFolder(const QString &dir, QString *error) {
-    if (m_bridge == nullptr) {
+    if (!m_healthy) {
         *error = QStringLiteral("core unavailable");
         return false;
     }
@@ -205,7 +213,7 @@ void MainWindow::openFolderDialog() {
 }
 
 void MainWindow::showFolder() {
-    if (m_bridge == nullptr || m_searchToken == 0) {
+    if (!m_healthy || m_searchToken == 0) {
         return;
     }
     m_bridge->cancelSearch(m_searchToken);
@@ -235,7 +243,7 @@ void MainWindow::refreshScopeAvailability() {
 }
 
 void MainWindow::runSearch() {
-    if (m_bridge == nullptr) {
+    if (!m_healthy) {
         return;
     }
     QString error;
@@ -268,7 +276,6 @@ void MainWindow::runSearch() {
         setStatus(error);
         return;
     }
-    m_resultsHead = head;
     m_resultsModel->readHead(head);
     showResults();
     /* The line says which scope was actually asked for, because a search that quietly narrowed itself
@@ -282,7 +289,7 @@ void MainWindow::runSearch() {
 }
 
 void MainWindow::pollChanges() {
-    if (m_bridge == nullptr) {
+    if (!m_healthy) {
         return;
     }
     /* Both halves are served on every beat. The columns are polled even while results are on screen,
@@ -305,7 +312,6 @@ void MainWindow::pollSearch() {
         return;
     }
     m_resultsModel->readHead(polled);
-    m_resultsHead = polled;
     if (polled.state == FAM_LOADING) {
         setStatus(QStringLiteral("%1 row(s) for %2 · still searching")
                       .arg(m_resultsModel->totalRows())
@@ -372,7 +378,7 @@ QString MainWindow::folderStatus(const QString &directory, const FamWindow &head
 }
 
 QString MainWindow::searchBackendNote() {
-    if (m_bridge == nullptr) {
+    if (!m_healthy) {
         return QString();
     }
     QStringList kinds, backends, available;
@@ -380,8 +386,6 @@ QString MainWindow::searchBackendNote() {
     if (!m_bridge->coreBackends(&kinds, &backends, &available, &ignored)) {
         return QString();
     }
-    m_backends = backends;
-    m_available = available;
     if (available.contains(QStringLiteral("everything"))) {
         return QString();
     }
@@ -392,7 +396,7 @@ QString MainWindow::searchBackendNote() {
 }
 
 void MainWindow::tagSelectedFile() {
-    if (m_bridge == nullptr) {
+    if (!m_healthy) {
         return;
     }
     const bool showingResults = m_pages->currentWidget() == m_results;
@@ -458,6 +462,9 @@ void MainWindow::setStatus(const QString &text) {
 }
 
 void MainWindow::scrollForSelfCheck() {
+    if (!m_healthy) {
+        return;
+    }
     QListView *view = m_chain == nullptr ? nullptr : m_chain->deepestView();
     if (view == nullptr || view->verticalScrollBar() == nullptr) {
         return;
@@ -482,6 +489,10 @@ void MainWindow::scrollForSelfCheck() {
 }
 
 void MainWindow::createSelfCheckProbe() {
+    if (!m_healthy) {
+        qWarning("self-check mutation asked for without a working core");
+        return;
+    }
     const QString folder = m_chain->deepestPath();
     if (folder.isEmpty()) {
         qWarning("self-check mutation asked for without a watched folder");
@@ -519,23 +530,48 @@ void MainWindow::clearSelfCheckSearch() {
 }
 
 void MainWindow::descendForSelfCheck() {
-    const bool opened = m_chain->selectFirstFolder();
-    qInfo("self-check descended into a folder: %s, chain depth %d",
-          opened ? "yes" : "no", m_chain->depth());
+    if (!m_healthy) {
+        return;
+    }
+    /* Depth before and after, rather than a yes/no: past the cap the chain stops growing on
+     * purpose, and "did it grow" is the only question that distinguishes that from "the selection
+     * handler stopped working". */
+    const int before = m_chain->depth();
+    m_chain->selectFirstFolder();
+    qInfo("self-check descended: depth %d -> %d", before, m_chain->depth());
 }
 
 void MainWindow::sortDeepestForSelfCheck() {
+    if (!m_healthy) {
+        return;
+    }
     const QString applied = m_chain->sortDeepest();
     qInfo("self-check sorted the deepest column by %s", qUtf8Printable(applied));
 }
 
+void MainWindow::clickHeaderForSelfCheck() {
+    if (!m_healthy) {
+        return;
+    }
+    const bool clicked = m_chain->clickDeepestHeader();
+    qInfo("self-check clicked the deepest column's header: %s, chain depth %d",
+          clicked ? "yes" : "no", m_chain->depth());
+}
+
 void MainWindow::pickFirstDriveForSelfCheck() {
+    if (!m_healthy) {
+        return;
+    }
     const QString root = m_drives->selectFirst();
     qInfo("self-check picked drive %s, chain depth %d", qUtf8Printable(root), m_chain->depth());
 }
 
 void MainWindow::goUpForSelfCheck() {
+    if (!m_healthy) {
+        return;
+    }
     const QString remained = m_chain->goBack();
+    refreshScopeAvailability();
     qInfo("self-check went up to %s, chain depth %d",
           qUtf8Printable(QDir::toNativeSeparators(remained)), m_chain->depth());
 }

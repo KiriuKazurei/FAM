@@ -80,9 +80,10 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     button->setObjectName(QStringLiteral("sortHeader"));
     button->setFlat(true);
     button->setCursor(Qt::PointingHandCursor);
-    const int index = m_columns.size();
-    QObject::connect(button, &QPushButton::clicked, this, [this, index] {
-        onHeaderClicked(*m_columns.at(index));
+    QObject::connect(button, &QPushButton::clicked, this, [this, token] {
+        if (Column *column = find(token)) {
+            onHeaderClicked(*column);
+        }
     });
 
     auto *box = new QVBoxLayout(column->frame);
@@ -102,8 +103,8 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
                         });
 
     QObject::connect(column->view->selectionModel(), &QItemSelectionModel::currentChanged, this,
-                     [this, index](const QModelIndex &, const QModelIndex &) {
-                         onCurrentChanged(index);
+                     [this, token](const QModelIndex &, const QModelIndex &) {
+                         onCurrentChanged(token);
                      });
 
     m_layout->addWidget(column->frame);
@@ -277,6 +278,19 @@ QString ColumnChain::sortDeepest() {
     return column.sort + QLatin1Char(' ') + column.order;
 }
 
+bool ColumnChain::clickDeepestHeader() {
+    if (m_columns.isEmpty()) {
+        return false;
+    }
+    QPushButton *button =
+        m_columns.last()->frame->findChild<QPushButton *>(QStringLiteral("sortHeader"));
+    if (button == nullptr) {
+        return false;
+    }
+    button->click();
+    return true;
+}
+
 void ColumnChain::onHeaderClicked(Column &column) {
     /* The keys cycle in the order a reader expects from a file list, and the second click on the same
      * key flips the direction - so one control reaches every (key, order) pair the core accepts, in
@@ -313,11 +327,34 @@ void ColumnChain::applySortTo(Column &column) {
     poll();
 }
 
-void ColumnChain::onCurrentChanged(int index) {
-    if (m_filling || index < 0 || index >= m_columns.size()) {
+ColumnChain::Column *ColumnChain::find(quint64 token) {
+    for (Column *column : m_columns) {
+        if (column->token == token) {
+            return column;
+        }
+    }
+    return nullptr;
+}
+
+int ColumnChain::indexOf(const Column *wanted) const {
+    for (int position = 0; position < m_columns.size(); ++position) {
+        if (m_columns.at(position) == wanted) {
+            return position;
+        }
+    }
+    return -1;
+}
+
+void ColumnChain::onCurrentChanged(quint64 token) {
+    if (m_filling) {
         return;
     }
-    Column &column = *m_columns.at(index);
+    Column *found = find(token);
+    if (found == nullptr) {
+        /* The column was dropped while a queued selection change was still in flight. */
+        return;
+    }
+    Column &column = *found;
     const QModelIndex current = column.view->selectionModel()->currentIndex();
     if (!current.isValid()) {
         return;
@@ -332,7 +369,8 @@ void ColumnChain::onCurrentChanged(int index) {
     }
     /* A file was picked: anything deeper than this column is showing a folder nobody asked for. */
     m_filling = true;
-    while (m_columns.size() > index + 1) {
+    const int position = indexOf(&column);
+    while (position >= 0 && m_columns.size() > position + 1) {
         dropDeepest();
     }
     m_filling = false;

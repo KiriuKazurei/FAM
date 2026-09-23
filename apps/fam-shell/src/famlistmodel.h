@@ -72,9 +72,6 @@ public:
      * the rows the core now has, and only what actually differs is announced. */
     Reconciled reconcile(const FamWindow &window);
 
-    /* Rows around `row` are pulled in one fetch; the viewport is what a screenful needs. */
-    void setViewport(int rows) { m_viewport = qMax(rows, 16); }
-
     /* Where icons come from. Without one, DecorationRole answers empty and rows paint text-only. */
     void setIconCache(IconCache *cache);
 
@@ -114,6 +111,9 @@ private:
     /* A search's rows arrive in discovery order and are sorted once, when it finishes, so the count is
      * not enough to know the view is unchanged: same number of rows, different order. */
     quint8 m_state = FAM_EMPTY;
+    /* How many rows one fetch pulls. Fixed rather than asked of the view: the setter for this was
+     * removed because nothing ever called it, and a window that is a screenful plus slack is what
+     * the fetch budget was measured against. */
     int m_viewport = 128;
 };
 

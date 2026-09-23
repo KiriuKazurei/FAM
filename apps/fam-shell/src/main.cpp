@@ -11,6 +11,8 @@
 #include "iconcache.h"
 #include "mainwindow.h"
 
+#include <algorithm>
+
 int main(int argc, char *argv[]) {
     /* Everything below is measured from process entry, so a slow start can be told apart from a
      * slow view. */
@@ -55,11 +57,17 @@ int main(int argc, char *argv[]) {
         QStringLiteral("self-check-mutate"),
         QStringLiteral("With --watch and --self-check: create one file in the watched folder and "
                        "remove it again, so a re-read happens while a view is open."));
+    const QCommandLineOption deepOption(
+        QStringLiteral("self-check-deep"),
+        QStringLiteral("With --watch and --self-check: descend <count> folders, then click a column "
+                       "header. Past the chain's depth cap this is what drops the oldest column."),
+        QStringLiteral("count"));
     parser.addOption(configOption);
     parser.addOption(queryOption);
     parser.addOption(watchOption);
     parser.addOption(grabOption);
     parser.addOption(mutateOption);
+    parser.addOption(deepOption);
     parser.process(app);
 
     /* A windowed executable has no console, so the headless gate would otherwise prove nothing but
@@ -114,7 +122,19 @@ int main(int argc, char *argv[]) {
              * and the frame after it shows what the reader would see. */
             QTimer::singleShot(6100, [&window]() { window.pickFirstDriveForSelfCheck(); });
         }
-        const int grabAt = mutate ? 7200 : 2500;
+        /* The depth cap is only crossed by going deep, and crossing it is what drops a column from
+         * the front of the chain - the one structural change that makes every captured position
+         * wrong. So the gate walks down N folders and then clicks a header, which is the call that
+         * dereferences a column by what it captured. */
+        const int deep = parser.value(deepOption).toInt();
+        for (int step = 0; step < deep; ++step) {
+            QTimer::singleShot(2000 + step * 300, [&window]() { window.descendForSelfCheck(); });
+        }
+        if (deep > 0) {
+            QTimer::singleShot(2000 + deep * 300,
+                               [&window]() { window.clickHeaderForSelfCheck(); });
+        }
+        const int grabAt = std::max({2500, mutate ? 7200 : 0, deep > 0 ? 2800 + deep * 300 : 0});
         QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so
@@ -138,7 +158,7 @@ int main(int argc, char *argv[]) {
             app.quit();
         });
         // Never let a broken render hang a headless run.
-        QTimer::singleShot(mutate ? 13000 : 8000, [&app]() { app.quit(); });
+        QTimer::singleShot(grabAt + 2000, [&app]() { app.quit(); });
     }
 
     if (parser.isSet(watchOption)) {

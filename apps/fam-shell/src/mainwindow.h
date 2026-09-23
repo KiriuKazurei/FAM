@@ -65,6 +65,9 @@ public:
     /* Clicks the deepest column's sort control once. */
     void sortDeepestForSelfCheck();
 
+    /* Clicks the deepest column's header button through its signal, not by calling the sort. */
+    void clickHeaderForSelfCheck();
+
     /* Picks the first reachable drive in the sidebar. */
     void pickFirstDriveForSelfCheck();
 
@@ -102,6 +105,10 @@ private:
     QString deepestFolder() const { return m_chain->deepestPath(); }
 
     std::unique_ptr<FamBridge> m_bridge;
+    /* False only when the core handle could not be created, which is the one case where the UI was
+     * never built. `m_bridge` itself is never null after the constructor's first line, so testing it
+     * is testing the wrong thing - and the destructor found out by dereferencing a null `m_chain`. */
+    bool m_healthy = false;
     /* The volumes this machine has. Choosing one starts a chain from its root. */
     DriveList *m_drives = nullptr;
     /* The Miller columns. Owns one v2 token and one model per directory it shows. */
@@ -121,11 +128,8 @@ private:
     QLabel *m_status = nullptr;
     QTimer *m_timer = nullptr;
     QStringList m_kinds;
-    QStringList m_backends;
-    QStringList m_available;
     quint64 m_searchToken = 0;
     bool m_searchRunning = false;
-    FamWindow m_resultsHead;
     /* Set while the opt-in self-check mutation is in the watched folder, so it can be undone. */
     QString m_probe;
     /* Everything the shell does after this point is measured against it, so the headless log can say

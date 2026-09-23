@@ -80,6 +80,11 @@ public:
      * nobody pressed is the same unfinished wire it was before this increment. */
     QString sortDeepest();
 
+    /* Clicks the deepest column's header button for real, so the connected lambda runs the way a
+     * person's click does. Calling the sort directly would skip the one path that resolves a column
+     * by the token the button captured. */
+    bool clickDeepestHeader();
+
 private:
     struct Column {
         quint64 token = 0;
@@ -94,10 +99,16 @@ private:
         FamWindow head;
     };
 
-    void onCurrentChanged(int index);
+    void onCurrentChanged(quint64 token);
     void onHeaderClicked(Column &column);
     void applySortTo(Column &column);
     Column *addColumn(const QString &path, quint64 token);
+    /* Columns are found by token, never by position. A captured position goes stale the moment a
+     * column is dropped from the front - and the depth cap does exactly that, which is how the
+     * first version of this file managed to index one past the end of the vector. Tokens are
+     * monotonic and never reused, so a token that is not in the chain means the column is gone. */
+    Column *find(quint64 token);
+    int indexOf(const Column *column) const;
     void dropColumn(Column *column);
     void dropDeepest();
 

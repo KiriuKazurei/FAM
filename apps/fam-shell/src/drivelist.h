@@ -25,7 +25,11 @@ Q_DECLARE_METATYPE(QVector<DriveInfo>)
  * This is not a formality. `GetDiskFreeSpaceExW` on a mapped network drive whose server is gone can
  * block for seconds, and the shell's whole promise is that nothing on the paint path waits for the
  * filesystem - the same promise that keeps directory reads on the core's loader thread. So the list
- * arrives when it arrives, and the sidebar says "drives" until then. */
+ * arrives when it arrives, and the sidebar says nothing until then.
+ *
+ * The exposure is not fully closed: `GetDriveTypeW` is asked before the capacity is, and it too can
+ * reach the redirector. The worker checks for interruption between drives so a shutdown costs at
+ * most one hung call rather than the whole enumeration. */
 class DriveWorker final : public QThread {
     Q_OBJECT
 
