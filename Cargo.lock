@@ -310,7 +310,6 @@ dependencies = [
  "fam-svc-index",
  "fam-svc-store",
  "fam-svc-walk",
- "fam-view",
  "log",
  "serde",
  "serde_json",
@@ -383,17 +382,6 @@ dependencies = [
  "fam-svc-enumerate",
  "log",
  "serde",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "fam-view"
-version = "0.1.0"
-dependencies = [
- "fam-core",
- "fam-sched",
- "log",
  "tempfile",
  "thiserror",
 ]

@@ -139,6 +139,24 @@ impl Core {
         assert_eq!(code, 0, "set_sort failed: {}", error.text());
     }
 
+    /// The fallible twin of `set_sort`, so a refused key can be asserted on rather than swallowed by
+    /// an `assert_eq!` inside the helper.
+    fn try_set_sort(&self, token: u64, sort: &str, order: &str) -> (i32, String) {
+        let sort = CString::new(sort).unwrap();
+        let order = CString::new(order).unwrap();
+        let mut error = Error::new();
+        let code = unsafe {
+            fam_dir_set_sort(
+                self.handle,
+                token,
+                sort.as_ptr(),
+                order.as_ptr(),
+                &mut error.value,
+            )
+        };
+        (code, error.text())
+    }
+
     fn set_filter(&self, token: u64, terms: &str, kind: Option<&str>) -> i32 {
         let terms = CString::new(terms).unwrap();
         let kind = kind.map(CString::new).transpose().unwrap();
@@ -1012,4 +1030,23 @@ fn an_empty_query_and_a_closed_token_are_refused() {
         -1,
         "a null error pointer is not a reason to answer 0"
     );
+}
+
+#[test]
+fn a_bad_sort_key_and_a_bad_kind_say_which_one_they_refused() {
+    // Migrated from the v1 surface when `fam_view_new` / `fam_view_search` were deleted. What was
+    // worth keeping is not the refusal - both entry points already refuse - but the *message*: a
+    // caller who passed a nonsense sort key and a real kind needs "unknown sort key", not "failed".
+    let tree = tree(2);
+    let core = Core::with(&tree);
+    let token = core.open(&tree.root);
+    core.wait_ready(token);
+
+    let (code, message) = core.try_set_sort(token, "nonsense", "ascending");
+    assert_ne!(code, 0, "a key the core has no ordering for is refused");
+    assert!(message.contains("unknown sort key"), "{message}");
+
+    let (search, message) = core.try_search("f", None, Some("spreadsheet"), 0);
+    assert_eq!(search, 0, "a kind bucket that does not exist is refused");
+    assert!(message.contains("unknown kind"), "{message}");
 }

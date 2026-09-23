@@ -1,12 +1,10 @@
 use std::ffi::{c_char, CString};
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use famcore::{
-    fam_abi_version, fam_core_free, fam_core_new, fam_find, fam_free_string, fam_stats,
-    fam_tag_add, fam_tag_list, fam_tag_remove, fam_view_drain, fam_view_free, fam_view_new,
-    fam_view_search, fam_watch_start, fam_watch_stop, FamCore,
+    fam_abi_version, fam_core_free, fam_core_new, fam_dir_close, fam_find, fam_free_string,
+    fam_stats, fam_tag_add, fam_tag_list, fam_tag_remove, FamCore,
 };
 use serde_json::Value;
 
@@ -139,9 +137,9 @@ fn harness() -> Harness {
     }
 }
 
-/// The one line in this file that increment 5 had to change: a test that the ABI is still v1 cannot
-/// survive the increment that makes it v2. Everything below it is v1 as it was, served as a shim
-/// over the v2 core.
+/// The half of the ABI that stayed JSON after the v2 rows went in: tags, `find`, `stats`, and the
+/// guards every entry point shares. The v1 view trio that used to live here is gone - increment 9
+/// deleted it, and `v2.rs` is where the row-shaped claims now live.
 #[test]
 fn abi_version_is_advertised() {
     assert_eq!(fam_abi_version(), 2);
@@ -154,7 +152,9 @@ fn a_null_handle_is_reported_not_dereferenced() {
 
     assert_eq!(code, -1);
     assert_eq!(out.message(), "core handle is null");
-    unsafe { fam_view_free(std::ptr::null_mut(), 7) };
+    /* A void entry point has no error channel to fail through, so the only claim worth making is
+     * that it returns at all. `fam_dir_close` is v2's; the v1 one this test used is gone. */
+    unsafe { fam_dir_close(std::ptr::null_mut(), 7) };
     unsafe { fam_free_string(std::ptr::null_mut()) };
 }
 
@@ -345,158 +345,6 @@ fn stats_describe_the_open_database_and_roots() {
 }
 
 #[test]
-fn a_view_search_resets_and_live_events_stream_as_deltas() {
-    let h = harness();
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let token = unsafe {
-        fam_view_new(
-            h.core.handle(),
-            text("name").as_ptr(),
-            text("ascending").as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(token > 0, "{}", unsafe { take(err) });
-
-    let mut out = Out::new();
-    let code = unsafe {
-        fam_view_search(
-            h.core.handle(),
-            token,
-            text("report").as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            &mut out.value,
-            &mut out.error,
-        )
-    };
-    assert_eq!(code, 0, "{}", out.message());
-    let rows = out.ok();
-    assert_eq!(rows["backend"], "walk");
-    assert_eq!(
-        rows["rows"].as_array().unwrap().len(),
-        2,
-        "directory and file both match"
-    );
-
-    let watcher = unsafe {
-        fam_watch_start(
-            h.core.handle(),
-            text(h.tree.to_str().unwrap()).as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(watcher > 0, "{}", unsafe { take(err) });
-
-    fs::write(h.tree.join("late-report.txt"), "x").unwrap();
-
-    let mut inserted = false;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline && !inserted {
-        let mut drained = Out::new();
-        unsafe {
-            fam_view_drain(
-                h.core.handle(),
-                token,
-                &mut drained.value,
-                &mut drained.error,
-            )
-        };
-        let update = drained.ok();
-        inserted =
-            update["deltas"].as_array().unwrap().iter().any(|delta| {
-                delta["type"] == "insert" && delta["row"]["name"] == "late-report.txt"
-            });
-        if !inserted {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    unsafe { fam_watch_stop(h.core.handle(), watcher) };
-    assert!(inserted, "the new file never arrived as an insert delta");
-
-    let mut after = Out::new();
-    unsafe { fam_view_drain(h.core.handle(), token, &mut after.value, &mut after.error) };
-    assert!(after.ok()["rows"].as_i64().unwrap() >= 3);
-
-    let mut unknown = Out::new();
-    let code = unsafe {
-        fam_view_search(
-            h.core.handle(),
-            9999,
-            text("report").as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            &mut unknown.value,
-            &mut unknown.error,
-        )
-    };
-    assert_eq!(code, -1);
-    assert!(
-        unknown.message().contains("unknown view token"),
-        "{}",
-        unknown.message()
-    );
-
-    unsafe { fam_view_free(h.core.handle(), token) };
-}
-
-#[test]
-fn bad_arguments_and_sorts_fail_cleanly() {
-    let h = harness();
-    let mut err: *mut c_char = std::ptr::null_mut();
-
-    let token = unsafe {
-        fam_view_new(
-            h.core.handle(),
-            text("nonsense").as_ptr(),
-            std::ptr::null(),
-            &mut err,
-        )
-    };
-    assert_eq!(token, 0);
-    assert!(unsafe { take(err) }.contains("unknown sort key"));
-
-    let mut out = Out::new();
-    let code = unsafe {
-        fam_view_search(
-            h.core.handle(),
-            1,
-            text("   ").as_ptr(),
-            std::ptr::null(),
-            text("spreadsheet").as_ptr(),
-            0,
-            &mut out.value,
-            &mut out.error,
-        )
-    };
-    assert_eq!(code, -1);
-    assert!(out.message().contains("unknown kind"), "{}", out.message());
-
-    let mut empty = Out::new();
-    let code = unsafe {
-        fam_view_search(
-            h.core.handle(),
-            1,
-            text("   ").as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            &mut empty.value,
-            &mut empty.error,
-        )
-    };
-    assert_eq!(code, -1);
-    assert!(
-        empty.message().contains("no search terms"),
-        "{}",
-        empty.message()
-    );
-}
-
-#[test]
 fn non_utf8_arguments_are_refused() {
     let h = harness();
     let raw = CString::new(vec![0xff_u8, 0xfe_u8]).unwrap();
@@ -517,58 +365,4 @@ fn non_utf8_arguments_are_refused() {
         "{}",
         out.message()
     );
-}
-
-#[test]
-fn search_rows_carry_their_tags_in_display_order() {
-    let h = harness();
-    let notes = text(h.tree.join("notes.txt").to_str().unwrap());
-    let mut tagged = Out::new();
-    unsafe {
-        fam_tag_add(
-            h.core.handle(),
-            notes.as_ptr(),
-            text(r#"["zed","alpha"]"#).as_ptr(),
-            std::ptr::null(),
-            0,
-            &mut tagged.value,
-            &mut tagged.error,
-        )
-    };
-    assert_eq!(tagged.ok()["added"], 2);
-
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let view = unsafe {
-        fam_view_new(
-            h.core.handle(),
-            text("name").as_ptr(),
-            text("ascending").as_ptr(),
-            &mut err,
-        )
-    };
-    assert!(view > 0);
-
-    let mut result = Out::new();
-    let code = unsafe {
-        fam_view_search(
-            h.core.handle(),
-            view,
-            text("notes").as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            &mut result.value,
-            &mut result.error,
-        )
-    };
-    assert_eq!(code, 0, "{}", result.message());
-
-    let rows = result.ok();
-    let hit = rows["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["name"] == "notes.txt")
-        .expect("notes.txt should be in the search result");
-    assert_eq!(hit["tags"], serde_json::json!(["alpha", "zed"]));
 }

@@ -25,12 +25,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use fam_core::{path_buf_from_units, Config, PathKey, SearchHit, SearchRequest as NameRequest};
-use fam_sched::{spawn, Batcher, FileChange, Handle, SchedulerConfig, Signal};
+use fam_core::{Config, Order, PathKey, SearchRequest as NameRequest, SortKey};
+use fam_sched::{spawn, SchedulerConfig};
 use fam_svc_index::DirIndex;
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
-use fam_svc_walk::{Cancellation, Kind};
-use fam_view::{row_for_path, Delta, Filter, Order, Row, SortKey, ViewModel};
+use fam_svc_walk::Kind;
 use serde::Serialize;
 
 mod browse;
@@ -61,35 +60,20 @@ const DEFAULT_SEARCH_LIMIT: u32 = 500;
 /// Ceiling on an explicit `limit`, so a caller cannot ask for the unbounded case by name.
 const MAX_SEARCH_LIMIT: u32 = 20_000;
 
-/// The row count [`fam_view_search`] asks for when the caller names none.
-///
-/// v1's own number, kept rather than folded into [`DEFAULT_SEARCH_LIMIT`]: a frozen ABI's observable
-/// answer is not changed on the way to deleting the entry point that gives it. The ceiling above
-/// *is* shared, because there the two versions agree on what must not happen.
-const LEGACY_SEARCH_LIMIT: usize = 200;
-
 pub struct FamCore {
     config: Config,
     store: Mutex<TagStore>,
-    views: Mutex<HashMap<u64, ViewModel>>,
-    pending: Arc<Mutex<Vec<FileChange>>>,
-    watchers: Mutex<HashMap<u64, Handle>>,
-    /// Events discarded since the pipeline started. v2 reads it against a per-view baseline; v1's
-    /// drain reports what has accumulated since the last drain, which is [`Self::loss_seen`].
+    /// Events discarded since the pipeline started, read by a v2 view against the baseline it was
+    /// opened with. Nothing ever resets it: the only thing that makes a loss stop matter is a
+    /// completed re-read, and that moves the view's baseline rather than this count.
     losses: Arc<AtomicU64>,
-    /// How much of [`Self::losses`] a v1 `fam_view_drain` has already reported.
-    ///
-    /// A second counter rather than a `swap(0)` on the first, because zeroing the shared count would
-    /// put it below every v2 view's baseline and silence `FLAG_LOSS` for the rest of the process.
-    loss_seen: AtomicU64,
-    next_token: AtomicU64,
     /// v2: the cache every directory view is served from.
     index: DirIndex,
     v2: Views,
     /// v2's one pipeline, shared with the loader thread that registers and withdraws its watches.
     loader: Loader,
     /// Which backends can answer a name search, and what they say about themselves. Held here as
-    /// well as in [`Searches`] because v1's `fam_view_search` asks the same question synchronously.
+    /// well as in [`Searches`] because `fam_backends_json` answers without waiting for a search.
     router: Arc<SearchRouter>,
     /// v2's paged name search: the router, and the one thread allowed to run a search on it.
     searches: Searches,
@@ -97,74 +81,6 @@ pub struct FamCore {
     /// by identity already; this counts the views, which is what decides whether a watch is still
     /// wanted.
     watched: Mutex<HashMap<PathKey, u32>>,
-}
-
-#[derive(Serialize)]
-struct RowOut {
-    key: String,
-    path: String,
-    name: String,
-    kind: String,
-    size: u64,
-    modified_ms: i64,
-    tags: Vec<String>,
-}
-
-impl From<&Row> for RowOut {
-    fn from(row: &Row) -> Self {
-        Self {
-            key: row.key.clone(),
-            path: row.path.display().to_string(),
-            name: row.file_name(),
-            kind: row.kind.as_str().to_string(),
-            size: row.size,
-            modified_ms: row.modified_ms,
-            tags: row.tags.clone(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum DeltaOut {
-    Insert { index: usize, row: RowOut },
-    Remove { index: usize, key: String },
-    Change { index: usize, row: RowOut },
-    Reset,
-}
-
-impl From<&Delta> for DeltaOut {
-    fn from(delta: &Delta) -> Self {
-        match delta {
-            Delta::Inserted { index, row } => DeltaOut::Insert {
-                index: *index,
-                row: row.into(),
-            },
-            Delta::Removed { index, key } => DeltaOut::Remove {
-                index: *index,
-                key: key.clone(),
-            },
-            Delta::Changed { index, row } => DeltaOut::Change {
-                index: *index,
-                row: row.into(),
-            },
-            Delta::Reset => DeltaOut::Reset,
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct UpdateOut {
-    deltas: Vec<DeltaOut>,
-    dropped: u64,
-    rows: usize,
-}
-
-#[derive(Serialize)]
-struct RowsOut {
-    backend: String,
-    incomplete: bool,
-    rows: Vec<RowOut>,
 }
 
 #[derive(Serialize)]
@@ -222,19 +138,17 @@ impl FamCore {
         config.validate().map_err(|error| error.to_string())?;
         let store = TagStore::open(&config.database_path).map_err(|error| error.to_string())?;
         let losses = Arc::new(AtomicU64::new(0));
-        let pending = Arc::new(Mutex::new(Vec::new()));
         let index = DirIndex::with_budget_bytes(config.cache_budget_bytes());
         let v2 = Views::new();
         let (sender, receiver) = Loader::channel();
         let queue = Arc::new(Mutex::new(sender));
 
-        // One pipeline serves both halves of the ABI, so one set of watches backs them and a shell
-        // that mixes v1 and v2 calls is not paying for each directory twice.
+        // One pipeline serves the whole ABI, so a directory someone both browses and searches is
+        // watched once rather than once per entry point.
         let sink_index = DirIndex::clone(&index);
         let sink_views = Views::clone(&v2);
         let sink_queue = Arc::clone(&queue);
         let sink_losses = Arc::clone(&losses);
-        let sink_pending = Arc::clone(&pending);
         let sink = move |batch: fam_sched::Batch| {
             sink_losses.fetch_add(batch.dropped, Ordering::Relaxed);
             let groups = batch.by_directory();
@@ -253,10 +167,6 @@ impl FamCore {
                 // about the directory. Without this the new file appears when the folder is
                 // reopened and never while it is being watched.
                 ask_for_read(&sink_index, &sink_queue, &delta.dir);
-            }
-            // v1 still wants the raw changes, and gets them off the same batch.
-            if let Ok(mut queue) = sink_pending.lock() {
-                queue.extend(batch.changes);
             }
         };
         let router = Arc::new(SearchRouter::from_config(&config));
@@ -277,12 +187,7 @@ impl FamCore {
         Ok(Self {
             config,
             store: Mutex::new(store),
-            views: Mutex::new(HashMap::new()),
-            pending,
-            watchers: Mutex::new(HashMap::new()),
             losses,
-            loss_seen: AtomicU64::new(0),
-            next_token: AtomicU64::new(1),
             index,
             v2,
             router,
@@ -296,24 +201,6 @@ impl FamCore {
     /// the guard keeps one bad call from wedging the front-end.
     fn store(&self) -> std::sync::MutexGuard<'_, TagStore> {
         self.store
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn views(&self) -> std::sync::MutexGuard<'_, HashMap<u64, ViewModel>> {
-        self.views
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn watchers(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Handle>> {
-        self.watchers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn pending(&self) -> std::sync::MutexGuard<'_, Vec<FileChange>> {
-        self.pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -442,182 +329,6 @@ impl FamCore {
             })
             .collect();
         serde_json::to_string(&files).map_err(|error| error.to_string())
-    }
-
-    fn view_new(&self, sort: &str, order: &str) -> Result<u64, String> {
-        let sort_key = parse_sort(sort)?;
-        let order = parse_order(order)?;
-        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        self.views()
-            .insert(token, ViewModel::with_sort(sort_key, order));
-        Ok(token)
-    }
-
-    /// v1's synchronous search: one call, the whole answer as JSON.
-    ///
-    /// It now runs on the same [`SearchRouter`] the paged v2 entries use, which is the point of this
-    /// method existing at all - the two versions of "search" cannot disagree about which backend
-    /// answers, what the exclusion rules are, or how long an enumeration may take. What stays v1's
-    /// own is only the shape of the answer: a ceiling of [`LEGACY_SEARCH_LIMIT`] unless the caller
-    /// names one, and every row collected before the JSON is written.
-    fn view_search(
-        &self,
-        token: u64,
-        query: &str,
-        within: Option<&Path>,
-        kind: Option<&str>,
-        limit: Option<usize>,
-    ) -> Result<String, String> {
-        let kind = kind.map(parse_kind).transpose()?;
-        let request = NameRequest::new(query);
-        if request.is_empty() {
-            return Err("query carries no search terms".into());
-        }
-        let mut request = request;
-        if let Some(kind) = kind {
-            request = request.kind(kind);
-        }
-        if let Some(within) = within {
-            request = request.scope(within);
-        }
-        request = request.limit(
-            limit
-                .unwrap_or(LEGACY_SEARCH_LIMIT)
-                .min(MAX_SEARCH_LIMIT as usize)
-                .max(1),
-        );
-
-        let mut hits: Vec<SearchHit> = Vec::new();
-        let searched = self
-            .router
-            .search(&request, &Cancellation::new(), &mut |hit| {
-                hits.push(hit);
-                true
-            })
-            .map_err(|error| error.to_string())?;
-
-        let mut rows: Vec<Row> = hits
-            .iter()
-            .map(|hit| {
-                Row::new(
-                    &path_buf_from_units(&hit.path),
-                    hit.kind,
-                    hit.size,
-                    hit.mtime_ms,
-                )
-            })
-            .collect();
-
-        let keys: Vec<String> = rows.iter().map(|row| row.key.clone()).collect();
-        let tags = {
-            let store = self.store();
-            store
-                .tag_names_for(&keys)
-                .map_err(|error| error.to_string())?
-        };
-        for row in rows.iter_mut() {
-            if let Some(names) = tags.get(&row.key) {
-                row.tags = names.clone();
-            }
-        }
-
-        let mut views = self.views();
-        let view = views
-            .get_mut(&token)
-            .ok_or_else(|| format!("unknown view token {token}"))?;
-        view.set_filter(Filter {
-            terms: request.terms.clone(),
-            kind,
-        });
-        view.replace_all(rows);
-        let out = RowsOut {
-            backend: searched.provider.to_string(),
-            incomplete: !searched.outcome.complete,
-            rows: view.rows().iter().map(RowOut::from).collect(),
-        };
-        serde_json::to_string(&out).map_err(|error| error.to_string())
-    }
-
-    /// Applies everything the watchers reported since the last call. The initial search resets the
-    /// model once; live changes then stream as positioned deltas.
-    fn view_drain(&self, token: u64) -> Result<String, String> {
-        let queued = {
-            let mut pending = self.pending();
-            std::mem::take(&mut *pending)
-        };
-        if queued.is_empty() {
-            let views = self.views();
-            let rows = views
-                .get(&token)
-                .ok_or_else(|| format!("unknown view token {token}"))?
-                .len();
-            let out = UpdateOut {
-                deltas: Vec::new(),
-                dropped: 0,
-                rows,
-            };
-            return serde_json::to_string(&out).map_err(|error| error.to_string());
-        }
-        let mut batcher = Batcher::new(std::time::Duration::ZERO, usize::MAX);
-        for change in queued {
-            batcher.absorb(Signal::Row(change));
-        }
-        let now = self.loss_count();
-        let seen = self.loss_seen.swap(now, Ordering::Relaxed);
-        let batch = fam_sched::Batch::new(
-            batcher.drain_parts().0,
-            Vec::new(),
-            now.saturating_sub(seen),
-        );
-
-        let mut views = self.views();
-        let view = views
-            .get_mut(&token)
-            .ok_or_else(|| format!("unknown view token {token}"))?;
-        let deltas = view.apply_with(&batch, |path| row_for_path(&path));
-        let out = UpdateOut {
-            deltas: deltas.iter().map(DeltaOut::from).collect(),
-            dropped: batch.dropped,
-            rows: view.len(),
-        };
-        serde_json::to_string(&out).map_err(|error| error.to_string())
-    }
-
-    fn view_free(&self, token: u64) {
-        self.views().remove(&token);
-    }
-
-    fn watch_start(&self, dir: &Path) -> Result<u64, String> {
-        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        let pending = Arc::clone(&self.pending);
-        let losses = Arc::clone(&self.losses);
-        let sink = move |batch: fam_sched::Batch| {
-            // v1 has no per-directory "re-read this" channel, so a watch the kernel dropped is
-            // reported the way a full queue already is: as loss, which is what tells the shell to
-            // re-poll the view.
-            losses.fetch_add(
-                batch.dropped + batch.rescans.len() as u64,
-                Ordering::Relaxed,
-            );
-            if let Ok(mut queue) = pending.lock() {
-                queue.extend(batch.changes);
-            }
-        };
-        let handle = spawn(
-            SchedulerConfig::watching(&[dir.to_path_buf()], self.config.clone()),
-            Box::new(sink),
-        )
-        .map_err(|error| error.to_string())?;
-        self.watchers().insert(token, handle);
-        Ok(token)
-    }
-
-    fn watch_stop(&self, token: u64) {
-        let handle = self.watchers().remove(&token);
-        if let Some(handle) = handle {
-            let dropped = handle.shutdown();
-            self.losses.fetch_add(dropped, Ordering::Relaxed);
-        }
     }
 
     // ---- v2: directory views, bounded fetch, and the delta poll -----------------------------
@@ -1136,21 +847,14 @@ pub unsafe extern "C" fn fam_core_free(core: *mut FamCore) {
     if core.is_null() {
         return;
     }
-    let (watchers, loader, searches) = {
+    let (loader, searches) = {
         let borrow = unsafe { &*core };
-        let watchers = {
-            let mut watchers = borrow.watchers();
-            std::mem::take(&mut *watchers)
-        };
-        // The loader thread holds a clone of the pipeline, so it has to be joined before that
-        // Handle is shut down - and before either, it must be told to stop taking work.
-        (watchers, borrow.loader.clone(), borrow.searches.clone())
+        // The loader thread holds the last clone of the pipeline, so it has to be joined before that
+        // Handle is dropped - and `Handle::drop` is what stops the watcher and joins the consumer.
+        (borrow.loader.clone(), borrow.searches.clone())
     };
     searches.shutdown();
     loader.shutdown();
-    for (_, handle) in watchers {
-        handle.shutdown();
-    }
     drop(Box::from_raw(core));
 }
 
@@ -1237,76 +941,6 @@ pub unsafe extern "C" fn fam_find(
         let limit = (limit > 0).then_some(limit as usize);
         borrow.find(tags, match_all != 0, within.map(Path::new), source, limit)
     })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn fam_view_new(
-    core: *mut FamCore,
-    sort: *const c_char,
-    order: *const c_char,
-    err: *mut *mut c_char,
-) -> u64 {
-    with_core_token(core, err, |borrow| {
-        let sort = arg_str(sort)?.unwrap_or("");
-        let order = arg_str(order)?.unwrap_or("");
-        borrow.view_new(sort, order)
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn fam_view_search(
-    core: *mut FamCore,
-    token: u64,
-    query: *const c_char,
-    within: *const c_char,
-    kind: *const c_char,
-    limit: u32,
-    out: *mut *mut c_char,
-    err: *mut *mut c_char,
-) -> c_int {
-    with_core(core, out, err, |borrow| {
-        let query = arg_str(query)?.unwrap_or("");
-        let within = arg_str(within)?;
-        let kind = arg_str(kind)?;
-        let limit = (limit > 0).then_some(limit as usize);
-        borrow.view_search(token, query, within.map(Path::new), kind, limit)
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn fam_view_drain(
-    core: *mut FamCore,
-    token: u64,
-    out: *mut *mut c_char,
-    err: *mut *mut c_char,
-) -> c_int {
-    with_core(core, out, err, move |borrow| borrow.view_drain(token))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn fam_view_free(core: *mut FamCore, token: u64) {
-    if let Ok(borrow) = unsafe { borrow_core(core) } {
-        borrow.view_free(token);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn fam_watch_start(
-    core: *mut FamCore,
-    dir: *const c_char,
-    err: *mut *mut c_char,
-) -> u64 {
-    with_core_token(core, err, |borrow| {
-        let dir = required_str(dir, "dir")?;
-        borrow.watch_start(Path::new(dir))
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn fam_watch_stop(core: *mut FamCore, token: u64) {
-    if let Ok(borrow) = unsafe { borrow_core(core) } {
-        borrow.watch_stop(token);
-    }
 }
 
 /// Lets a shell refuse to run against a stale core library.
