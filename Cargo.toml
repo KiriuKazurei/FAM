@@ -7,6 +7,7 @@ members = [
     "crates/fam-svc-index",
     "crates/fam-svc-everything",
     "crates/fam-svc-walk",
+    "crates/fam-svc-audit",
     "crates/fam-sched",
     "crates/fam-ffi",
     "crates/fam-bench",
@@ -27,6 +28,7 @@ fam-svc-enumerate = { path = "crates/fam-svc-enumerate" }
 fam-svc-index = { path = "crates/fam-svc-index" }
 fam-svc-everything = { path = "crates/fam-svc-everything" }
 fam-svc-walk = { path = "crates/fam-svc-walk" }
+fam-svc-audit = { path = "crates/fam-svc-audit" }
 fam-sched = { path = "crates/fam-sched" }
 fam-ffi = { path = "crates/fam-ffi" }
 

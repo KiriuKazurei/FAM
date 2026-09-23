@@ -29,8 +29,15 @@ impl Prune {
     }
 
     pub fn from_config(config: &Config) -> Self {
+        let mut prefixes = config.excluded_dir_keys();
+        // The audit log lives in the data directory, which on Windows is under the user's home -
+        // and home is the default search root. Left in, the walk would enumerate the log, a search
+        // would report it, and the tool would be reading its own trail. It is not a rule the user
+        // configured, so it goes on the list here rather than in `excluded_dirs`, where
+        // `fam config show` would present it as something they asked for.
+        prefixes.push(path_key(&config.audit_dir));
         Self {
-            prefixes: config.excluded_dir_keys(),
+            prefixes,
             names: config.excluded_name_keys(),
         }
     }
@@ -248,5 +255,46 @@ mod tests {
             &PathKey::of(Path::new("D:/proj/src")),
             &PathKey::of(Path::new("D:/other/a/node_modules/x.js"))
         ));
+    }
+
+    /// The audit log is in the exclusion list without anyone asking for it, because the data
+    /// directory sits under the default home root on Windows: enumerated, it would be searched, and
+    /// the tool would be reading its own trail.
+    #[test]
+    fn the_audit_log_is_never_reported() {
+        let root = Path::new("C:/Users/Kirig");
+        let config = Config {
+            search_roots: vec![root.to_path_buf()],
+            audit_dir: root.join("AppData/Roaming/FileAutoManage/audit"),
+            ..Config::default()
+        };
+        let rules = Prune::from_config(&config);
+        assert!(rules.excludes(Path::new(
+            "C:/Users/Kirig/AppData/Roaming/FileAutoManage/audit/audit-2026-09-23.jsonl"
+        )));
+        assert!(rules.excludes(Path::new(
+            "C:/Users/Kirig/AppData/Roaming/FileAutoManage/audit"
+        )));
+        // The tag database next door is a different question, and this rule does not answer it: the
+        // exclusion is the audit directory, not everything the program owns.
+        assert!(!rules.excludes(Path::new(
+            "C:/Users/Kirig/AppData/Roaming/FileAutoManage/tags.db"
+        )));
+        assert!(!rules.excludes(Path::new("C:/Users/Kirig/Documents/notes.md")));
+    }
+
+    /// A configured `excluded_dirs` entry and the automatic one are the same kind of rule, so the
+    /// user's list survives the injection.
+    #[test]
+    fn the_configured_exclusions_and_the_audit_one_are_both_honoured() {
+        let config = Config {
+            excluded_dirs: vec![PathBuf::from("D:/secret")],
+            audit_dir: PathBuf::from("D:/audit"),
+            ..Config::default()
+        };
+        let rules = Prune::from_config(&config);
+        assert_eq!(rules.prefixes().len(), 2);
+        assert!(rules.excludes(Path::new("D:/secret/key.pem")));
+        assert!(rules.excludes(Path::new("D:/audit/audit-2026-09-23.jsonl")));
     }
 }

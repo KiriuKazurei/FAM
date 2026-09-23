@@ -39,12 +39,14 @@ impl Core {
     fn with(tree: &Tree) -> Self {
         let config = tree.config.clone();
         let db = tree.db.clone();
+        let audit = tree.audit.clone();
         fs::write(
             &config,
             format!(
-                "database_path = \"{}\"\nsearch_roots = [\"{}\"]\nui_batch_ms = 20\n",
+                "database_path = \"{}\"\nsearch_roots = [\"{}\"]\nui_batch_ms = 20\naudit_dir = \"{}\"\n",
                 toml_path(&db),
-                toml_path(&tree.root)
+                toml_path(&tree.root),
+                toml_path(&audit)
             ),
         )
         .expect("write config");
@@ -361,6 +363,9 @@ struct Tree {
     root: PathBuf,
     db: PathBuf,
     config: PathBuf,
+    /// A sibling of the watched tree rather than a child, so the audit log is never a row in the
+    /// listing a test is asserting on - which is the same rule the default configuration needs.
+    audit: PathBuf,
 }
 
 /// A directory of `count` files, named so that natural and ordinal order agree.
@@ -381,6 +386,7 @@ fn tree(count: usize) -> Tree {
     Tree {
         db: staged.path().join("tags.sqlite"),
         config: staged.path().join("config.toml"),
+        audit: staged.path().join("audit"),
         _dir: staged,
         root,
     }

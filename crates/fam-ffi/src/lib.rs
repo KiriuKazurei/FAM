@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use fam_core::{Config, Order, PathKey, SearchRequest as NameRequest, SortKey};
 use fam_sched::{spawn, SchedulerConfig};
+use fam_svc_audit::{Actor, AuditLog, Draft, Op, Options as AuditOptions};
 use fam_svc_index::DirIndex;
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
 use fam_svc_walk::Kind;
@@ -81,6 +82,56 @@ pub struct FamCore {
     /// by identity already; this counts the views, which is what decides whether a watch is still
     /// wanted.
     watched: Mutex<HashMap<PathKey, u32>>,
+    /// Every request this ABI answers leaves a line here. Held by the core rather than by a global
+    /// because the session id and the configuration both belong to one handle.
+    audit: AuditLog,
+}
+
+/// One request as the audit log sees it: which entry point, which path it names, and a summary of
+/// the rest of the arguments.
+///
+/// Filled in by the call body rather than by the entry point on purpose. An argument is read once -
+/// a `char*` the caller owns can be freed the moment the call returns, and reading it twice to build
+/// a log line first would be a use-after-free the caller could time. So the line carries what the
+/// body managed to read, and a call that failed on a null or malformed argument says exactly that
+/// instead of echoing bytes this program has no business dereferencing twice.
+struct Call {
+    op: Op,
+    target: Option<PathBuf>,
+    args: Option<String>,
+}
+
+impl Call {
+    fn new(op: Op) -> Self {
+        Self {
+            op,
+            target: None,
+            args: None,
+        }
+    }
+
+    /// Names the path the request is about. `op` is left alone.
+    fn names(&mut self, path: &str) -> &mut Self {
+        self.target = Some(PathBuf::from(path));
+        self
+    }
+
+    /// The view or search token the request addresses. Nearly every v2 call is about one, and a line
+    /// that says `dir.fetch` without it cannot be joined to the `dir.open` that made it.
+    fn with_token(mut self, token: u64) -> Self {
+        self.args = Some(format!("token={token}"));
+        self
+    }
+
+    /// Adds to the summary rather than replacing it, so a call can name its token and then its
+    /// window without either one deciding the shape of the line.
+    fn says(&mut self, summary: impl std::fmt::Display) -> &mut Self {
+        self.args = Some(match &self.args {
+            Some(already) => format!("{already} {summary}"),
+            None => summary.to_string(),
+        });
+        self
+    }
 }
 
 #[derive(Serialize)]
@@ -106,6 +157,22 @@ struct StatsOut {
     manual: i64,
     auto: i64,
     dropped_events: u64,
+    /// The audit log's own account of itself. A log that stopped writing has to be visible from the
+    /// side that does not read files, or a full disk turns into an empty trail and nobody notices.
+    audit: AuditOut,
+}
+
+#[derive(Serialize)]
+struct AuditOut {
+    directory: String,
+    session: u64,
+    records: u64,
+    bytes_today: u64,
+    dropped: u64,
+    dropped_because: Option<String>,
+    writing: bool,
+    record_reads: bool,
+    last_error: Option<String>,
 }
 
 /// The read `key` owes right now: `None` when the cached rows are current, when a read is already
@@ -136,6 +203,30 @@ impl FamCore {
             None => Config::load(),
         };
         config.validate().map_err(|error| error.to_string())?;
+        // The audit log is not a feature that can be missing, so it is opened before anything else
+        // that has a side effect: no view, no watch, no database handle exists if the trail cannot
+        // be written.
+        if let Some(root) = fam_svc_audit::conflicting_root(&config.audit_dir, &config.search_roots)
+        {
+            return Err(format!(
+                "the audit directory {} would contain the search root {}; move one of them",
+                config.audit_dir.display(),
+                root.display()
+            ));
+        }
+        let audit = AuditLog::open(AuditOptions {
+            directory: config.audit_dir.clone(),
+            actor: Actor::User,
+            record_reads: config.audit_record_reads,
+            daily_limit_bytes: config.audit_daily_limit_bytes(),
+            clock: fam_svc_audit::system_clock(),
+        })
+        .map_err(|error| {
+            format!(
+                "cannot open the audit log in {}: {error}",
+                config.audit_dir.display()
+            )
+        })?;
         let store = TagStore::open(&config.database_path).map_err(|error| error.to_string())?;
         let losses = Arc::new(AtomicU64::new(0));
         let index = DirIndex::with_budget_bytes(config.cache_budget_bytes());
@@ -194,7 +285,22 @@ impl FamCore {
             searches,
             loader,
             watched: Mutex::new(HashMap::new()),
+            audit,
         })
+    }
+
+    /// Writes the one line a call owes. Everything about the *outcome* comes from the shell that
+    /// called this, which is why no body has to remember to report anything: an entry point that
+    /// forgets a field still leaves a line.
+    fn record(&self, call: &Call, result: impl std::fmt::Display) {
+        let mut draft = Draft::new(call.op);
+        if let Some(target) = &call.target {
+            draft = draft.target(target);
+        }
+        if let Some(args) = &call.args {
+            draft = draft.args(args);
+        }
+        self.audit.record(draft.result(result));
     }
 
     /// Lock poisoning can only follow a panic that an entry point already caught, so recovering
@@ -227,6 +333,20 @@ impl FamCore {
             manual: stats.manual,
             auto: stats.auto,
             dropped_events: self.loss_count(),
+            audit: {
+                let health = self.audit.health();
+                AuditOut {
+                    directory: self.config.audit_dir.display().to_string(),
+                    session: health.session,
+                    records: health.records,
+                    bytes_today: health.bytes_today,
+                    dropped: health.dropped,
+                    dropped_because: health.dropped_because,
+                    writing: health.writing,
+                    record_reads: self.config.audit_record_reads,
+                    last_error: health.last_error,
+                }
+            },
         };
         serde_json::to_string(&out).map_err(|error| error.to_string())
     }
@@ -706,72 +826,118 @@ unsafe fn borrow_core<'a>(pointer: *mut FamCore) -> Result<&'a FamCore, String> 
     Ok(&*pointer)
 }
 
-fn guard<F>(call: F, out: *mut *mut c_char, err: *mut *mut c_char) -> c_int
-where
-    F: FnOnce() -> Result<String, String>,
-{
-    match catch_unwind(AssertUnwindSafe(call)) {
-        Ok(Ok(json)) => {
-            write_cstring(out, json);
-            OK
-        }
-        Ok(Err(message)) => {
-            write_cstring(err, message);
-            ERR
-        }
-        Err(_) => {
-            write_cstring(err, "FAM core panicked; the call was aborted");
-            ERR
-        }
-    }
-}
+/// What a caller sees when a body unwound, and what the audit line says about it.
+const PANIC: &str = "FAM core panicked; the call was aborted";
 
+/* The four shells below share one contract: a request leaves exactly one audit line, whatever the
+ * body does with it - an answer, a refusal, or a panic. That is why the line is written here rather
+ * than in the bodies: a method that forgets to report would otherwise forget to record as well.
+ *
+ * A call that never reaches a core handle - a null pointer, or a buffer too small to name - records
+ * nothing, because the log belongs to the handle. Both are caller bugs rather than events in anyone's
+ * browsing, and the ABI contract in the header is what addresses them. */
+
+/// The shape of every call that answers with JSON.
 unsafe fn with_core<F>(
     core: *mut FamCore,
+    mut call: Call,
     out: *mut *mut c_char,
     err: *mut *mut c_char,
     body: F,
 ) -> c_int
 where
-    F: FnOnce(&FamCore) -> Result<String, String>,
+    F: FnOnce(&FamCore, &mut Call) -> Result<String, String>,
 {
     match borrow_core(core) {
-        Ok(borrow) => guard(move || body(borrow), out, err),
         Err(message) => {
             write_cstring(err, message);
             ERR
         }
+        Ok(borrow) => match catch_unwind(AssertUnwindSafe(|| body(borrow, &mut call))) {
+            Ok(Ok(json)) => {
+                borrow.record(&call, json.as_str());
+                write_cstring(out, json);
+                OK
+            }
+            Ok(Err(message)) => {
+                borrow.record(&call, format!("error {message}"));
+                write_cstring(err, message);
+                ERR
+            }
+            Err(_) => {
+                borrow.record(&call, "panic");
+                write_cstring(err, PANIC);
+                ERR
+            }
+        },
     }
 }
 
 /// Same shape for calls whose useful return value is a token; `0` signals failure.
-unsafe fn with_core_token<F>(core: *mut FamCore, err: *mut *mut c_char, body: F) -> u64
+unsafe fn with_core_token<F>(
+    core: *mut FamCore,
+    mut call: Call,
+    err: *mut *mut c_char,
+    body: F,
+) -> u64
 where
-    F: FnOnce(&FamCore) -> Result<u64, String>,
+    F: FnOnce(&FamCore, &mut Call) -> Result<u64, String>,
 {
-    let outcome = borrow_core(core).and_then(|borrow| {
-        catch_unwind(AssertUnwindSafe(|| body(borrow)))
-            .unwrap_or_else(|_| Err("FAM core panicked; the call was aborted".into()))
-    });
-    match outcome {
-        Ok(token) => token,
+    match borrow_core(core) {
         Err(message) => {
             write_cstring(err, message);
             0
         }
+        Ok(borrow) => match catch_unwind(AssertUnwindSafe(|| body(borrow, &mut call))) {
+            Ok(Ok(token)) => {
+                borrow.record(&call, format!("ok token={token}"));
+                token
+            }
+            Ok(Err(message)) => {
+                borrow.record(&call, format!("error {message}"));
+                write_cstring(err, message);
+                0
+            }
+            Err(_) => {
+                borrow.record(&call, "panic");
+                write_cstring(err, PANIC);
+                0
+            }
+        },
     }
 }
 
 /// For calls that only need to succeed or fail.
-unsafe fn with_core_status<F>(core: *mut FamCore, err: *mut *mut c_char, body: F) -> c_int
+unsafe fn with_core_status<F>(
+    core: *mut FamCore,
+    mut call: Call,
+    err: *mut *mut c_char,
+    body: F,
+) -> c_int
 where
-    F: FnOnce(&FamCore) -> Result<(), String>,
+    F: FnOnce(&FamCore, &mut Call) -> Result<(), String>,
 {
-    match with_core(core, std::ptr::null_mut(), err, |borrow| {
-        body(borrow).map(|()| String::new())
-    }) {
-        OK => OK,
-        _ => ERR,
+    match borrow_core(core) {
+        Err(message) => {
+            write_cstring(err, message);
+            ERR
+        }
+        Ok(borrow) => match catch_unwind(AssertUnwindSafe(|| body(borrow, &mut call))) {
+            Ok(Ok(())) => {
+                borrow.record(&call, "ok");
+                OK
+            }
+            Ok(Err(message)) => {
+                borrow.record(&call, format!("error {message}"));
+                write_cstring(err, message);
+                ERR
+            }
+            Err(_) => {
+                borrow.record(&call, "panic");
+                write_cstring(err, PANIC);
+                ERR
+            }
+        },
     }
 }
 
@@ -790,13 +956,14 @@ unsafe fn buffer_slice<'a>(pointer: *mut c_uchar, len: u32) -> Result<&'a mut [u
 /// The shape of every row-carrying v2 call: bytes written, or -1 with a message in `err`.
 unsafe fn with_core_buffer<F>(
     core: *mut FamCore,
+    mut call: Call,
     buffer: *mut c_uchar,
     buffer_len: u32,
     err: *mut *mut c_char,
     body: F,
 ) -> c_int
 where
-    F: FnOnce(&FamCore, &mut [u8]) -> Result<usize, String>,
+    F: FnOnce(&FamCore, &mut Call, &mut [u8]) -> Result<usize, String>,
 {
     let bytes = match buffer_slice(buffer, buffer_len) {
         Ok(bytes) => bytes,
@@ -805,17 +972,32 @@ where
             return ERR;
         }
     };
-    let outcome = borrow_core(core).and_then(|borrow| {
-        catch_unwind(AssertUnwindSafe(move || body(borrow, bytes)))
-            .unwrap_or_else(|_| Err("FAM core panicked; the call was aborted".into()))
-    });
-    match outcome {
-        // A buffer larger than `c_int` cannot be described by this signature, and no view is asked
-        // for one: `MAX_ROWS_PER_CALL` records is well under half of what fits.
-        Ok(written) => written.min(c_int::MAX as usize) as c_int,
+    match borrow_core(core) {
         Err(message) => {
             write_cstring(err, message);
             ERR
+        }
+        Ok(borrow) => {
+            // No `move` on purpose: the body takes the call by mutable reference so the line can
+            // still be written from it afterwards, once the arguments have been read exactly once.
+            match catch_unwind(AssertUnwindSafe(|| body(borrow, &mut call, bytes))) {
+                // A buffer larger than `c_int` cannot be described by this signature, and no view
+                // is asked for one: `MAX_ROWS_PER_CALL` records is well under half of what fits.
+                Ok(Ok(written)) => {
+                    borrow.record(&call, format!("ok {written}B"));
+                    written.min(c_int::MAX as usize) as c_int
+                }
+                Ok(Err(message)) => {
+                    borrow.record(&call, format!("error {message}"));
+                    write_cstring(err, message);
+                    ERR
+                }
+                Err(_) => {
+                    borrow.record(&call, "panic");
+                    write_cstring(err, PANIC);
+                    ERR
+                }
+            }
         }
     }
 }
@@ -872,7 +1054,9 @@ pub unsafe extern "C" fn fam_stats(
     out: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core(core, out, err, |borrow| borrow.stats())
+    with_core(core, Call::new(Op::Stats), out, err, |borrow, _| {
+        borrow.stats()
+    })
 }
 
 #[no_mangle]
@@ -885,10 +1069,12 @@ pub unsafe extern "C" fn fam_tag_add(
     out: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core(core, out, err, |borrow| {
+    with_core(core, Call::new(Op::TagAdd), out, err, |borrow, call| {
         let path = required_str(path, "path")?;
         let tags = required_str(tags_json, "tags")?;
         let source = arg_str(source)?.unwrap_or("manual");
+        call.names(path)
+            .says(format!("tags={tags} source={source} priority={priority}"));
         borrow.tag_add(Path::new(path), tags, source, priority)
     })
 }
@@ -900,8 +1086,9 @@ pub unsafe extern "C" fn fam_tag_list(
     out: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core(core, out, err, |borrow| {
+    with_core(core, Call::new(Op::TagList), out, err, |borrow, call| {
         let path = required_str(path, "path")?;
+        call.names(path);
         borrow.tag_list(Path::new(path))
     })
 }
@@ -915,10 +1102,12 @@ pub unsafe extern "C" fn fam_tag_remove(
     out: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core(core, out, err, |borrow| {
+    with_core(core, Call::new(Op::TagRemove), out, err, |borrow, call| {
         let path = required_str(path, "path")?;
         let tags = arg_str(tags_json)?.unwrap_or("");
         let source = arg_str(source)?;
+        call.names(path)
+            .says(format!("tags={tags} source={}", source.unwrap_or("-")));
         borrow.tag_remove(Path::new(path), tags, source)
     })
 }
@@ -934,11 +1123,20 @@ pub unsafe extern "C" fn fam_find(
     out: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core(core, out, err, |borrow| {
+    with_core(core, Call::new(Op::TagFind), out, err, |borrow, call| {
         let tags = required_str(tags_json, "tags")?;
         let within = arg_str(within)?;
         let source = arg_str(source)?;
         let limit = (limit > 0).then_some(limit as usize);
+        if let Some(within) = within {
+            call.names(within);
+        }
+        call.says(format!(
+            "tags={tags} all={} source={} limit={}",
+            match_all != 0,
+            source.unwrap_or("-"),
+            limit.unwrap_or(0)
+        ));
         borrow.find(tags, match_all != 0, within.map(Path::new), source, limit)
     })
 }
@@ -959,8 +1157,9 @@ pub unsafe extern "C" fn fam_open_dir(
     path: *const c_char,
     err: *mut *mut c_char,
 ) -> u64 {
-    with_core_token(core, err, |borrow| {
+    with_core_token(core, Call::new(Op::DirOpen), err, |borrow, call| {
         let path = required_str(path, "path")?;
+        call.names(path);
         Ok(borrow.dir_open(Path::new(path)))
     })
 }
@@ -974,10 +1173,17 @@ pub unsafe extern "C" fn fam_dir_state(
     buffer_len: u32,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core_buffer(core, buffer, buffer_len, err, |borrow, bytes| {
-        let header = borrow.dir_status(token)?;
-        Ok(wire::encode(&[], wire::RECORDS, &[], header, bytes))
-    })
+    with_core_buffer(
+        core,
+        Call::new(Op::DirState).with_token(token),
+        buffer,
+        buffer_len,
+        err,
+        |borrow, _, bytes| {
+            let header = borrow.dir_status(token)?;
+            Ok(wire::encode(&[], wire::RECORDS, &[], header, bytes))
+        },
+    )
 }
 
 /// Copies up to `count` rows from `first` into the caller's buffer.
@@ -994,9 +1200,16 @@ pub unsafe extern "C" fn fam_dir_fetch(
     buffer_len: u32,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core_buffer(core, buffer, buffer_len, err, |borrow, bytes| {
-        borrow.dir_fetch(token, first, count, bytes)
-    })
+    let mut call = Call::new(Op::DirFetch).with_token(token);
+    call.says(format!("{first}+{count}"));
+    with_core_buffer(
+        core,
+        call,
+        buffer,
+        buffer_len,
+        err,
+        move |borrow, _, bytes| borrow.dir_fetch(token, first, count, bytes),
+    )
 }
 
 /// Hands over the row positions queued since the last poll of this token.
@@ -1012,9 +1225,14 @@ pub unsafe extern "C" fn fam_dir_poll(
     buffer_len: u32,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core_buffer(core, buffer, buffer_len, err, |borrow, bytes| {
-        borrow.dir_poll(token, bytes)
-    })
+    with_core_buffer(
+        core,
+        Call::new(Op::DirPoll).with_token(token),
+        buffer,
+        buffer_len,
+        err,
+        |borrow, _, bytes| borrow.dir_poll(token, bytes),
+    )
 }
 
 #[no_mangle]
@@ -1025,11 +1243,17 @@ pub unsafe extern "C" fn fam_dir_set_sort(
     order: *const c_char,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core_status(core, err, |borrow| {
-        let sort = arg_str(sort)?.unwrap_or("");
-        let order = arg_str(order)?.unwrap_or("");
-        borrow.dir_set_sort(token, sort, order)
-    })
+    with_core_status(
+        core,
+        Call::new(Op::DirSort).with_token(token),
+        err,
+        |borrow, call| {
+            let sort = arg_str(sort)?.unwrap_or("");
+            let order = arg_str(order)?.unwrap_or("");
+            call.says(format!("sort={sort} order={order}"));
+            borrow.dir_set_sort(token, sort, order)
+        },
+    )
 }
 
 /// Narrows a view. `terms_json` is a JSON array of lower-cased substrings, or empty for no filter.
@@ -1041,18 +1265,26 @@ pub unsafe extern "C" fn fam_dir_set_filter(
     kind: *const c_char,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core_status(core, err, |borrow| {
-        let terms = arg_str(terms_json)?.unwrap_or("");
-        let kind = arg_str(kind)?;
-        borrow.dir_set_filter(token, terms, kind)
-    })
+    with_core_status(
+        core,
+        Call::new(Op::DirFilter).with_token(token),
+        err,
+        |borrow, call| {
+            let terms = arg_str(terms_json)?.unwrap_or("");
+            let kind = arg_str(kind)?;
+            call.says(format!("terms={terms} kind={}", kind.unwrap_or("-")));
+            borrow.dir_set_filter(token, terms, kind)
+        },
+    )
 }
 
 /// Ends a view. The directory stops being watched when this was the last view of it.
 #[no_mangle]
 pub unsafe extern "C" fn fam_dir_close(core: *mut FamCore, token: u64) {
+    // No `err` slot in this signature, so the audit line is the only record the call leaves.
     if let Ok(borrow) = unsafe { borrow_core(core) } {
         borrow.dir_close(token);
+        borrow.record(&Call::new(Op::DirClose).with_token(token), "ok");
     }
 }
 
@@ -1063,7 +1295,9 @@ pub unsafe extern "C" fn fam_backends_json(
     out: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core(core, out, err, move |borrow| Ok(borrow.backends_json()))
+    with_core(core, Call::new(Op::Backends), out, err, move |borrow, _| {
+        Ok(borrow.backends_json())
+    })
 }
 
 /// Starts a name search and returns its token, without waiting for any result. 0 is failure.
@@ -1078,10 +1312,17 @@ pub unsafe extern "C" fn fam_search_begin(
     limit: u32,
     err: *mut *mut c_char,
 ) -> u64 {
-    with_core_token(core, err, |borrow| {
+    with_core_token(core, Call::new(Op::SearchBegin), err, |borrow, call| {
         let query = required_str(query, "query")?;
         let within = arg_str(within)?;
         let kind = arg_str(kind)?;
+        if let Some(within) = within {
+            call.names(within);
+        }
+        call.says(format!(
+            "query={query} kind={} limit={limit}",
+            kind.unwrap_or("-")
+        ));
         borrow.search_begin(query, within.map(Path::new), kind, limit)
     })
 }
@@ -1098,9 +1339,16 @@ pub unsafe extern "C" fn fam_search_page(
     buffer_len: u32,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core_buffer(core, buffer, buffer_len, err, |borrow, bytes| {
-        borrow.search_page(token, first, count, bytes)
-    })
+    let mut call = Call::new(Op::SearchPage).with_token(token);
+    call.says(format!("{first}+{count}"));
+    with_core_buffer(
+        core,
+        call,
+        buffer,
+        buffer_len,
+        err,
+        move |borrow, _, bytes| borrow.search_page(token, first, count, bytes),
+    )
 }
 
 /// Asks a running search to stop. Cooperative: the provider notices between directories and between
@@ -1111,7 +1359,12 @@ pub unsafe extern "C" fn fam_search_cancel(
     token: u64,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core_status(core, err, |borrow| borrow.search_cancel(token))
+    with_core_status(
+        core,
+        Call::new(Op::SearchCancel).with_token(token),
+        err,
+        |borrow, _| borrow.search_cancel(token),
+    )
 }
 
 /// Ends a search and releases its rows.
@@ -1119,5 +1372,6 @@ pub unsafe extern "C" fn fam_search_cancel(
 pub unsafe extern "C" fn fam_search_close(core: *mut FamCore, token: u64) {
     if let Ok(borrow) = unsafe { borrow_core(core) } {
         borrow.search_close(token);
+        borrow.record(&Call::new(Op::SearchClose).with_token(token), "ok");
     }
 }

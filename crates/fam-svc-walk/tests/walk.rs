@@ -96,6 +96,62 @@ fn walk_reports_no_errors_on_a_clean_tree() {
     );
 }
 
+/// The exclusion is a property of the directory being listed, not of each row in it. That is what
+/// lets a walk ask once per directory instead of once per entry - and a root is listed without
+/// anyone having descended into it, so it is the one case that has to be asked on its own.
+#[test]
+fn an_excluded_root_is_skipped_rather_than_walked() {
+    let dir = tempfile::tempdir().unwrap();
+    sample_tree(dir.path());
+    let mut walked = policy(dir.path());
+    walked.roots = vec![dir.path().join("excluded")];
+
+    let (entries, report) = collect(&walked, &Cancellation::new(), Duration::from_secs(30));
+
+    assert!(
+        entries.is_empty(),
+        "the root itself is excluded: {entries:?}"
+    );
+    assert_eq!(report.errors, 0, "an exclusion is not a broken path");
+    assert_eq!(report.skipped, 1, "and the walk says it refused one");
+}
+
+/// The one thing the directory-level rule gives up: a **file** named in `excluded_dirs` is no
+/// longer hidden from a walk, because nothing refused to list its parent. The list is of
+/// directories, the search-side `Prune::excludes` still answers true for such a path, and the cost
+/// of keeping the per-file behaviour was a path key for every entry in the tree.
+#[test]
+fn a_file_named_as_an_excluded_directory_is_not_hidden_from_the_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    sample_tree(dir.path());
+    let mut walked = policy(dir.path());
+    walked.prune = fam_core::Prune::new(
+        vec![fam_core::path_key(&dir.path().join("notes.txt"))],
+        Vec::new(),
+    );
+
+    let (entries, _) = collect(&walked, &Cancellation::new(), Duration::from_secs(30));
+    let names: Vec<String> = entries
+        .iter()
+        .map(|entry| {
+            entry
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        names.contains(&"notes.txt".to_string()),
+        "the walk lists its parent, so the file appears: {names:?}"
+    );
+    assert!(
+        walked.prune.excludes(&dir.path().join("notes.txt")),
+        "a search still refuses to report it"
+    );
+}
+
 #[test]
 fn missing_roots_are_counted_as_errors_not_panics() {
     let dir = tempfile::tempdir().unwrap();

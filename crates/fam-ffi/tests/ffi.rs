@@ -17,13 +17,15 @@ struct Core(*mut FamCore);
 
 impl Core {
     fn with_config(tree: &Path, db: &Path) -> Core {
-        let config = tree.parent().unwrap().join("config.toml");
+        let root = tree.parent().unwrap();
+        let config = root.join("config.toml");
         fs::write(
             &config,
             format!(
-                "database_path = \"{}\"\nsearch_roots = [\"{}\"]\nui_batch_ms = 20\nscan_timeout_secs = 20\n",
+                "database_path = \"{}\"\nsearch_roots = [\"{}\"]\nui_batch_ms = 20\nscan_timeout_secs = 20\naudit_dir = \"{}\"\n",
                 toml_path(db),
-                toml_path(tree)
+                toml_path(tree),
+                toml_path(&root.join("audit"))
             ),
         )
         .unwrap();

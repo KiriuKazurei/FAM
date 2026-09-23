@@ -35,6 +35,9 @@ pub enum Mode {
     /// Building a view from scratch over a table that was just read: the sort a re-read pays on top
     /// of its enumeration.
     RebuildView,
+    /// One line appended to the audit log. Priced on its own because the aspect runs on the thread
+    /// that answered the request, so this number is what a scroll costs on top of the scroll.
+    AuditAppend,
 }
 
 pub struct Case {
@@ -169,6 +172,19 @@ impl Case {
                 note:
                     "ordering a freshly read 20k-row table from scratch - a re-read without its I/O",
             },
+            Case {
+                id: "audit_append",
+                env_var: "",
+                default_corpus: "",
+                // One line per round, into one already-open file: this is the cost the aspect adds
+                // to a call, and it is paid on whatever thread answered the request.
+                iterations: 2_000,
+                entry_cap: 0,
+                window: 0,
+                mode: Mode::AuditAppend,
+                note:
+                    "one audit record: build the summary, serialise it, hash-chain it, WriteFile it",
+            },
         ]
     }
 
@@ -205,7 +221,10 @@ impl Case {
 
     /// Returns `Err(corpus)` when the directory is not present on this machine.
     pub fn measure(&self, iterations: Option<usize>) -> Result<CaseResult, PathBuf> {
-        let synthetic = matches!(self.mode, Mode::PatchWindow | Mode::RebuildView);
+        let synthetic = matches!(
+            self.mode,
+            Mode::PatchWindow | Mode::RebuildView | Mode::AuditAppend
+        );
         let corpus = self.corpus();
         if !synthetic && !corpus.is_dir() {
             return Err(corpus);
@@ -219,6 +238,7 @@ impl Case {
             Mode::CachedViewport => measure_cached_viewport(&corpus, rounds, VIEWPORT, PASSES),
             Mode::PatchWindow => measure_patch(self.entry_cap, self.window, rounds),
             Mode::RebuildView => measure_rebuild(self.entry_cap, rounds),
+            Mode::AuditAppend => measure_audit_append(rounds),
         };
         samples.durations.sort_unstable();
 
@@ -227,7 +247,10 @@ impl Case {
         Ok(CaseResult {
             id: self.id.to_string(),
             corpus: if synthetic {
-                format!("synthetic: {} rows", self.entry_cap)
+                match self.mode {
+                    Mode::AuditAppend => "synthetic: one log left open".to_string(),
+                    _ => format!("synthetic: {} rows", self.entry_cap),
+                }
             } else {
                 corpus.display().to_string()
             },
@@ -462,6 +485,38 @@ fn measure_rebuild(rows: usize, rounds: usize) -> Samples {
         samples.durations.push(elapsed.as_micros() as u64);
         samples.total += elapsed;
         samples.entries = rows as u64;
+        samples.dirs = 1;
+    }
+    samples
+}
+
+/// The line an open folder writes on every repaint, priced against one handle left open for the
+/// whole pass - which is what the ABI does, and the only honest shape for the number: opening the
+/// file per record would be measuring a path lookup rather than an append.
+fn measure_audit_append(rounds: usize) -> Samples {
+    use fam_svc_audit::{Actor, AuditLog, Draft, Op, Options};
+
+    let scratch = tempfile::tempdir().expect("audit scratch");
+    let log = AuditLog::open(Options {
+        directory: scratch.path().join("audit"),
+        actor: Actor::User,
+        record_reads: true,
+        daily_limit_bytes: 64 * 1024 * 1024,
+        clock: fam_svc_audit::system_clock(),
+    })
+    .expect("the audit log opens");
+    let mut samples = new_samples(rounds);
+    for index in 0..rounds {
+        let started = Instant::now();
+        log.record(
+            Draft::new(Op::DirFetch)
+                .args(format!("token=1 {index}+60"))
+                .result("ok 2400B"),
+        );
+        let elapsed = started.elapsed();
+        samples.durations.push(elapsed.as_micros() as u64);
+        samples.total += elapsed;
+        samples.entries = 1;
         samples.dirs = 1;
     }
     samples

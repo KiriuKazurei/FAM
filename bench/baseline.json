@@ -1,6 +1,20 @@
 {
   "recorded_on": "windows x86_64, warm cache, fam-bench 0.1.0 | provenance: docs/notes/",
   "cases": {
+    "audit_append": {
+      "id": "audit_append",
+      "corpus": "synthetic: one log left open",
+      "note": "one audit record: build the summary, serialise it, hash-chain it, WriteFile it",
+      "samples": 2000,
+      "p50_us": 42,
+      "p95_us": 77,
+      "min_us": 41,
+      "max_us": 471,
+      "entries": 1,
+      "dirs": 1,
+      "errors": 0,
+      "entries_per_s": 20630
+    },
     "open_flat_dir": {
       "id": "open_flat_dir",
       "corpus": "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",

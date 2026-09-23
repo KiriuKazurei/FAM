@@ -14,6 +14,13 @@ pub const DEFAULT_SCAN_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_WALK_THREADS: usize = 10;
 pub const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 4096;
 pub const DEFAULT_UI_BATCH_MS: u64 = 120;
+/// Ceiling on one day's audit file before the record-read stream stops. Sized from the measured
+/// record cost in `docs/notes/audit-log-is-append-only-and-priced.md`: large enough for a day of
+/// ordinary browsing with `audit_record_reads` on, small enough that a runaway session cannot fill
+/// a volume.
+pub const DEFAULT_AUDIT_DAILY_LIMIT_MB: u32 = 64;
+pub const AUDIT_DAILY_LIMIT_MB_MIN: u32 = 1;
+pub const AUDIT_DAILY_LIMIT_MB_MAX: u32 = 4096;
 
 pub const MEMORY_LIMIT_MB_MIN: u32 = 100;
 pub const MEMORY_LIMIT_MB_MAX: u32 = 8192;
@@ -60,6 +67,12 @@ impl AppPaths {
     pub fn default_database_file() -> PathBuf {
         Self::resolve().data_dir.join("tags.db")
     }
+
+    /// Where the audit log goes. `fam-svc-audit` names the directory; this is the default location,
+    /// and `Config::audit_dir` is what actually points at it so a configuration can move it.
+    pub fn default_audit_dir() -> PathBuf {
+        Self::resolve().data_dir.join("audit")
+    }
 }
 
 /// What a loader does when the file does not exist.
@@ -85,6 +98,16 @@ pub struct Config {
     /// preserving; the range (100-8192 MB) was inherited from a Node `env_loader` and is kept
     /// because it brackets sensible sizes for this purpose.
     pub memory_limit_mb: Option<u32>,
+    /// Where the audit log is written. Never inside anything the tool indexes: `Prune` excludes it
+    /// from every listing, and a search root placed under it stops the program from starting at all
+    /// (see `fam_svc_audit::conflicting_root`).
+    pub audit_dir: PathBuf,
+    /// Whether the calls that read back an answer already on screen - fetching a window of rows,
+    /// paging a search - get an audit line each. Off, the log keeps every question and every change
+    /// and loses only the row-by-row reading of a result. A view polling for changes never gets a
+    /// line either way; it is the heartbeat, not a request.
+    pub audit_record_reads: bool,
+    pub audit_daily_limit_mb: u32,
 }
 
 impl Default for Config {
@@ -102,6 +125,9 @@ impl Default for Config {
             event_queue_capacity: DEFAULT_EVENT_QUEUE_CAPACITY,
             ui_batch_ms: DEFAULT_UI_BATCH_MS,
             memory_limit_mb: None,
+            audit_dir: AppPaths::default_audit_dir(),
+            audit_record_reads: true,
+            audit_daily_limit_mb: DEFAULT_AUDIT_DAILY_LIMIT_MB,
         }
     }
 }
@@ -217,6 +243,19 @@ impl Config {
                 )));
             }
         }
+        if !(AUDIT_DAILY_LIMIT_MB_MIN..=AUDIT_DAILY_LIMIT_MB_MAX)
+            .contains(&self.audit_daily_limit_mb)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "audit_daily_limit_mb must be within {AUDIT_DAILY_LIMIT_MB_MIN}..={AUDIT_DAILY_LIMIT_MB_MAX}, got {}",
+                self.audit_daily_limit_mb
+            )));
+        }
+        if self.audit_dir.as_os_str().is_empty() {
+            return Err(ConfigError::Invalid(
+                "audit_dir must not be empty: the audit log has no optional location".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -227,6 +266,11 @@ impl Config {
     /// Bytes the directory cache may hold before whole tables start getting evicted.
     pub fn cache_budget_bytes(&self) -> u64 {
         u64::from(self.memory_limit_mb.unwrap_or(DEFAULT_CACHE_BUDGET_MB)) * 1024 * 1024
+    }
+
+    /// Bytes one day's audit file may reach before the record-read stream stops.
+    pub fn audit_daily_limit_bytes(&self) -> u64 {
+        u64::from(self.audit_daily_limit_mb) * 1024 * 1024
     }
 
     pub fn ui_batch_window(&self) -> Duration {
@@ -368,5 +412,58 @@ mod tests {
             .cache_budget_bytes(),
             1024 * megabyte
         );
+    }
+
+    #[test]
+    fn the_audit_defaults_are_valid_and_the_template_carries_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        Config::write_template_to(&path).unwrap();
+
+        let config = Config::load_from(&path).unwrap();
+
+        assert!(!config.audit_dir.as_os_str().is_empty());
+        assert!(config.audit_record_reads);
+        assert_eq!(config.audit_daily_limit_mb, DEFAULT_AUDIT_DAILY_LIMIT_MB);
+        assert_eq!(
+            config.audit_daily_limit_bytes(),
+            u64::from(DEFAULT_AUDIT_DAILY_LIMIT_MB) * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn audit_settings_can_be_turned_down_but_not_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(
+            &path,
+            format!(
+                "audit_dir = '{}'\naudit_record_reads = false\naudit_daily_limit_mb = 8\n",
+                AppPaths::default_audit_dir().display()
+            ),
+        )
+        .unwrap();
+
+        let config = Config::load_merging(&path).unwrap();
+
+        assert!(!config.audit_record_reads);
+        assert_eq!(config.audit_daily_limit_mb, 8);
+
+        let no_directory = Config {
+            audit_dir: PathBuf::from(""),
+            ..Config::default()
+        };
+        assert!(matches!(
+            no_directory.validate(),
+            Err(ConfigError::Invalid(message)) if message.contains("audit_dir")
+        ));
+        let no_ceiling = Config {
+            audit_daily_limit_mb: 0,
+            ..Config::default()
+        };
+        assert!(matches!(
+            no_ceiling.validate(),
+            Err(ConfigError::Invalid(message)) if message.contains("audit_daily_limit_mb")
+        ));
     }
 }

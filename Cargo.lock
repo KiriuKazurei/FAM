@@ -263,6 +263,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fam-core",
+ "fam-svc-audit",
  "fam-svc-enumerate",
  "fam-svc-index",
  "fam-svc-walk",
@@ -280,6 +281,7 @@ dependencies = [
  "env_logger",
  "fam-core",
  "fam-sched",
+ "fam-svc-audit",
  "fam-svc-index",
  "fam-svc-store",
  "fam-svc-walk",
@@ -307,6 +309,7 @@ version = "0.1.0"
 dependencies = [
  "fam-core",
  "fam-sched",
+ "fam-svc-audit",
  "fam-svc-index",
  "fam-svc-store",
  "fam-svc-walk",
@@ -324,6 +327,18 @@ dependencies = [
  "log",
  "notify",
  "serde",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "fam-svc-audit"
+version = "0.1.0"
+dependencies = [
+ "fam-core",
+ "log",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

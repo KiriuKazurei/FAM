@@ -10,7 +10,7 @@ use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
 use fam_svc_walk::KIND_ORDER;
 use fam_svc_walk::{collect, Cancellation, Entry, Kind, WalkPolicy, WalkReport};
 
-use crate::{ConfigAction, TagAction};
+use crate::{AuditAction, ConfigAction, TagAction};
 
 /// How many hits `search` accumulates unless `--limit` says otherwise. A ceiling rather than none,
 /// because every row is held in memory until it is printed and a root like `D:\` does not run out.
@@ -337,6 +337,69 @@ pub fn stats(config: &Config) -> Result<()> {
         "tags:     {} (manual {} / auto {})",
         stats.tags, stats.manual, stats.auto
     );
+    Ok(())
+}
+
+/// Reading the audit log. This is the only path to it: the ABI writes lines and never reads them,
+/// so an agent that can browse the filesystem cannot ask the tool what it has already browsed.
+///
+/// `tail` and `stats` treat a log that has never been written as empty and succeed, because that is
+/// the state of a fresh install and a script should be able to ask. `verify` does not: a directory
+/// that is gone is one of the things verification exists to notice.
+pub fn audit(config: &Config, action: &AuditAction) -> Result<()> {
+    let directory = config.audit_dir.as_path();
+    match action {
+        AuditAction::Tail { lines } => {
+            let found = match fam_svc_audit::tail(directory, *lines) {
+                Ok(found) => found,
+                Err(fam_svc_audit::Error::Missing { path }) => {
+                    println!("no audit log in {} yet", path.display());
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if found.is_empty() {
+                println!("nothing in {} yet", directory.display());
+            }
+            for line in found {
+                println!("{line}");
+            }
+        }
+        AuditAction::Verify => {
+            let report = fam_svc_audit::verify(directory)?;
+            println!(
+                "{} file(s), {} record(s), {} session(s)",
+                report.files, report.records, report.sessions
+            );
+            for finding in &report.findings {
+                println!("{finding}");
+            }
+            if !report.intact() {
+                // Non-zero, so a tester or a scheduled check can ask the question without reading
+                // prose back.
+                bail!(
+                    "{} finding(s) in the audit log at {}",
+                    report.findings.len(),
+                    directory.display()
+                );
+            }
+            println!("the chain is unbroken and every session sealed its own count");
+        }
+        AuditAction::Stats { top } => {
+            println!("audit directory: {}", directory.display());
+            let summary = match fam_svc_audit::summary(directory, *top) {
+                Ok(summary) => summary,
+                Err(fam_svc_audit::Error::Missing { .. }) => {
+                    println!("no audit log written yet");
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            for line in summary.lines() {
+                println!("{line}");
+            }
+        }
+    }
     Ok(())
 }
 

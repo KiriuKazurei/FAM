@@ -82,6 +82,30 @@ enum Commands {
     },
     /// Report database contents.
     Stats,
+    /// Read the audit log.
+    ///
+    /// The core never exposes this over the ABI, which is the point: whatever can ask the tool for
+    /// files must not also be the only thing that can read what it asked for.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditAction {
+    /// Print the last lines, oldest first.
+    Tail {
+        #[arg(long, short = 'n', default_value_t = 50)]
+        lines: usize,
+    },
+    /// Recompute every hash link and session seal. Exits non-zero when anything disagrees.
+    Verify,
+    /// Sizes, counts, and which paths the log talks about most.
+    Stats {
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -201,5 +225,6 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         ),
         Commands::Watch { dirs, seconds } => commands::watch(&config, dirs, *seconds),
         Commands::Stats => commands::stats(&config),
+        Commands::Audit { action } => commands::audit(&config, action),
     }
 }
