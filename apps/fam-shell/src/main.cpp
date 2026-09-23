@@ -51,10 +51,15 @@ int main(int argc, char *argv[]) {
         QStringLiteral("self-check"),
         QStringLiteral("Render the window, save a screenshot to <path> and exit."),
         QStringLiteral("path"));
+    const QCommandLineOption mutateOption(
+        QStringLiteral("self-check-mutate"),
+        QStringLiteral("With --watch and --self-check: create one file in the watched folder and "
+                       "remove it again, so a re-read happens while a view is open."));
     parser.addOption(configOption);
     parser.addOption(queryOption);
     parser.addOption(watchOption);
     parser.addOption(grabOption);
+    parser.addOption(mutateOption);
     parser.process(app);
 
     /* A windowed executable has no console, so the headless gate would otherwise prove nothing but
@@ -84,11 +89,21 @@ int main(int argc, char *argv[]) {
 
     if (parser.isSet(grabOption)) {
         const QString target = parser.value(grabOption);
+        /* A mutation needs a window wide enough for the core to notice the write time, re-read the
+         * directory and let the shell's 250ms poll see the resync, so the grab moves out with it. */
+        const bool mutate = parser.isSet(mutateOption);
         /* Scroll first, grab a second later: the scroll is what makes every paint ask the icon
          * worker for its extension, and the second is what lets the answers land, so the counters
          * below are read after the code path that could leak an HICON has actually run. */
         QTimer::singleShot(1500, [&window]() { window.scrollForSelfCheck(); });
-        QTimer::singleShot(2500, [&window, &app, &boot, target]() {
+        if (mutate) {
+            QTimer::singleShot(2000, [&window]() { window.createSelfCheckProbe(); });
+            /* Removed well before the grab, not during it: the deletion has to be inside a poll
+             * window, or the run exercises the re-read half of the channel and never the cut half. */
+            QTimer::singleShot(3400, [&window]() { window.removeSelfCheckProbe(); });
+        }
+        const int grabAt = mutate ? 4600 : 2500;
+        QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so
                  * extracted and destroyed can only differ by something that leaked. */
@@ -105,7 +120,7 @@ int main(int argc, char *argv[]) {
             app.quit();
         });
         // Never let a broken render hang a headless run.
-        QTimer::singleShot(8000, [&app]() { app.quit(); });
+        QTimer::singleShot(mutate ? 9000 : 8000, [&app]() { app.quit(); });
     }
 
     if (parser.isSet(watchOption)) {

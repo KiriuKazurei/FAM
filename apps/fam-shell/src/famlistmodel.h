@@ -59,6 +59,19 @@ public:
     /* Cuts one poll reported. Returns the number of row-signal pairs emitted. */
     int applyCuts(const QVector<quint32> &positions);
 
+    /* What a poll said when the rows were replaced by a re-read rather than patched. */
+    struct Reconciled {
+        /* Row-signal pairs spent on the change. */
+        int pairs = 0;
+        /* True when the window could not be reconciled and the view was rebuilt instead - which is
+         * what costs the selection and the scroll position, so the caller logs it. */
+        bool rebuilt = false;
+    };
+
+    /* Adopts a re-read's table without throwing the view away: the rows on screen are diffed against
+     * the rows the core now has, and only what actually differs is announced. */
+    Reconciled reconcile(const FamWindow &window);
+
     /* Rows around `row` are pulled in one fetch; the viewport is what a screenful needs. */
     void setViewport(int rows) { m_viewport = qMax(rows, 16); }
 
@@ -81,6 +94,11 @@ private slots:
 private:
     const FamViewRow *rowAt(int index) const;
     bool fetchAt(int row) const;
+
+    /* Two rows are the same row when everything a delegate paints about them is equal: identity
+     * within the view plus size, time and kind. A file that was only *modified* is therefore not the
+     * same row, and the diff spends a pair on it instead of leaving a stale number on screen. */
+    static bool sameRow(const FamViewRow &left, const FamViewRow &right);
 
     QString m_directory;
     QStringList m_kinds;

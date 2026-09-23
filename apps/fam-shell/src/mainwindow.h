@@ -37,6 +37,14 @@ public:
      * read: a leak is only visible after the code path has actually run. */
     void scrollForSelfCheck();
 
+    /* One file in, one file out, on the folder the self-check is watching. Creating it is what makes
+     * the core's reconciled re-read happen while a view is open, which is the only way the shell's
+     * reconcile path gets run in a headless gate - and it has to be driven from inside the process,
+     * because a harness that creates the file from outside cannot tell whether the run is still
+     * alive. Opt-in: nothing writes into a folder the user pointed at unless asked. */
+    void createSelfCheckProbe();
+    void removeSelfCheckProbe();
+
 private slots:
     void runSearch();
     void pollChanges();
@@ -62,6 +70,8 @@ private:
     quint64 m_searchToken = 0;
     bool m_searchRunning = false;
     QString m_directory;
+    /* Set while the opt-in self-check mutation is in the watched folder, so it can be undone. */
+    QString m_probe;
     FamWindow m_head;
     /* Everything the shell does after this point is measured against it, so the headless log can say
      * how long a folder took to show rather than leaving that to be guessed from a screenshot. */

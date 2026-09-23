@@ -252,12 +252,19 @@ void MainWindow::pollChanges() {
         return;
     }
     if (polled.resync()) {
-        /* Rows were replaced rather than patched, so positions mean nothing: repaint from the top. */
-        m_model->readHead(polled);
+        /* Rows were replaced rather than patched. That used to mean "throw the view away"; now it
+         * means "diff the window you have against the window the core just built", because a reset
+         * costs the selection and the scroll position and a re-read of a folder where one file
+         * appeared does not deserve that. The line is what the headless gate reads: `rebuilt` is the
+         * fallback, and a run that only ever says `rebuilt` has not reconciled anything. */
+        const auto outcome = m_model->reconcile(polled);
         m_head = polled;
-        setStatus(QStringLiteral("%1 · %2 row(s) · rebuilt after a re-read")
+        qInfo("re-read reconciled in %d pair(s), %u row(s) left, %s", outcome.pairs,
+              m_model->totalRows(),
+              outcome.rebuilt ? "window rebuilt" : "selection kept");
+        setStatus(QStringLiteral("%1 · %2 row(s) · re-read")
                       .arg(QDir::toNativeSeparators(m_directory))
-                      .arg(polled.totalRows));
+                      .arg(m_model->totalRows()));
         return;
     }
     /* Timed on its own clock because the number the gate wants is "how long did the view wait for
@@ -391,4 +398,31 @@ void MainWindow::scrollForSelfCheck() {
     QCoreApplication::processEvents();
     m_list->viewport()->repaint();
     qInfo("self-check scrolled a %d-step range, ended at %d", max, bar->value());
+}
+
+void MainWindow::createSelfCheckProbe() {
+    if (m_dirToken == 0 || m_directory.isEmpty()) {
+        qWarning("self-check mutation asked for without a watched folder");
+        return;
+    }
+    m_probe = QDir(m_directory).filePath(QStringLiteral("fam-self-check-probe.txt"));
+    QFile file(m_probe);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        qWarning("self-check could not create %s: %s", qUtf8Printable(m_probe),
+                 qUtf8Printable(file.errorString()));
+        m_probe.clear();
+        return;
+    }
+    file.write("probe");
+    file.close();
+    qInfo("self-check created %s", qUtf8Printable(QDir::toNativeSeparators(m_probe)));
+}
+
+void MainWindow::removeSelfCheckProbe() {
+    if (m_probe.isEmpty()) {
+        return;
+    }
+    const bool gone = QFile::remove(m_probe);
+    qInfo("self-check removed the probe: %s", gone ? "yes" : "no");
+    m_probe.clear();
 }

@@ -243,3 +243,110 @@ int FamListModel::applyCuts(const QVector<quint32> &positions) {
     m_rows.clear();
     return pairs;
 }
+
+bool FamListModel::sameRow(const FamViewRow &left, const FamViewRow &right) {
+    return left.name == right.name && left.path == right.path && left.size == right.size &&
+           left.modifiedMs == right.modifiedMs && left.kind == right.kind &&
+           left.directory == right.directory && left.attrs == right.attrs;
+}
+
+FamListModel::Reconciled FamListModel::reconcile(const FamWindow &window) {
+    Reconciled outcome;
+    const int oldTotal = int(m_total);
+    const int newTotal = int(window.totalRows);
+    /* A window that was never materialised has nothing on screen to preserve, and a view whose rows
+     * are gone entirely is better served by the plain path. */
+    auto rebuild = [&]() {
+        readHead(window);
+        outcome.rebuilt = true;
+        return outcome;
+    };
+    if (m_first < 0 || m_rows.isEmpty() || m_fetch == nullptr || newTotal == 0) {
+        return rebuild();
+    }
+
+    const int count = qMin(m_viewport, newTotal);
+    const int first = qBound(0, m_first, qMax(0, newTotal - count));
+    /* The window's own start moving is a shift of everything below it rather than a difference
+     * inside it: the two halves of the diff would then describe two different tables. */
+    if (first != m_first) {
+        return rebuild();
+    }
+    FamWindow fresh;
+    if (!m_fetch(quint32(first), quint32(count), &fresh) ||
+        int(fresh.totalRows) != newTotal) {
+        /* The core moved again between the poll and this fetch. Reconciling against a table that is
+         * already history is how a model ends up lying about its own row count. */
+        return rebuild();
+    }
+    const QVector<FamViewRow> before = m_rows;
+    const QVector<FamViewRow> &after = fresh.rows;
+
+    /* Everything that differs sits between a common prefix and a common suffix - which is exactly
+     * what a re-read of a sorted table does to a window: a new row lands in one place, and a row
+     * that only got bigger is not the same row (see `sameRow`). */
+    int prefix = 0;
+    while (prefix < before.size() && prefix < after.size() &&
+           sameRow(before.at(prefix), after.at(prefix))) {
+        ++prefix;
+    }
+    int suffix = 0;
+    while (suffix < before.size() - prefix && suffix < after.size() - prefix &&
+           sameRow(before.at(before.size() - 1 - suffix), after.at(after.size() - 1 - suffix))) {
+        ++suffix;
+    }
+    const int gone = before.size() - prefix - suffix;
+    const int arrived = after.size() - prefix - suffix;
+    /* Rows outside the window changed too - that is what moves the total - and `rowCount` answers
+     * with the whole view, so the remainder has to be announced somewhere. The end of the model is
+     * where no delegate is painting. */
+    const int outside = (newTotal - oldTotal) - (arrived - gone);
+    const int tailAfterGone = oldTotal - gone;
+    if (gone < 0 || arrived < 0 || first + before.size() > oldTotal ||
+        (outside < 0 && first + prefix + suffix > tailAfterGone + outside)) {
+        /* The tail removal would reach into the window, which means the diff and the arithmetic are
+         * describing different rows. Rare enough to hand back to a rebuild rather than to reason
+         * about here. */
+        return rebuild();
+    }
+
+    int pairs = 0;
+    if (gone > 0) {
+        beginRemoveRows(QModelIndex(), first + prefix, first + prefix + gone - 1);
+        m_rows = before.mid(0, prefix) + before.mid(before.size() - suffix);
+        m_total = quint32(tailAfterGone);
+        endRemoveRows();
+        ++pairs;
+    }
+    if (outside < 0) {
+        const int at = tailAfterGone + outside;
+        beginRemoveRows(QModelIndex(), at, tailAfterGone - 1);
+        m_total = quint32(at);
+        endRemoveRows();
+        ++pairs;
+    }
+    if (outside > 0) {
+        const int at = int(m_total);
+        beginInsertRows(QModelIndex(), at, at + outside - 1);
+        m_total = quint32(at + outside);
+        endInsertRows();
+        ++pairs;
+    }
+    if (arrived > 0) {
+        const int at = first + prefix;
+        beginInsertRows(QModelIndex(), at, at + arrived - 1);
+        m_rows = QVector<FamViewRow>(m_rows.constBegin(), m_rows.constBegin() + prefix) +
+                 after.mid(prefix, arrived) +
+                 QVector<FamViewRow>(m_rows.constBegin() + prefix, m_rows.constEnd());
+        m_total = quint32(int(m_total) + arrived);
+        endInsertRows();
+        ++pairs;
+    }
+    /* Whatever the ranges were, the window now holds what the core just handed over, and the count
+     * has to land on the header's number: the pairs above are only a bridge to it. */
+    m_rows = after;
+    m_total = window.totalRows;
+    m_state = window.state;
+    outcome.pairs = pairs;
+    return outcome;
+}
