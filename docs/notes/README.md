@@ -47,3 +47,4 @@
 | [shell-icons-never-open-a-path.md](shell-icons-never-open-a-path.md) | 7 | 壳的图标层：第一层每行一次哈希（`SHGFI_USEFILEATTRIBUTES` 不打开路径），第二层仅白名单走真实路径；STA worker 上 `HICON→QImage→DestroyIcon`，重画只打物化窗口。闸门是提取/销毁计数相等（9/9/9 两次复现） |
 | [increment-7-review-findings.md](increment-7-review-findings.md) | 7 复查 | 图标层的账：修 4 处（第二层键无上限会随目录长、`SHGetFileInfoW` 返回值没查会把错 glyph 缓存到进程结束、一段说反了实测结论的注释、闸门缺"worker 空闲"的证据），驳回零条，7 处不修并标归属（含增量 8 必须同时上 `SizeHintRole` 这条约束） |
 | [watched-folders-never-showed-new-files.md](watched-folders-never-showed-new-files.md) | 8a-1 | 打开的目录里新文件永远不出现：事件放不下新行、对账又因"事件已解释"不再重扫、没人替 stale 的表约读——旧测试还把"要重开一次"写成了契约。核心去约那次读（测试去掉修复就等满 10s 才输），壳把随之到来的 resync 摊成 1 对信号而不是扔掉整屏 |
+| [increment-8a-search-and-states-wired.md](increment-8a-search-and-states-wired.md) | 8a | 五种状态各配一句人话（`EMPTY` 是"没读过"不是"是空的"）、`available` 每次搜索重读、搜索不再关目录且作用域明说（改成悄悄收窄是回归）、壳侧 IPC 计数 `retries=0`；日志顺手抓出一个"一个变量服务两个 token"的别名 bug |
