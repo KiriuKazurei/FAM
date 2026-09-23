@@ -26,6 +26,8 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 
 工程处于**资源管理器重建**之中：浏览与搜索都已改为懒目录索引 + 流式虚拟化，
 名字检索按"能答全才问"在 Everything 与遍历之间路由，两者共用同一套范围规则。
+界面已经是 Miller 列：一列一个目录、一个 v2 token、一个模型，列头按列各管各的排序，
+左侧是驱动器栏；每行的 shell 图标走"扩展名→系统图像列表"，不在绘制路径上打开任何路径。
 旧栈的规格见 `docs/legacy-specs.md`，逐增量的取舍见 `docs/notes/`。
 
 #### 构建
@@ -54,6 +56,19 @@ cmake -S apps/fam-shell -B apps/fam-shell/build -G Ninja \
   -DFAMCORE_DLL=target/x86_64-pc-windows-gnu/debug/famcore.dll
 cmake --build apps/fam-shell/build
 ```
+
+跑起来需要三份运行时同时在 PATH 上：Qt 的、MinGW 的、以及放着 `famcore.dll` 的 GNU 产物目录。
+**目前既没有 `install()` 目标也没有 windeployqt 步骤**，这是把原型交给别人试之前还差的一件事：
+
+```bash
+PATH="<Qt>/6.11.2/mingw_64/bin:<Qt>/Tools/mingw1310_64/bin:target/x86_64-pc-windows-gnu/debug" \
+  apps/fam-shell/build/fam-shell.exe --watch <目录> --self-check <截图.png> --self-check-mutate
+```
+
+`--self-check` 是无头闸门：渲染窗口、写截图与同名 `.log` 然后退出。加上
+`--self-check-mutate` 会**在 `--watch` 那个目录里创建一个文件再删掉**，
+用来跑"新建 → 重读 → 按窗口 diff"与"删除 → 剪裁"两条通道，并把图标的提取/销毁计数
+与 IPC 调用计数打进日志——这两个计数就是"无 HICON 泄漏"和"轮询不贵"的读数形式。
 
 抓界面截图验证时用原生 `windows` 平台插件——`QT_QPA_PLATFORM=offscreen` 没有字体库，
 所有字形（含 ASCII）都会渲染成豆腐块。

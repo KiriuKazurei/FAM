@@ -19,8 +19,11 @@ and the floor gate), `apps/fam-cli` and `apps/fam-shell` (Qt6 Widgets).
 
 The rebuild is under way: browsing and search both run on the lazy directory index with streamed,
 virtualised results, and a name search is routed between Everything and enumeration by which of them
-can answer the whole request - under one shared set of scope rules. `docs/legacy-specs.md` records
-what the old system was; `docs/notes/` records what each increment decided.
+can answer the whole request - under one shared set of scope rules. The interface is now Miller
+columns: one directory, one v2 token and one model per column, a per-column sort control, and a drive
+sidebar; each row's shell icon is resolved from its extension, so no paint ever opens a path.
+`docs/legacy-specs.md` records what the old system was; `docs/notes/` records what each increment
+decided.
 
 #### Build
 The CLI and tests use the default toolchain:
@@ -41,6 +44,21 @@ cargo +stable-x86_64-pc-windows-gnu build -p fam-ffi --target x86_64-pc-windows-
 
 For UI screenshots use the native `windows` platform plugin: `QT_QPA_PLATFORM=offscreen` has no
 font database, so every glyph including ASCII renders as a tofu box.
+
+Running the shell needs three runtimes on PATH at once - Qt's, MinGW's, and the GNU target directory
+holding `famcore.dll`. There is **no `install()` target and no windeployqt step yet**, which is the
+main thing still between this build and handing a prototype to somebody else:
+
+```bash
+PATH="<Qt>/6.11.2/mingw_64/bin:<Qt>/Tools/mingw1310_64/bin:target/x86_64-pc-windows-gnu/debug" \
+  apps/fam-shell/build/fam-shell.exe --watch <dir> --self-check <shot.png> --self-check-mutate
+```
+
+`--self-check` is the headless gate: it renders the window, writes a screenshot and a `.log` beside
+it, and exits. `--self-check-mutate` additionally **creates and then deletes a file inside the
+watched directory**, so the "new file -> reconciled re-read -> windowed diff" and "deletion -> cut"
+channels both run in one pass, and the log carries the icon extract/destroy counts and the IPC call
+counts - those numbers are what "no HICON leak" and "a poll is cheap" mean in practice.
 
 #### Software Architecture (the legacy system, as it was before the rebuild)
 
