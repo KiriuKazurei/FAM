@@ -30,6 +30,7 @@ add_executable(fam-shell WIN32
     src/mainwindow.cpp
     src/bridge.cpp
     src/famlistmodel.cpp
+    src/columnchain.cpp
     src/iconcache.cpp)
 target_include_directories(fam-shell PRIVATE include src)
 # The icon layer talks to the shell's image lists directly: shell32 for SHGetFileInfoW and

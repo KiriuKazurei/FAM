@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "bridge.h"
+#include "columnchain.h"
 #include "famlistmodel.h"
 
 class IconCache;
@@ -14,6 +15,7 @@ class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListView;
+class QStackedWidget;
 class QTimer;
 
 class MainWindow final : public QWidget {
@@ -37,9 +39,9 @@ public:
         return m_bridge != nullptr ? m_bridge->ipcCount() : FamIpcCount();
     }
 
-    /* Drives the list through several viewports and lets the paints settle. The headless gate uses
-     * it to make the icon worker touch every extension in a folder before the HICON counters are
-     * read: a leak is only visible after the code path has actually run. */
+    /* Drives the deepest column through several viewports and lets the paints settle. The headless
+     * gate uses it to make the icon worker touch every extension in a folder before the HICON
+     * counters are read: a leak is only visible after the code path has actually run. */
     void scrollForSelfCheck();
 
     /* One file in, one file out, on the folder the self-check is watching. Creating it is what makes
@@ -50,45 +52,56 @@ public:
     void createSelfCheckProbe();
     void removeSelfCheckProbe();
 
-    /* The search box, driven from the headless timeline: starting a search while a folder is open is
-     * the path that used to close the folder, and clearing the box is the only way back. Neither
-     * happens on its own in a run that has no hands on the keyboard. */
+    /* The search box, driven from the headless timeline: starting a search while a folder is open,
+     * and clearing the box to go back, are the two transitions a run with no hands on the keyboard
+     * would otherwise never take. */
     void runSelfCheckSearch(const QString &terms);
     void clearSelfCheckSearch();
+
+    /* Picks the first folder in the deepest column, which is what makes a second column appear. */
+    void descendForSelfCheck();
+
+    /* Clicks the deepest column's sort control once. */
+    void sortDeepestForSelfCheck();
+
+protected:
+    /* Unhandled key events reach here: Backspace and Alt+Left go up one column. */
+    void keyPressEvent(QKeyEvent *event) override;
 
 private slots:
     void runSearch();
     void pollChanges();
     void openFolderDialog();
     void tagSelectedFile();
-    /* Putting the folder back on screen: a search no longer closes the directory it was started in,
-     * so clearing the box is what returns to it. */
+    /* Putting the folder back on screen: a search no longer closes the columns it was started in, so
+     * clearing the box is what returns to them. */
     void showFolder();
 
 private:
     void setStatus(const QString &text);
-    /* The two things the one model can be showing. Each binds itself to its token and takes the
-     * header with it, so switching between them is one call from either side. */
-    void bindFolderView(QString *error);
-    void bindResultsView(QString *error);
-    /* The folder's poll. `ownsModel` is false while search results are on screen: the cuts are still
-     * drained - a view nobody polls queues them forever - but the model is not told to cut rows it is
-     * not showing. */
-    void pollFolder(bool ownsModel);
     /* One place words a directory header. The states are opposite claims that used to render the
-     * same: a folder with nothing in it, a folder nobody has asked to read, and a folder that
-     * refuses to be read (an ACL, a deleted path, a dead UNC share) all looked like a live, empty
-     * listing. */
-    QString folderStatus(const FamWindow &head, const QString &extra = QString()) const;
+     * same: a folder with nothing in it, a folder nobody has asked to read, and a folder that refuses
+     * to be read (an ACL, a deleted path, a dead UNC share) all looked like a live, empty listing. */
+    QString folderStatus(const QString &directory, const FamWindow &head,
+                         const QString &extra = QString()) const;
     /* What a name search can answer with right now. Re-read rather than remembered: the index
      * backend's state is probed on the core's own thread and can change while the window is open. */
     QString searchBackendNote();
     /* One poll of a search that is still running: its row count grows, and when it stops growing the
      * rows are re-sorted, which is the last thing the model has to hear about. */
     void pollSearch();
+    void showResults();
+    void refreshScopeAvailability();
+    QString deepestFolder() const { return m_chain->deepestPath(); }
 
     std::unique_ptr<FamBridge> m_bridge;
-    FamListModel *m_model = nullptr;
+    /* The Miller columns. Owns one v2 token and one model per directory it shows. */
+    ColumnChain *m_chain = nullptr;
+    /* Search results get their own list and model rather than borrowing a column's: the columns stay
+     * open and polled behind them, which is what makes returning a page flip instead of a re-read. */
+    QListView *m_results = nullptr;
+    FamListModel *m_resultsModel = nullptr;
+    QStackedWidget *m_pages = nullptr;
     IconCache *m_icons = nullptr;
     QLineEdit *m_search = nullptr;
     QComboBox *m_kind = nullptr;
@@ -96,23 +109,16 @@ private:
      * "search here" would be the only thing a search could do once a folder was open - and the
      * previous build could only search everywhere, so either one alone is a regression. */
     QComboBox *m_scope = nullptr;
-    QListView *m_list = nullptr;
     QLabel *m_status = nullptr;
     QTimer *m_timer = nullptr;
     QStringList m_kinds;
     QStringList m_backends;
     QStringList m_available;
-    quint64 m_dirToken = 0;
     quint64 m_searchToken = 0;
     bool m_searchRunning = false;
-    QString m_directory;
+    FamWindow m_resultsHead;
     /* Set while the opt-in self-check mutation is in the watched folder, so it can be undone. */
     QString m_probe;
-    /* One header per token, because both are polled on the same beat and neither is the other's
-     * "before": sharing one variable made the folder's change log compare against a result set's
-     * row count, which is how "folder changed behind the results: 0 -> 127" got printed. */
-    FamWindow m_folderHead;
-    FamWindow m_resultsHead;
     /* Everything the shell does after this point is measured against it, so the headless log can say
      * how long a folder took to show rather than leaving that to be guessed from a screenshot. */
     QElapsedTimer m_clock;

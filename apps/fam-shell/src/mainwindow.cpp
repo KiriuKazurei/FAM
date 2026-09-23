@@ -4,15 +4,18 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListView>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QStackedWidget>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -37,11 +40,9 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
      * them the backends it has and which can answer now. */
     m_bridge->coreBackends(&m_kinds, &m_backends, &m_available, &error);
 
-    m_model = new FamListModel(this);
-    /* The icon layer outlives every view and is shared by all of them: one worker thread, one
+    /* The icon layer outlives every column and is shared by all of them: one worker thread, one
      * extension table, one cache. */
     m_icons = new IconCache(this);
-    m_model->setIconCache(m_icons);
 
     m_search = new QLineEdit(this);
     m_search->setPlaceholderText(QStringLiteral("name terms — every word must appear"));
@@ -56,8 +57,7 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     m_scope = new QComboBox(this);
     m_scope->addItem(QStringLiteral("this folder"), true);
     m_scope->addItem(QStringLiteral("every root"), false);
-    /* Meaningless until a folder is on screen; `bindFolderView` and `showFolder` are where it lights
-     * up, so the control cannot disagree with what the window is actually showing. */
+    /* Meaningless until a column is on screen, so it cannot disagree with what is showing. */
     m_scope->setEnabled(false);
 
     auto *searchButton = new QPushButton(QStringLiteral("Search"), this);
@@ -72,24 +72,34 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     controls->addWidget(openButton);
     controls->addWidget(tagButton);
 
-    m_list = new QListView(this);
-    m_list->setModel(m_model);
-    m_list->setUniformItemSizes(true);
-    m_list->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_chain = new ColumnChain(m_bridge.get(), m_icons, m_kinds, this);
+
+    m_resultsModel = new FamListModel(this);
+    m_resultsModel->setIconCache(m_icons);
+    m_results = new QListView(this);
+    m_results->setModel(m_resultsModel);
+    m_results->setUniformItemSizes(true);
+    m_results->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_results->setResizeMode(QListView::Adjust);
+
+    /* Two pages, not one model wearing two hats: the columns stay live behind the results, so coming
+     * back from a search is a page flip rather than a re-read of every folder in the chain. */
+    m_pages = new QStackedWidget(this);
+    m_pages->addWidget(m_chain);
+    m_pages->addWidget(m_results);
 
     m_status = new QLabel(this);
     m_status->setWordWrap(true);
 
     auto *layout = new QVBoxLayout(this);
     layout->addLayout(controls);
-    layout->addWidget(m_list, 1);
+    layout->addWidget(m_pages, 1);
     layout->addWidget(m_status);
     setLayout(layout);
 
     connect(searchButton, &QPushButton::clicked, this, &MainWindow::runSearch);
     connect(m_search, &QLineEdit::returnPressed, this, &MainWindow::runSearch);
-    /* Emptying the box is "stop searching", not "search for nothing": the folder that was on screen
-     * before the results is still open and watched, so it comes back rather than being re-read. */
+    /* Emptying the box is "stop searching", not "search for nothing". */
     connect(m_search, &QLineEdit::textChanged, this, [this](const QString &text) {
         if (text.isEmpty()) {
             showFolder();
@@ -130,10 +140,10 @@ MainWindow::~MainWindow() {
     if (m_bridge == nullptr) {
         return;
     }
-    if (m_dirToken != 0) {
-        m_bridge->closeDir(m_dirToken);
-        m_dirToken = 0;
-    }
+    /* The chain closes the directories it holds, and that has to happen here rather than in its own
+     * destructor: a QObject child is destroyed after this class's members, and `m_bridge` owns the
+     * handle those calls need. Same reason for the search token. */
+    m_chain->clear();
     if (m_searchToken != 0) {
         m_bridge->closeSearch(m_searchToken);
         m_searchToken = 0;
@@ -145,77 +155,30 @@ bool MainWindow::openFolder(const QString &dir, QString *error) {
         *error = QStringLiteral("core unavailable");
         return false;
     }
-    quint64 token = 0;
-    if (!m_bridge->openDir(dir, &token, error)) {
+    if (!m_chain->openRoot(dir)) {
+        *error = QStringLiteral("cannot open %1").arg(QDir::toNativeSeparators(dir));
         return false;
     }
-    if (m_dirToken != 0) {
-        m_bridge->closeDir(m_dirToken);
-    }
-    m_dirToken = token;
-    m_directory = dir;
     if (m_searchToken != 0) {
-        /* The model is about to be bound to the folder, so the search's rows are no longer on screen
-         * and its token has nobody left to page them. */
+        /* A folder on screen replaces the results, and the search that produced them is cancelled
+         * rather than left running to fill a token nobody pages any more. */
         m_bridge->cancelSearch(m_searchToken);
         m_bridge->closeSearch(m_searchToken);
         m_searchToken = 0;
         m_searchRunning = false;
     }
-    bindFolderView(error);
+    m_pages->setCurrentWidget(m_chain);
+    refreshScopeAvailability();
+    const FamWindow head = m_chain->deepestHead();
+    qInfo("folder on screen: %s at %lldms: state=%u total=%u generation=%llu",
+          qUtf8Printable(QDir::toNativeSeparators(dir)), m_clock.elapsed(), head.state,
+          head.totalRows, head.generation);
+    setStatus(folderStatus(dir, head, QStringLiteral("following changes")));
     return true;
 }
 
-void MainWindow::bindFolderView(QString *error) {
-    m_scope->setEnabled(true);
-    FamWindow head;
-    m_bridge->dirStatus(m_dirToken, &head, error);
-    const QStringList kinds = m_kinds;
-    const quint64 token = m_dirToken;
-    FamBridge *bridge = m_bridge.get();
-    /* Painting pulls rows. The call behind this copies a bounded window out of the cache, so a
-     * 78k-entry folder costs a viewport per frame and never waits on the filesystem. */
-    m_model->bind(token, m_directory, kinds,
-                  [bridge, token](quint32 first, quint32 count, FamWindow *window) {
-                      return bridge->dirFetch(token, first, count, window, nullptr);
-                  });
-    /* Events that arrived between opening and binding were folded into the rows before this model
-     * ever displayed them; their positions describe a view nobody had, so they are discarded here
-     * rather than replayed against the wrong starting point. */
-    QVector<quint32> missed;
-    FamWindow drained;
-    m_bridge->dirCuts(token, &drained, &missed, nullptr);
-    m_bridge->dirStatus(token, &head, error);
-    m_folderHead = head;
-    m_model->readHead(head);
-    qInfo("folder on screen: %s at %lldms: state=%u total=%u generation=%llu",
-          qUtf8Printable(m_directory), m_clock.elapsed(), head.state, head.totalRows,
-          head.generation);
-    setStatus(folderStatus(head, QStringLiteral("following changes")));
-}
-
-void MainWindow::showFolder() {
-    if (m_bridge == nullptr || m_searchToken == 0) {
-        return;
-    }
-    m_bridge->cancelSearch(m_searchToken);
-    m_bridge->closeSearch(m_searchToken);
-    m_searchToken = 0;
-    m_searchRunning = false;
-    QString error;
-    if (m_dirToken == 0) {
-        /* Nothing to go back to: the results were a global search, and clearing the box leaves an
-         * empty view rather than a stale result set nobody is polling any more. */
-        m_scope->setEnabled(false);
-        m_model->unbind();
-        setStatus(QStringLiteral("type a name to search"));
-        return;
-    }
-    bindFolderView(&error);
-}
-
 void MainWindow::openFolderDialog() {
-    const QString start = m_directory.isEmpty() ? QDir::homePath() : m_directory;
+    const QString start = m_chain->isEmpty() ? QDir::homePath() : m_chain->deepestPath();
     const QString dir =
         QFileDialog::getExistingDirectory(this, QStringLiteral("Open folder"), start);
     if (dir.isEmpty()) {
@@ -227,16 +190,46 @@ void MainWindow::openFolderDialog() {
     }
 }
 
+void MainWindow::showFolder() {
+    if (m_bridge == nullptr || m_searchToken == 0) {
+        return;
+    }
+    m_bridge->cancelSearch(m_searchToken);
+    m_bridge->closeSearch(m_searchToken);
+    m_searchToken = 0;
+    m_searchRunning = false;
+    if (m_chain->isEmpty()) {
+        /* Nothing to go back to: the results were a search over every root, and clearing the box
+         * leaves an empty view rather than a result set nobody is paging. */
+        m_resultsModel->unbind();
+        setStatus(QStringLiteral("type a name to search"));
+        return;
+    }
+    m_pages->setCurrentWidget(m_chain);
+    refreshScopeAvailability();
+    setStatus(folderStatus(m_chain->deepestPath(), m_chain->deepestHead(),
+                           QStringLiteral("following changes")));
+}
+
+void MainWindow::showResults() {
+    m_pages->setCurrentWidget(m_results);
+    refreshScopeAvailability();
+}
+
+void MainWindow::refreshScopeAvailability() {
+    m_scope->setEnabled(!m_chain->isEmpty());
+}
+
 void MainWindow::runSearch() {
     if (m_bridge == nullptr) {
         return;
     }
     QString error;
     const QString kind = m_kind->currentData().toString();
-    /* The scope is the operator's, not a guess of mine: "here" is what a person means after opening
-     * a folder, and "everywhere" is what the same box used to always mean. */
-    const bool here = m_dirToken != 0 && m_scope->currentData().toBool();
-    const QString within = here ? m_directory : QString();
+    /* The scope is the operator's, not a guess: "here" is what a person means after opening a folder,
+     * and "everywhere" is what this box used to always mean. Either one alone is a regression. */
+    const bool here = !m_chain->isEmpty() && m_scope->currentData().toBool();
+    const QString within = here ? m_chain->deepestPath() : QString();
     quint64 token = 0;
     if (!m_bridge->beginSearch(m_search->text(), within, kind, 0, &token, &error)) {
         setStatus(error);
@@ -247,35 +240,29 @@ void MainWindow::runSearch() {
     }
     m_searchToken = token;
     m_searchRunning = true;
-    /* The folder stays open. It is what this search is scoped to, it is what clearing the box returns
-     * to, and its watch keeps running so the rows are current on the way back - where closing it used
-     * to throw the read away with the view. */
-    bindResultsView(&error);
-}
 
-void MainWindow::bindResultsView(QString *error) {
-    const quint64 token = m_searchToken;
+    const quint64 held = token;
     FamBridge *bridge = m_bridge.get();
-    /* The same windowed fetch a directory gets, against a token whose rows are still arriving: the
-     * model asks for a viewport, and the core answers with the prefix it has. */
-    m_model->bind(token, QString(), m_kinds,
-                  [bridge, token](quint32 first, quint32 count, FamWindow *window) {
-                      return bridge->searchPage(token, first, count, window, nullptr);
-                  });
+    /* The same windowed fetch a column gets, against a token whose rows are still arriving: the model
+     * asks for a viewport, and the core answers with the prefix it has. */
+    m_resultsModel->bind(token, QString(), m_kinds,
+                         [bridge, held](quint32 first, quint32 count, FamWindow *window) {
+                             return bridge->searchPage(held, first, count, window, nullptr);
+                         });
     FamWindow head;
-    if (!m_bridge->searchStatus(token, &head, error)) {
-        setStatus(*error);
+    if (!m_bridge->searchStatus(token, &head, &error)) {
+        setStatus(error);
         return;
     }
     m_resultsHead = head;
-    m_model->readHead(head);
-    /* The line says which scope was actually asked for, because a search that quietly narrowed
-     * itself is indistinguishable from one that found nothing elsewhere. */
-    const bool scoped = m_dirToken != 0 && m_scope->currentData().toBool();
+    m_resultsModel->readHead(head);
+    showResults();
+    /* The line says which scope was actually asked for, because a search that quietly narrowed itself
+     * is indistinguishable from one that found nothing elsewhere. */
     qInfo("search for %s in %s queued at %lldms: state=%u total=%u",
           qUtf8Printable(m_search->text()),
-          scoped ? qUtf8Printable(QDir::toNativeSeparators(m_directory))
-                 : qUtf8Printable(QStringLiteral("every configured root")),
+          here ? qUtf8Printable(QDir::toNativeSeparators(within))
+               : qUtf8Printable(QStringLiteral("every configured root")),
           m_clock.elapsed(), head.state, head.totalRows);
     setStatus(QStringLiteral("searching for %1").arg(m_search->text()));
 }
@@ -284,82 +271,15 @@ void MainWindow::pollChanges() {
     if (m_bridge == nullptr) {
         return;
     }
-    /* Both tokens are served on every beat. The folder's cuts are drained even while results are on
-     * screen, because a view nobody polls queues them for as long as it lives; the model only hears
-     * about the one it is showing. */
-    if (m_dirToken != 0) {
-        pollFolder(m_searchToken == 0);
+    /* Both halves are served on every beat. The columns are polled even while results are on screen,
+     * because a view nobody drains queues its cut positions for as long as it lives. */
+    const QString changed = m_chain->poll();
+    if (!changed.isEmpty() && m_pages->currentWidget() == m_chain) {
+        setStatus(folderStatus(m_chain->deepestPath(), m_chain->deepestHead(), changed));
     }
     if (m_searchToken != 0 && m_searchRunning) {
         pollSearch();
     }
-}
-
-void MainWindow::pollFolder(bool ownsModel) {
-    QString error;
-    /* The poll first, and its header second: the positions it hands over are relative to the rows
-     * as they were *before* the patch they came from, while its header already counts that patch
-     * in. Reading the status first would apply the same change twice - the row count drops to zero
-     * under a list that is still displaying rows. */
-    const FamWindow previous = m_folderHead;
-    QVector<quint32> cuts;
-    FamWindow polled;
-    if (!m_bridge->dirCuts(m_dirToken, &polled, &cuts, &error)) {
-        setStatus(error);
-        return;
-    }
-    if (!ownsModel) {
-        /* Results are on screen, so the model must not be told about this folder's rows - but the
-         * cuts were just drained and the header adopted, which is what keeps the view current for
-         * the moment the box is cleared. */
-        if (polled.totalRows != previous.totalRows) {
-            qInfo("folder changed behind the results: %u -> %u row(s), state=%u",
-                  previous.totalRows, polled.totalRows, polled.state);
-        }
-        m_folderHead = polled;
-        return;
-    }
-    if (polled.resync()) {
-        /* Rows were replaced rather than patched. That used to mean "throw the view away"; now it
-         * means "diff the window you have against the window the core just built", because a reset
-         * costs the selection and the scroll position and a re-read of a folder where one file
-         * appeared does not deserve that. The line is what the headless gate reads: `rebuilt` is the
-         * fallback, and a run that only ever says `rebuilt` has not reconciled anything. */
-        const auto outcome = m_model->reconcile(polled);
-        m_folderHead = polled;
-        qInfo("re-read reconciled in %d pair(s), %u row(s) left, %s", outcome.pairs,
-              m_model->totalRows(),
-              outcome.rebuilt ? "window rebuilt" : "selection kept");
-        setStatus(folderStatus(polled, QStringLiteral("re-read")));
-        return;
-    }
-    /* Timed on its own clock because the number the gate wants is "how long did the view wait for
-     * these signals", which the process-elapsed figure in the line below cannot answer. */
-    QElapsedTimer applied;
-    applied.start();
-    const int pairs = m_model->applyCuts(cuts);
-    const qint64 cutMs = applied.elapsed();
-    /* Always agree the count with the header, cuts or none: a poll that carried nothing can still be
-     * the first moment the loader's rows exist, and the model has to hear about that from somewhere.
-     * After a batch of cuts the two already match, so this is a no-op. */
-    m_model->readHead(polled);
-    m_folderHead = polled;
-    if (polled.totalRows != previous.totalRows) {
-        qInfo("rows %u -> %u with %d cut(s) at %lldms, state=%u generation=%llu",
-              previous.totalRows, polled.totalRows, cuts.size(), m_clock.elapsed(), polled.state,
-              polled.generation);
-    }
-    if (!cuts.isEmpty()) {
-        /* The headless gate reads this: a cut that reached the model is the whole point of the delta
-         * channel, and a screenshot alone cannot tell it apart from a repaint that refetched. */
-        qInfo("cut %d position(s) in %d signal pair(s) in %lldms, %u row(s) left", cuts.size(),
-              pairs, cutMs, m_model->totalRows());
-    }
-    setStatus(folderStatus(polled, cuts.isEmpty()
-                                         ? QString()
-                                         : QStringLiteral("%1 row(s) removed in %2 signal(s)")
-                                               .arg(cuts.size())
-                                               .arg(pairs)));
 }
 
 void MainWindow::pollSearch() {
@@ -370,11 +290,11 @@ void MainWindow::pollSearch() {
         setStatus(error);
         return;
     }
-    m_model->readHead(polled);
+    m_resultsModel->readHead(polled);
     m_resultsHead = polled;
     if (polled.state == FAM_LOADING) {
         setStatus(QStringLiteral("%1 row(s) for %2 · still searching")
-                      .arg(m_model->totalRows())
+                      .arg(m_resultsModel->totalRows())
                       .arg(m_search->text()));
         return;
     }
@@ -390,54 +310,15 @@ void MainWindow::pollSearch() {
     qInfo("search settled at %lldms: %u row(s)%s%s", m_clock.elapsed(), polled.totalRows,
           qUtf8Printable(why), qUtf8Printable(backend));
     setStatus(QStringLiteral("%1 row(s) for %2%3%4")
-                  .arg(m_model->totalRows())
+                  .arg(m_resultsModel->totalRows())
                   .arg(m_search->text())
                   .arg(why, backend));
 }
 
-void MainWindow::tagSelectedFile() {
-    if (m_bridge == nullptr || m_list->selectionModel() == nullptr) {
-        return;
-    }
-    const QString path = m_model->pathAt(m_list->selectionModel()->currentIndex().row());
-    if (path.isEmpty()) {
-        setStatus(QStringLiteral("select a row first"));
-        return;
-    }
-
-    bool accepted = false;
-    const QString tag = QInputDialog::getText(this, QStringLiteral("Add tag"),
-                                              QStringLiteral("tag for %1").arg(path),
-                                              QLineEdit::Normal, QString(), &accepted);
-    if (!accepted || tag.trimmed().isEmpty()) {
-        return;
-    }
-
-    QJsonValue result;
-    QString error;
-    if (!m_bridge->tagAdd(path, QStringList{tag.trimmed()}, QStringLiteral("manual"), 0, &result,
-                          &error)) {
-        setStatus(error);
-        return;
-    }
-    /* A tag changes what the row displays, and the directory view learns that on its own; a search
-     * result has to be re-run to keep its rows in step. */
-    if (m_dirToken == 0) {
-        runSearch();
-    } else {
-        setStatus(QStringLiteral("tagged %1").arg(QFileInfo(path).fileName()));
-    }
-}
-
-void MainWindow::setStatus(const QString &text) {
-    if (m_status != nullptr) {
-        m_status->setText(text);
-    }
-}
-
-QString MainWindow::folderStatus(const FamWindow &head, const QString &extra) const {
+QString MainWindow::folderStatus(const QString &directory, const FamWindow &head,
+                                 const QString &extra) const {
     QString text = QStringLiteral("%1 · %2 row(s)")
-                       .arg(QDir::toNativeSeparators(m_directory))
+                       .arg(QDir::toNativeSeparators(directory))
                        .arg(head.totalRows);
     switch (head.state) {
     case FAM_READY:
@@ -496,35 +377,103 @@ QString MainWindow::searchBackendNote() {
     return QStringLiteral(" · enumerating for names (no index answering)");
 }
 
-void MainWindow::scrollForSelfCheck() {
-    if (m_list == nullptr || m_list->verticalScrollBar() == nullptr) {
+void MainWindow::tagSelectedFile() {
+    if (m_bridge == nullptr) {
         return;
     }
-    QScrollBar *bar = m_list->verticalScrollBar();
+    const bool showingResults = m_pages->currentWidget() == m_results;
+    QString path;
+    if (showingResults) {
+        if (m_results->selectionModel() == nullptr) {
+            return;
+        }
+        path = m_resultsModel->pathAt(m_results->selectionModel()->currentIndex().row());
+    } else {
+        path = m_chain->selectedPath();
+    }
+    if (path.isEmpty()) {
+        setStatus(QStringLiteral("select a row first"));
+        return;
+    }
+
+    bool accepted = false;
+    const QString tag = QInputDialog::getText(this, QStringLiteral("Add tag"),
+                                              QStringLiteral("tag for %1").arg(path),
+                                              QLineEdit::Normal, QString(), &accepted);
+    if (!accepted || tag.trimmed().isEmpty()) {
+        return;
+    }
+
+    QJsonValue result;
+    QString error;
+    if (!m_bridge->tagAdd(path, QStringList{tag.trimmed()}, QStringLiteral("manual"), 0, &result,
+                          &error)) {
+        setStatus(error);
+        return;
+    }
+    /* A tag changes what the row displays, and a folder view learns that on its own; a search result
+     * has to be re-run to keep its rows in step. */
+    if (showingResults) {
+        runSearch();
+    } else {
+        setStatus(QStringLiteral("tagged %1").arg(QFileInfo(path).fileName()));
+    }
+}
+
+void MainWindow::keyPressEvent(QKeyEvent *event) {
+    const bool back = event->key() == Qt::Key_Backspace
+                      || (event->key() == Qt::Key_Left
+                          && event->modifiers().testFlag(Qt::AltModifier));
+    if (back && m_chain != nullptr && !m_chain->isEmpty()) {
+        const QString path = m_chain->goBack();
+        refreshScopeAvailability();
+        if (path.isEmpty()) {
+            setStatus(QStringLiteral("no folder open"));
+        } else {
+            setStatus(folderStatus(path, m_chain->deepestHead(), QStringLiteral("went up one")));
+        }
+        return;
+    }
+    QWidget::keyPressEvent(event);
+}
+
+void MainWindow::setStatus(const QString &text) {
+    if (m_status != nullptr) {
+        m_status->setText(text);
+    }
+}
+
+void MainWindow::scrollForSelfCheck() {
+    QListView *view = m_chain == nullptr ? nullptr : m_chain->deepestView();
+    if (view == nullptr || view->verticalScrollBar() == nullptr) {
+        return;
+    }
+    QScrollBar *bar = view->verticalScrollBar();
     const int max = bar->maximum();
     /* Nine stops then home: a viewport shows about seventeen rows, so fewer stops would leave bands
      * of the folder unpainted - and an extension nobody painted is an extension the icon worker was
      * never asked about, which is exactly what the HICON counters are meant to have exercised.
      * processEvents plus repaint is what makes each stop actually paint: a deferred paint would
-     * collapse all nine into one paint of wherever the bar ended. The range is logged because a
-     * storm over a zero range would prove nothing and look identical in the counters. */
+     * collapse all nine into one paint of wherever the bar ended. The range is logged because a storm
+     * over a zero range would prove nothing and look identical in the counters. */
     for (int step = 0; step <= 8; ++step) {
         bar->setValue(max * step / 8);
         QCoreApplication::processEvents();
-        m_list->viewport()->repaint();
+        view->viewport()->repaint();
     }
     bar->setValue(0);
     QCoreApplication::processEvents();
-    m_list->viewport()->repaint();
+    view->viewport()->repaint();
     qInfo("self-check scrolled a %d-step range, ended at %d", max, bar->value());
 }
 
 void MainWindow::createSelfCheckProbe() {
-    if (m_dirToken == 0 || m_directory.isEmpty()) {
+    const QString folder = m_chain->deepestPath();
+    if (folder.isEmpty()) {
         qWarning("self-check mutation asked for without a watched folder");
         return;
     }
-    m_probe = QDir(m_directory).filePath(QStringLiteral("fam-self-check-probe.txt"));
+    m_probe = QDir(folder).filePath(QStringLiteral("fam-self-check-probe.txt"));
     QFile file(m_probe);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         qWarning("self-check could not create %s: %s", qUtf8Printable(m_probe),
@@ -553,4 +502,15 @@ void MainWindow::runSelfCheckSearch(const QString &terms) {
 
 void MainWindow::clearSelfCheckSearch() {
     m_search->clear();
+}
+
+void MainWindow::descendForSelfCheck() {
+    const bool opened = m_chain->selectFirstFolder();
+    qInfo("self-check descended into a folder: %s, chain depth %d",
+          opened ? "yes" : "no", m_chain->depth());
+}
+
+void MainWindow::sortDeepestForSelfCheck() {
+    const QString applied = m_chain->sortDeepest();
+    qInfo("self-check sorted the deepest column by %s", qUtf8Printable(applied));
 }

@@ -97,16 +97,20 @@ int main(int argc, char *argv[]) {
          * below are read after the code path that could leak an HICON has actually run. */
         QTimer::singleShot(1500, [&window]() { window.scrollForSelfCheck(); });
         if (mutate) {
-            /* One timeline that walks the whole browse surface: a file appears, a search is started
-             * while the folder is still open, the box is cleared to go back, and only then is the
-             * file removed - so the deletion lands in a model that is showing the folder again
-             * rather than a result set. */
+            /* One timeline that walks the whole browse surface: a file appears in the open folder,
+             * the chain descends into a subfolder, a search scoped to *that* folder runs, the box is
+             * cleared to go back, and only then is the file removed - so the deletion lands on a
+             * shallower column while a deeper one is on screen. Every one of those is a path a run
+             * with no hands on the keyboard would otherwise never take. */
             QTimer::singleShot(2000, [&window]() { window.createSelfCheckProbe(); });
-            QTimer::singleShot(2600, [&window]() { window.runSelfCheckSearch(QStringLiteral("doc-7")); });
-            QTimer::singleShot(3600, [&window]() { window.clearSelfCheckSearch(); });
-            QTimer::singleShot(4400, [&window]() { window.removeSelfCheckProbe(); });
+            QTimer::singleShot(2500, [&window]() { window.descendForSelfCheck(); });
+            QTimer::singleShot(3300,
+                               [&window]() { window.runSelfCheckSearch(QStringLiteral("zip")); });
+            QTimer::singleShot(4300, [&window]() { window.clearSelfCheckSearch(); });
+            QTimer::singleShot(4700, [&window]() { window.sortDeepestForSelfCheck(); });
+            QTimer::singleShot(5300, [&window]() { window.removeSelfCheckProbe(); });
         }
-        const int grabAt = mutate ? 5400 : 2500;
+        const int grabAt = mutate ? 6400 : 2500;
         QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so
@@ -130,7 +134,7 @@ int main(int argc, char *argv[]) {
             app.quit();
         });
         // Never let a broken render hang a headless run.
-        QTimer::singleShot(mutate ? 11000 : 8000, [&app]() { app.quit(); });
+        QTimer::singleShot(mutate ? 13000 : 8000, [&app]() { app.quit(); });
     }
 
     if (parser.isSet(watchOption)) {
