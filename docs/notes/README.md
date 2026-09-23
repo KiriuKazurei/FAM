@@ -50,3 +50,4 @@
 | [increment-8a-search-and-states-wired.md](increment-8a-search-and-states-wired.md) | 8a | 五种状态各配一句人话（`EMPTY` 是"没读过"不是"是空的"）、`available` 每次搜索重读、搜索不再关目录且作用域明说（改成悄悄收窄是回归）、壳侧 IPC 计数 `retries=0`；日志顺手抓出一个"一个变量服务两个 token"的别名 bug |
 | [increment-8b-miller-columns.md](increment-8b-miller-columns.md) | 8b | 计划里"用 QColumnView（每列一个模型）"自相矛盾，按意图实现列链；`open()` 把追加写成替换被闸门当场抓住；侧栏的容量查询跳过网络盘（`GetDiskFreeSpaceExW` 会按 SMB 超时挂数秒）；一次"排序坏了"的怀疑用一行码点打印结案为两个前导空格的文件名 |
 | [increment-8ab-review-findings.md](increment-8ab-review-findings.md) | 8a/8b 复查 | 严重一条：lambda 捕获列的**位置**，而深度上限从最前丢列 → 越界崩溃 + 排序排到右边那列 + 下潜静默失效。修完做了 A/B：同一条 `--self-check-deep 8` 修前 exit=127、修后绿。另有空 `m_chain` 析构、一条把暴露面说反了的注释、两处多余 `setLayout`、三样写了没人读的东西 |
+| [increment-9-v1-is-gone.md](increment-9-v1-is-gone.md) | 9 | 拆掉 `fam-view` 与 v1 视图/监视入口（lib.rs −379 行，导出表里 `fam_view_*` 归零）。删的时候才撞出**v2 的记录里没有标签字段**；`abi-smoke` 搬到 v2 之后才第一次能测到 8a-1 那个 bug（A/B：无修复 exit=1 等满 10s）；337→320 条测试逐条对账 |
