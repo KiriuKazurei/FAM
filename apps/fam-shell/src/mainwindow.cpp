@@ -376,16 +376,12 @@ void MainWindow::scrollForSelfCheck() {
     }
     QScrollBar *bar = m_list->verticalScrollBar();
     const int max = bar->maximum();
-    /* Four stops, three viewports' worth of rows: enough paints to have asked the icon worker about
-     * every extension the folder holds, which is what the HICON counters are read against a moment
-     * later. processEvents is what lets each stop actually paint - and therefore actually request
-     * icons - before the next one replaces it. The range is logged because a storm over a zero
-     * range would prove nothing and look identical in the counters. */
     /* Nine stops then home: a viewport shows about seventeen rows, so fewer stops would leave bands
      * of the folder unpainted - and an extension nobody painted is an extension the icon worker was
      * never asked about, which is exactly what the HICON counters are meant to have exercised.
      * processEvents plus repaint is what makes each stop actually paint: a deferred paint would
-     * collapse all nine into one paint of wherever the bar ended. */
+     * collapse all nine into one paint of wherever the bar ended. The range is logged because a
+     * storm over a zero range would prove nothing and look identical in the counters. */
     for (int step = 0; step <= 8; ++step) {
         bar->setValue(max * step / 8);
         QCoreApplication::processEvents();

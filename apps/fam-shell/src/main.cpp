@@ -90,8 +90,11 @@ int main(int argc, char *argv[]) {
         QTimer::singleShot(1500, [&window]() { window.scrollForSelfCheck(); });
         QTimer::singleShot(2500, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
-                qInfo("icons: extracted=%d destroyed=%d cached=%d", window.icons()->extracted(),
-                      window.icons()->destroyed(), window.icons()->cached());
+                /* pending=0 is what makes the first two numbers a gate: the worker is idle, so
+                 * extracted and destroyed can only differ by something that leaked. */
+                qInfo("icons: extracted=%d destroyed=%d cached=%d pending=%d",
+                      window.icons()->extracted(), window.icons()->destroyed(),
+                      window.icons()->cached(), window.icons()->pending());
             }
             if (window.grab().save(target)) {
                 qInfo("self-check wrote %s at %lldms",

@@ -64,8 +64,14 @@ QImage resolveByExtension(const IconKey &key, IImageList *list, std::atomic<int>
     const DWORD attrs = key.attrs != 0 ? key.attrs
                         : key.directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
     SHFILEINFOW info{};
-    SHGetFileInfoW(reinterpret_cast<const WCHAR *>(probe.constData()), attrs, &info, sizeof(info),
-                   SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES);
+    /* Checked, not assumed: with SHGFI_USEFILEATTRIBUTES the return is the system image list's
+     * handle, and a zero means the shell would not classify this name. Left unchecked the index
+     * would stay 0, GetIcon(0) would happily answer with the first image in the list, and a wrong
+     * glyph would be cached under this key for the life of the process. */
+    if (SHGetFileInfoW(reinterpret_cast<const WCHAR *>(probe.constData()), attrs, &info,
+                       sizeof(info), SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES) == 0) {
+        return {};
+    }
     HICON icon = nullptr;
     if (FAILED(list->GetIcon(info.iIcon, ILD_TRANSPARENT, &icon)) || icon == nullptr) {
         return {};
@@ -205,6 +211,15 @@ QIcon IconCache::iconFor(const IconKey &key) {
     if (!m_requested.contains(key)) {
         m_requested.insert(key, true);
         m_worker.request(QVector<IconKey>{key});
+        /* Tier 1 keys are one per extension, but tier 2 keys are one per *path*, and a folder of
+         * tens of thousands of subdirectories is exactly what this shell is built to list: without a
+         * ceiling the request table - and the QIcon table behind it, each entry holding a device-side
+         * pixmap - would grow with the folder instead of with the screen. Starting over costs one
+         * viewport's worth of re-resolves; growing forever costs the session. */
+        if (m_requested.size() > 4096) {
+            m_requested.clear();
+            m_icons.clear();
+        }
     }
     /* The placeholder is the style's own glyph, not a shell call: it has to be free, because it is
      * what every row paints with until the worker has been past it once. */
@@ -225,13 +240,6 @@ void IconCache::store(const QVector<IconResult> &results) {
         /* store() runs on the GUI thread - it is a slot reached by a queued signal - which is the
          * one place a QPixmap may be built, and an icon is a pixmap cache. */
         m_icons.insert(result.key, QIcon(QPixmap::fromImage(result.image)));
-    }
-    /* Bounded on purpose: a few hundred extensions is the whole of tier 1, and tier 2 paths are
-     * viewport-bound, so hitting this means something is browsing far wider than a screen and the
-     * honest answer is to start over rather than grow. */
-    if (m_icons.size() > 512) {
-        m_icons.clear();
-        m_requested.clear();
     }
     emit resolved();
 }

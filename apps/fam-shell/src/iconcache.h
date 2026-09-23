@@ -76,6 +76,13 @@ public:
      * until the desktop runs out of handles. */
     int extracted() const { return m_extracted.load(); }
     int destroyed() const { return m_destroyed.load(); }
+    /* Keys still waiting to be resolved. The self-check reads this beside the two counters above,
+     * because "extracted equals destroyed" only means something when nothing is in flight: a worker
+     * caught mid-resolve legitimately has one more extracted than destroyed with nothing leaked. */
+    int pending() const {
+        QMutexLocker locker(&m_lock);
+        return m_pending.size();
+    }
 
 signals:
     void resolved(const QVector<IconResult> &results);
@@ -84,7 +91,7 @@ protected:
     void run() override;
 
 private:
-    QMutex m_lock;
+    mutable QMutex m_lock;
     QWaitCondition m_wake;
     QVector<IconKey> m_pending;
     bool m_stop = false;
@@ -114,6 +121,7 @@ public:
 
     int extracted() const { return m_worker.extracted(); }
     int destroyed() const { return m_worker.destroyed(); }
+    int pending() const { return m_worker.pending(); }
     int cached() const;
 
 signals:
