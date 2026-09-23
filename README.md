@@ -18,8 +18,7 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 | `crates/fam-svc-index` | 懒目录索引（定长表 + 缓存 + 按目录就地改行）、视图窗口，以及搜索后端的路由与范围规则 |
 | `crates/fam-svc-everything` | Everything 客户端：运行期绑定、状态探测、查询编译、按页取结果 |
 | `crates/fam-sched` | 监视事件 → 有界队列 → 批量合并的行变更 |
-| `crates/fam-view` | 带位置的行模型（v1 视图，待拆除） |
-| `crates/fam-ffi` | 对 C++ 暴露的 ABI（`famcore.dll`）：v1 是 JSON，v2 是定长行缓冲 + 窗口化 |
+| `crates/fam-ffi` | 对 C++ 暴露的 ABI（`famcore.dll`）：行是定长缓冲 + 窗口化，控制载荷（stats、标签、find、配置）是 JSON。v1 的视图与监视入口已在增量 9 删除 |
 | `crates/fam-bench` | 度量台与地板门槛 |
 | `apps/fam-cli` | `fam` 命令行（无头测试台） |
 | `apps/fam-shell` | Qt6 Widgets 界面 |

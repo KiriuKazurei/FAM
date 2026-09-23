@@ -13,9 +13,9 @@ Qt front-end: `fam-core` (config, Windows path keys), `fam-svc-store` (SQLite ta
 enumeration search backend), `fam-svc-index` (the lazy directory index, view windows, and the search
 router with its scope rules), `fam-svc-everything` (the Everything client: runtime binding, state
 probe, query compilation, paged results), `fam-sched` (events merged into batched row deltas),
-`fam-view` (positioned row model - v1, awaiting removal), `fam-ffi` (the ABI producing
-`famcore.dll`: v1 JSON, v2 fixed-size row buffers with windowed reads), `fam-bench` (measurements
-and the floor gate), `apps/fam-cli` and `apps/fam-shell` (Qt6 Widgets).
+`fam-ffi` (the ABI producing `famcore.dll`: rows as fixed-size buffers with windowed reads, control
+payloads as JSON - v1's view and watch entry points were deleted in increment 9),
+`fam-bench` (measurements and the floor gate), `apps/fam-cli` and `apps/fam-shell` (Qt6 Widgets).
 
 The rebuild is under way: browsing and search both run on the lazy directory index with streamed,
 virtualised results, and a name search is routed between Everything and enumeration by which of them
