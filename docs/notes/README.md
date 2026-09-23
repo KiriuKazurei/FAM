@@ -45,3 +45,4 @@
 | [increment-6-review-findings.md](increment-6-review-findings.md) | 6 复查 | 全面复查的账：修 9 处（含一处实测的跨平台编译断裂、一处 unsigned 剪裁计数可绕回、一处让每次状态轮询白跑两趟 IPC 的协议位），驳回 1 条"limit 不生效"的高危误报，10 处确认不修并标归属 |
 | [flag-loss-was-a-latch.md](flag-loss-was-a-latch.md) | 6 复查欠账 #1 | `FLAG_LOSS` 是全 core 单调计数而 v2 只比 0：丢过一次事件后每次浏览都永久报"events dropped"。改为每视图基线（打开时记、成功重读抬），v1 drain 的 `swap(0)` 换成自己的记账以免清零把 v2 静音 |
 | [shell-icons-never-open-a-path.md](shell-icons-never-open-a-path.md) | 7 | 壳的图标层：第一层每行一次哈希（`SHGFI_USEFILEATTRIBUTES` 不打开路径），第二层仅白名单走真实路径；STA worker 上 `HICON→QImage→DestroyIcon`，重画只打物化窗口。闸门是提取/销毁计数相等（9/9/9 两次复现） |
+| [increment-7-review-findings.md](increment-7-review-findings.md) | 7 复查 | 图标层的账：修 4 处（第二层键无上限会随目录长、`SHGetFileInfoW` 返回值没查会把错 glyph 缓存到进程结束、一段说反了实测结论的注释、闸门缺"worker 空闲"的证据），驳回零条，7 处不修并标归属（含增量 8 必须同时上 `SizeHintRole` 这条约束） |
