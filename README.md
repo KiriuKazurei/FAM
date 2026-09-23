@@ -15,6 +15,7 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 | `crates/fam-svc-store` | SQLite 标签存储 |
 | `crates/fam-svc-enumerate` | 单层目录列举（Win32 后端 + 可取消、可超时的读者） |
 | `crates/fam-svc-walk` | 递归遍历，以及"遍历"这一个名字检索后端 |
+| `crates/fam-svc-audit` | 审计日志：追加式 JSONL、一天一文件、按会话串 SHA-256 哈希链 |
 | `crates/fam-svc-index` | 懒目录索引（定长表 + 缓存 + 按目录就地改行）、视图窗口，以及搜索后端的路由与范围规则 |
 | `crates/fam-svc-everything` | Everything 客户端：运行期绑定、状态探测、查询编译、按页取结果 |
 | `crates/fam-sched` | 监视事件 → 有界队列 → 批量合并的行变更 |
@@ -27,6 +28,10 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 名字检索按"能答全才问"在 Everything 与遍历之间路由，两者共用同一套范围规则。
 界面已经是 Miller 列：一列一个目录、一个 v2 token、一个模型，列头按列各管各的排序，
 左侧是驱动器栏；每行的 shell 图标走"扩展名→系统图像列表"，不在绘制路径上打开任何路径。
+每一次被 core 回答的请求都会在审计日志里留下一行（追加式 JSONL，一天一文件，链按会话串），
+日志写不出来时 core 直接拒绝启动；而**读这份日志的路只有 CLI**——
+`fam audit tail|verify|stats`，`famcore.dll` 的导出表里没有任何读接口。
+代价是实测的：单次追加 41µs（debug 构建），一次完整浏览会话 24 行 / 5.8 KB。
 旧栈的规格见 `docs/legacy-specs.md`，逐增量的取舍见 `docs/notes/`。
 
 #### 构建

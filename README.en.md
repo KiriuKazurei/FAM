@@ -10,7 +10,8 @@ inference are out of scope and handled by a separate project. File tags are pers
 The Go / Java / Electron / C++ stacks were removed and the code rebuilt as a Rust workspace plus a
 Qt front-end: `fam-core` (config, Windows path keys), `fam-svc-store` (SQLite tags),
 `fam-svc-enumerate` (one-level directory reads), `fam-svc-walk` (recursive enumeration, and the
-enumeration search backend), `fam-svc-index` (the lazy directory index, view windows, and the search
+enumeration search backend), `fam-svc-audit` (the audit trail: append-only JSONL, one file per UTC
+day, an SHA-256 hash chain per session), `fam-svc-index` (the lazy directory index, view windows, and the search
 router with its scope rules), `fam-svc-everything` (the Everything client: runtime binding, state
 probe, query compilation, paged results), `fam-sched` (events merged into batched row deltas),
 `fam-ffi` (the ABI producing `famcore.dll`: rows as fixed-size buffers with windowed reads, control
@@ -22,6 +23,10 @@ virtualised results, and a name search is routed between Everything and enumerat
 can answer the whole request - under one shared set of scope rules. The interface is now Miller
 columns: one directory, one v2 token and one model per column, a per-column sort control, and a drive
 sidebar; each row's shell icon is resolved from its extension, so no paint ever opens a path.
+Every request the core answers leaves one line in the audit trail, and the core refuses to start if
+that trail cannot be written - while **reading it back is only possible through the CLI**
+(`fam audit tail|verify|stats`): `famcore.dll` exports no read surface at all. The cost is measured,
+not assumed: 41 µs per append in the debug build, 24 lines and 5.8 KB for a full browsing session.
 `docs/legacy-specs.md` records what the old system was; `docs/notes/` records what each increment
 decided.
 
