@@ -97,12 +97,16 @@ int main(int argc, char *argv[]) {
          * below are read after the code path that could leak an HICON has actually run. */
         QTimer::singleShot(1500, [&window]() { window.scrollForSelfCheck(); });
         if (mutate) {
+            /* One timeline that walks the whole browse surface: a file appears, a search is started
+             * while the folder is still open, the box is cleared to go back, and only then is the
+             * file removed - so the deletion lands in a model that is showing the folder again
+             * rather than a result set. */
             QTimer::singleShot(2000, [&window]() { window.createSelfCheckProbe(); });
-            /* Removed well before the grab, not during it: the deletion has to be inside a poll
-             * window, or the run exercises the re-read half of the channel and never the cut half. */
-            QTimer::singleShot(3400, [&window]() { window.removeSelfCheckProbe(); });
+            QTimer::singleShot(2600, [&window]() { window.runSelfCheckSearch(QStringLiteral("doc-7")); });
+            QTimer::singleShot(3600, [&window]() { window.clearSelfCheckSearch(); });
+            QTimer::singleShot(4400, [&window]() { window.removeSelfCheckProbe(); });
         }
-        const int grabAt = mutate ? 4600 : 2500;
+        const int grabAt = mutate ? 5400 : 2500;
         QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so
@@ -111,6 +115,12 @@ int main(int argc, char *argv[]) {
                       window.icons()->extracted(), window.icons()->destroyed(),
                       window.icons()->cached(), window.icons()->pending());
             }
+            /* The round trips this shell asked for, over the whole run. A poll cycle should cost one
+             * poll plus the headers the paint needed; a `retries` above zero means buffers came back
+             * truncated and the shell paid twice for an answer it already had. */
+            const FamIpcCount ipc = window.ipcCount();
+            qInfo("ipc: headers=%d pages=%d polls=%d retries=%d total=%d", ipc.headers, ipc.pages,
+                  ipc.polls, ipc.retries, ipc.total());
             if (window.grab().save(target)) {
                 qInfo("self-check wrote %s at %lldms",
                       qUtf8Printable(QDir::toNativeSeparators(target)), boot.elapsed());
@@ -120,7 +130,7 @@ int main(int argc, char *argv[]) {
             app.quit();
         });
         // Never let a broken render hang a headless run.
-        QTimer::singleShot(mutate ? 9000 : 8000, [&app]() { app.quit(); });
+        QTimer::singleShot(mutate ? 11000 : 8000, [&app]() { app.quit(); });
     }
 
     if (parser.isSet(watchOption)) {

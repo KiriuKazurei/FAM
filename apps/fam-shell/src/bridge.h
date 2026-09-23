@@ -50,6 +50,18 @@ struct FamWindow {
     bool partial() const { return (flags & FAM_FLAG_INCOMPLETE) != 0; }
 };
 
+/* What the shell spent on the ABI. The self-check logs it because "a status poll is cheap" is a claim
+ * about *this* side of the boundary: the core can answer a zero-count page in one header all it
+ * likes, and a shell that retries with a four-times buffer every beat still pays two round trips.
+ * That is exactly the bug the truncated flag caused once, and it is only visible by counting. */
+struct FamIpcCount {
+    int headers = 0; /* fam_dir_state, and a search page asked with count 0 */
+    int pages = 0;   /* row-carrying calls that came back usable */
+    int polls = 0;   /* fam_dir_poll */
+    int retries = 0; /* extra attempts spent on a buffer that came back truncated */
+    int total() const { return headers + pages + polls + retries; }
+};
+
 /* Owns a FamCore handle and turns the C ABI into Qt types.
  *
  * v1 calls return a QJsonValue built from the JSON payload; v2 calls decode a fixed-length buffer
@@ -68,6 +80,8 @@ public:
 
     bool healthy() const { return m_core != nullptr; }
 
+    FamIpcCount ipcCount() const { return m_ipc; }
+
     /* --- v2: open a directory without waiting, read it in windows ------------------------ */
 
     bool openDir(const QString &path, quint64 *token, QString *error);
@@ -78,8 +92,12 @@ public:
     bool dirCuts(quint64 token, FamWindow *window, QVector<quint32> *cuts, QString *error);
     bool dirSetSort(quint64 token, const QString &sort, const QString &order, QString *error);
     bool dirSetFilter(quint64 token, const QJsonArray &terms, const QString &kind, QString *error);
-    /* The kind names, in the order the wire's index means them. */
-    bool coreKinds(QStringList *kinds, QString *error);
+    /* What the core says about itself: the kind names in the order the wire's index means them, the
+     * search backends it has, and which of those can answer right now. All three come from one call
+     * because they are one JSON payload - and `available` is worth re-reading, since the index
+     * backend's state is probed in the background and can change while the shell is open. */
+    bool coreBackends(QStringList *kinds, QStringList *backends, QStringList *available,
+                      QString *error);
 
     /* --- v2: page a name search while it runs ---------------------------------------------
      *
@@ -131,6 +149,7 @@ private:
                           int blob);
 
     FamCore *m_core = nullptr;
+    mutable FamIpcCount m_ipc;
 };
 
 #endif /* FAMBRIDGE_H */

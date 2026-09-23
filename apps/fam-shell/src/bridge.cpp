@@ -311,6 +311,9 @@ bool FamBridge::readRows(int (*call)(FamCore *, uint64_t, uint32_t, uint32_t, un
                          quint64 token, quint32 first, quint32 count, FamWindow *window,
                          QString *error) const {
     for (int attempt = 0; attempt < 2; ++attempt) {
+        if (attempt > 0) {
+            ++m_ipc.retries;
+        }
         QVector<unsigned char> buffer(roomForRows(count) * (attempt == 0 ? 1 : 4));
         char *err = nullptr;
         const int written = call(m_core, token, first, count, buffer.data(),
@@ -328,6 +331,11 @@ bool FamBridge::readRows(int (*call)(FamCore *, uint64_t, uint32_t, uint32_t, un
             return false;
         }
         if (!window->truncated() || !window->rows.isEmpty() || attempt == 1) {
+            if (count == 0) {
+                ++m_ipc.headers;
+            } else {
+                ++m_ipc.pages;
+            }
             return true;
         }
     }
@@ -353,6 +361,7 @@ void FamBridge::closeDir(quint64 token) {
 }
 
 bool FamBridge::dirStatus(quint64 token, FamWindow *window, QString *error) {
+    ++m_ipc.headers;
     QVector<unsigned char> buffer(int(sizeof(FamHead)));
     char *err = nullptr;
     const int written = fam_dir_state(m_core, token, buffer.data(), uint32_t(buffer.size()), &err);
@@ -371,6 +380,7 @@ bool FamBridge::dirFetch(quint64 token, quint32 first, quint32 count, FamWindow 
 }
 
 bool FamBridge::dirCuts(quint64 token, FamWindow *window, QVector<quint32> *cuts, QString *error) {
+    ++m_ipc.polls;
     /* Eight bytes a cut, so 64 KiB carries about 8000 of them and a bigger burst simply takes more
      * polls - the core keeps what did not fit rather than dropping it. */
     QVector<unsigned char> buffer(1 << 16);
@@ -416,7 +426,13 @@ bool FamBridge::dirSetFilter(quint64 token, const QJsonArray &terms, const QStri
     return true;
 }
 
-bool FamBridge::coreKinds(QStringList *kinds, QString *error) {
+bool FamBridge::coreBackends(QStringList *kinds, QStringList *backends, QStringList *available,
+                             QString *error) {
+    /* These are filled, not appended to, because the call is worth repeating: `available` changes
+     * while the window is open, and a reader that appended would grow. */
+    kinds->clear();
+    backends->clear();
+    available->clear();
     char *out = nullptr;
     char *err = nullptr;
     const int code = fam_backends_json(m_core, &out, &err);
@@ -424,9 +440,15 @@ bool FamBridge::coreKinds(QStringList *kinds, QString *error) {
     if (!invoke(code, out, err, &result, error)) {
         return false;
     }
-    const QJsonArray list = result.toObject().value(QStringLiteral("kinds")).toArray();
-    for (const QJsonValue &value : list) {
+    const QJsonObject object = result.toObject();
+    for (const QJsonValue &value : object.value(QStringLiteral("kinds")).toArray()) {
         kinds->append(value.toString());
+    }
+    for (const QJsonValue &value : object.value(QStringLiteral("backends")).toArray()) {
+        backends->append(value.toString());
+    }
+    for (const QJsonValue &value : object.value(QStringLiteral("available")).toArray()) {
+        available->append(value.toString());
     }
     return true;
 }
