@@ -112,7 +112,7 @@ public:
     void cancelSearch(quint64 token);
     void closeSearch(quint64 token);
 
-    /* --- v1: JSON payloads, while the shell's tag half still uses them --------------------- */
+    /* --- the half of the ABI that stayed JSON: control payloads, not rows --------------------- */
 
     bool stats(QJsonValue *result, QString *error);
     bool tagAdd(const QString &path, const QStringList &tags, const QString &source, int priority,
@@ -121,17 +121,6 @@ public:
     bool tagRemove(const QString &path, const QStringList &tags, QJsonValue *result, QString *error);
     bool find(const QStringList &tags, bool matchAll, const QString &within, QJsonValue *result,
               QString *error);
-
-    /* The v1 view trio. Nothing in the shell calls these any more - it searches through v2 - but
-     * `abi-smoke` does, because the claim it gates is that a v1 consumer still gets answers out of
-     * this library, and going through the same wrapper the shell uses makes that claim stronger than
-     * calling the C entry points raw would. */
-    bool createView(const QString &sort, const QString &order, quint64 *view, QString *error);
-    bool search(quint64 view, const QString &query, const QString &within, const QString &kind,
-                QJsonValue *result, QString *error);
-    bool drain(quint64 view, QJsonValue *result, QString *error);
-
-    bool startWatch(const QString &dir, quint64 *watch, QString *error);
 
 private:
     static QString take(char *raw);

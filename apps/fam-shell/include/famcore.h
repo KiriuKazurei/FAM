@@ -143,9 +143,15 @@ int fam_search_page(FamCore *core, uint64_t token, uint32_t first, uint32_t coun
 int fam_search_cancel(FamCore *core, uint64_t token, char **err);
 void fam_search_close(FamCore *core, uint64_t token);
 
-/* --- v1: JSON payloads. The shell above no longer calls fam_view_* - it browses and searches
- * through v2 - but they stay exported so a build from before the break still runs, and they go away
- * with the rest of the v1 surface. tags, find and stats are JSON in both ABIs. */
+/* --- the half of the ABI that stayed JSON --------------------------------------------------------
+ *
+ * Lifecycle, stats, tags and `find`. These were JSON in v1 and stayed JSON in v2, because they are
+ * control payloads rather than rows: one call, one small answer, no window to page through.
+ *
+ * The v1 view trio (`fam_view_new` / `fam_view_search` / `fam_view_drain`) and `fam_watch_start`
+ * used to sit here. Increment 9 deleted them: they were a second implementation of "a listing that
+ * follows a directory", and the one in v2 above is the only thing that can keep a view honest about
+ * what it does not know. */
 FamCore *fam_core_new(const char *config_path, char **err);
 void fam_core_free(FamCore *core);
 void fam_free_string(char *value);
@@ -159,23 +165,6 @@ int fam_tag_remove(FamCore *core, const char *path, const char *tags_json, const
                    char **out, char **err);
 int fam_find(FamCore *core, const char *tags_json, int match_all, const char *within,
              const char *source, uint32_t limit, char **out, char **err);
-
-/* Tokens identify live view models. 0 signals failure. */
-uint64_t fam_view_new(FamCore *core, const char *sort, const char *order, char **err);
-/*
- * fam_view_search is the one v1 call that can block: it runs the search on the calling thread, and
- * the backends it shares with v2 are not all free to run at once - the Everything client holds one
- * result set for the whole process, so a v2 search in flight makes this wait for it. v2's
- * fam_search_begin exists precisely so a UI thread never waits on a search; calling the v1 form from
- * a paint or a scroll is not safe in the way the v2 group above is.
- */
-int fam_view_search(FamCore *core, uint64_t view, const char *query, const char *within,
-                    const char *kind, uint32_t limit, char **out, char **err);
-int fam_view_drain(FamCore *core, uint64_t view, char **out, char **err);
-void fam_view_free(FamCore *core, uint64_t view);
-
-uint64_t fam_watch_start(FamCore *core, const char *dir, char **err);
-void fam_watch_stop(FamCore *core, uint64_t watch);
 
 #ifdef __cplusplus
 } /* extern "C" */
