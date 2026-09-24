@@ -115,14 +115,19 @@ pub struct Config {
     /// preserving; the range (100-8192 MB) was inherited from a Node `env_loader` and is kept
     /// because it brackets sensible sizes for this purpose.
     pub memory_limit_mb: Option<u32>,
-    /// Where the audit log is written. Never inside anything the tool indexes: `Prune` excludes it
-    /// from every listing, and a search root placed under it stops the program from starting at all
-    /// (see `fam_svc_audit::conflicting_root`).
+    /// Where the audit log is written. `Prune` keeps it out of every recursive listing and every
+    /// search, and a search root placed under it stops the program from starting at all (see
+    /// `fam_svc_audit::conflicting_root`).
+    ///
+    /// What that does not claim: a *direct* one-level open of this directory still works, because
+    /// single-directory reads do not consult `Prune` at all. Both this and `mcp_token_file` sit in
+    /// that gap - see the note for increment 10, residual 1, and the note for increment 11, §4.3.
     pub audit_dir: PathBuf,
     /// The MCP credential file: which agents may ask this program to touch files, and what for.
     /// Written only by `fam mcp token`, read by the MCP server at start-up, and never reachable over
-    /// the ABI. Its parent directory is excluded from every listing for the same reason the audit
-    /// directory is - see `Prune::from_config`.
+    /// the ABI - `fam-svc-auth` is not a dependency of `fam-ffi`, so there is no entry point to
+    /// reach it through. Its parent directory is kept out of recursive listings and searches for the
+    /// same reason the audit directory is; the direct-open gap above applies here too.
     pub mcp_token_file: PathBuf,
     /// Whether the calls that read back an answer already on screen - fetching a window of rows,
     /// paging a search - get an audit line each. Off, the log keeps every question and every change

@@ -75,6 +75,12 @@ pub enum Error {
     WildcardNeedsAdmin(Tier),
     #[error("workspace {} is not an absolute path, so it could never contain a file", path.display())]
     RelativeWorkspace { path: PathBuf },
+    #[error(
+        "workspace {} has a . or .. component: the path it opens is not the path it names, \
+         so it can scope nothing",
+        path.display()
+    )]
+    DottedWorkspace { path: PathBuf },
     #[error("unknown tier {0:?}; it is one of browse, edit, admin")]
     UnknownTier(String),
     #[error("a workspace must not be empty")]

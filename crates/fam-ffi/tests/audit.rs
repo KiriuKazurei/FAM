@@ -339,6 +339,31 @@ fn a_search_root_inside_the_audit_directory_refuses_to_start() {
     assert!(message.contains("nested"), "message names it: {message}");
 }
 
+/// The same guard, second arm. It exists so that a credential file cannot be put where the index
+/// would list it, and a guard with no test on it is a guard that gets deleted by the next refactor -
+/// which is exactly what happened to the audit arm in an earlier draft of this layer.
+#[test]
+fn a_search_root_inside_the_credential_directory_refuses_to_start() {
+    let staged = tempfile::tempdir().expect("create tree");
+    let credentials = staged.path().join("auth");
+    fs::create_dir_all(credentials.join("nested")).expect("create");
+    let message = Session::error(&format!(
+        "search_roots = [\"{}\"]\naudit_dir = \"{}\"\nmcp_token_file = \"{}\"\n",
+        toml_path(&credentials.join("nested")),
+        toml_path(&staged.path().join("audit")),
+        toml_path(&credentials.join("mcp-tokens.toml"))
+    ));
+    assert!(
+        message.contains("would contain the search root"),
+        "message was {message}"
+    );
+    assert!(
+        message.contains("credential directory"),
+        "and it says which of the two directories: {message}"
+    );
+    assert!(message.contains("nested"), "message names it: {message}");
+}
+
 /// A directory that cannot hold the log stops the program rather than running it unlogged.
 #[test]
 fn an_audit_directory_that_cannot_be_written_refuses_to_start() {

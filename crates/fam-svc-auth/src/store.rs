@@ -27,9 +27,15 @@ use crate::scope::Workspace;
 use crate::tier::Tier;
 use crate::token::{Credential, Issued, Token, ID_HEX_CHARS, SALT_BYTES, SECRET_BYTES};
 
-/// What the file holds: the rows, under a key, so a future top-level field can be added without
-/// rewriting every row.
+/// What the file holds: the rows, under a key.
+///
+/// The key is fixed and unknown keys are refused, which is the opposite of forward-compatible on
+/// purpose. A table read under a misspelled name (`[[tokens]]`) comes back as an empty store, and an
+/// empty store that the person then adds to writes a file with one row - every grant they had is
+/// gone, and the trail only says `token.add`. A top-level field is added by changing this struct, so
+/// the tolerance would buy nothing that a code change does not already cover.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Document {
     #[serde(default)]
     token: Vec<Token>,
@@ -103,16 +109,22 @@ impl TokenStore {
 
     fn check_identifiers(&self) -> Result<(), crate::Error> {
         let mut ids: Vec<&str> = Vec::with_capacity(self.tokens.len());
-        let mut labels: Vec<&str> = Vec::with_capacity(self.tokens.len());
+        let mut labels: Vec<String> = Vec::with_capacity(self.tokens.len());
         for token in &self.tokens {
             if ids.contains(&token.id.as_str()) {
                 return Err(crate::Error::DuplicateId(token.id.clone()));
             }
-            if labels.contains(&token.label.as_str()) {
+            // Case-insensitive, the same rule `add` applies: two rows whose labels differ only by
+            // ASCII case would let one be revoked while the other keeps the same grant, and the
+            // trail quotes labels to a person who will read them as the same name.
+            if labels
+                .iter()
+                .any(|taken| taken.eq_ignore_ascii_case(&token.label))
+            {
                 return Err(crate::Error::LabelTaken(token.label.clone()));
             }
             ids.push(token.id.as_str());
-            labels.push(token.label.as_str());
+            labels.push(token.label.clone());
         }
         Ok(())
     }
@@ -175,10 +187,14 @@ impl TokenStore {
         {
             return Err(crate::Error::LabelTaken(issued.token.label));
         }
-        self.tokens.push(issued.token.clone());
-        self.save()?;
-        self.audit
-            .record(Draft::new(Op::TokenAdd).args(describe(&issued.token)));
+        let mut rows = self.tokens.clone();
+        rows.push(issued.token.clone());
+        self.save_as(&rows)?;
+        // Memory follows the disk, never the other way round: a save that failed has to leave this
+        // store answering `verify` with exactly the rows the file holds, or one process gets to act on
+        // a grant nobody else can see and nothing on disk says so.
+        self.tokens = rows;
+        self.record(Op::TokenAdd, &issued.token);
         Ok(issued)
     }
 
@@ -191,15 +207,15 @@ impl TokenStore {
         let index = self
             .index_of(id)
             .ok_or_else(|| crate::Error::UnknownId(id.to_owned()))?;
-        let token = &mut self.tokens[index];
-        if token.revoked_at.is_some() {
-            return Err(crate::Error::AlreadyRevoked(token.id.clone()));
+        if self.tokens[index].revoked_at.is_some() {
+            return Err(crate::Error::AlreadyRevoked(self.tokens[index].id.clone()));
         }
-        token.revoked_at = Some(format_utc(epoch_ms(now).unwrap_or_default()));
-        let snapshot = token.clone();
-        self.save()?;
-        self.audit
-            .record(Draft::new(Op::TokenRevoke).args(describe(&snapshot)));
+        let mut rows = self.tokens.clone();
+        rows[index].revoked_at = Some(format_utc(epoch_ms(now).unwrap_or_default()));
+        let snapshot = rows[index].clone();
+        self.save_as(&rows)?;
+        self.tokens = rows;
+        self.record(Op::TokenRevoke, &snapshot);
         Ok(snapshot)
     }
 
@@ -208,7 +224,7 @@ impl TokenStore {
     /// A revoked token cannot be rotated. Otherwise "revoked" would mean "disabled until someone
     /// rotates it", which is not what the person who ran `revoke` meant: the credential comes back
     /// with its old id, its old label and therefore its old history.
-    pub fn rotate(&mut self, id: &str, now: SystemTime) -> Result<Issued, crate::Error> {
+    pub fn rotate(&mut self, id: &str) -> Result<Issued, crate::Error> {
         let index = self
             .index_of(id)
             .ok_or_else(|| crate::Error::UnknownId(id.to_owned()))?;
@@ -222,43 +238,82 @@ impl TokenStore {
         let salt = crate::rand::hex_bytes(SALT_BYTES)?;
         let mut refreshed = token;
         refreshed.reseal(&salt, &secret);
-        let _ = now;
-        self.tokens[index] = refreshed.clone();
-        self.save()?;
-        self.audit
-            .record(Draft::new(Op::TokenRotate).args(describe(&refreshed)));
+        let mut rows = self.tokens.clone();
+        rows[index] = refreshed.clone();
+        self.save_as(&rows)?;
+        self.tokens = rows;
+        self.record(Op::TokenRotate, &refreshed);
         Ok(Issued {
             token: refreshed,
             secret,
         })
     }
 
-    /// Writes the file: a temporary name, then a move into place, so a reader sees either the old
-    /// table or the new one and never a half-written one.
-    fn save(&self) -> Result<(), crate::Error> {
-        if let Some(previous) = &self.loaded_digest {
-            let current = match fs::read(&self.path) {
-                Ok(bytes) => fam_core::hex_lower(&fam_core::sha256(&bytes)),
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+    /// Writes `rows` as the file, and only then adopts them.
+    ///
+    /// Three rules live here, and they are all about the direction a failure can go:
+    ///
+    /// * The trail has to be writing **before** anything changes. A grant that cannot be recorded is
+    ///   not a grant, and this is the last moment where taking it back costs nothing.
+    /// * A file that changed since this store read it is refused, not merged. Losing somebody else's
+    ///   revoke would be a silent widening of access.
+    /// * After a successful rename the baseline moves to what was just written, so a second change in
+    ///   the same process is compared against the file it actually made, not the one it found.
+    fn save_as(&mut self, rows: &[Token]) -> Result<(), crate::Error> {
+        let health = self.audit.health();
+        if !health.writing {
+            return Err(crate::Error::Audit {
+                path: self.path.clone(),
+                reason: format!(
+                    "the trail is not writing ({})",
+                    health
+                        .last_error
+                        .unwrap_or_else(|| "no reason given".into())
+                ),
+            });
+        }
+        match &self.loaded_digest {
+            Some(previous) => {
+                let current = match fs::read(&self.path) {
+                    Ok(bytes) => fam_core::hex_lower(&fam_core::sha256(&bytes)),
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(crate::Error::ConcurrentEdit {
+                            path: self.path.clone(),
+                        })
+                    }
+                    Err(source) => {
+                        return Err(crate::Error::Io {
+                            path: self.path.clone(),
+                            source,
+                        })
+                    }
+                };
+                if &current != previous {
+                    return Err(crate::Error::ConcurrentEdit {
+                        path: self.path.clone(),
+                    });
+                }
+            }
+            // No baseline to compare against, which is the window a *first* grant falls into: two
+            // processes both see no file, and the later rename publishes a table the first one never
+            // read. So the file has to still be absent.
+            None => match fs::metadata(&self.path) {
+                Ok(_) => {
                     return Err(crate::Error::ConcurrentEdit {
                         path: self.path.clone(),
                     })
                 }
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
                 Err(source) => {
                     return Err(crate::Error::Io {
                         path: self.path.clone(),
                         source,
                     })
                 }
-            };
-            if &current != previous {
-                return Err(crate::Error::ConcurrentEdit {
-                    path: self.path.clone(),
-                });
-            }
+            },
         }
         let text = toml::to_string_pretty(&Document {
-            token: self.tokens.clone(),
+            token: rows.to_vec(),
         })
         .map_err(|source| crate::Error::Write {
             path: self.path.clone(),
@@ -270,9 +325,29 @@ impl TokenStore {
                 source,
             })?;
         }
-        let temp = self.path.with_extension("toml.tmp");
+        // The process id is in the temporary name because two savers sharing one name can publish
+        // each other's half-written bytes: the rename is atomic, the write into it is not.
+        let temp = self
+            .path
+            .with_extension(format!("toml.tmp.{}", std::process::id()));
         write_then_rename(&temp, &self.path, text.as_bytes())?;
+        self.loaded_digest = Some(fam_core::hex_lower(&fam_core::sha256(text.as_bytes())));
         Ok(())
+    }
+
+    /// The line saying what changed, written after the change is on disk.
+    ///
+    /// The order is the one that cannot lie: a line only ever follows a change that took effect. What
+    /// a line cannot do is report itself, so a caller that cares whether the count of lost lines grew
+    /// reads [`TokenStore::trail_dropped`] - the CLI does, and says so out loud.
+    fn record(&mut self, op: Op, token: &Token) {
+        self.audit.record(Draft::new(op).args(describe(token)));
+    }
+
+    /// Lines this session wanted to write and could not. Non-zero after a change means the file and
+    /// the trail disagree about that change, which is the one thing this pair must never do.
+    pub fn trail_dropped(&self) -> u64 {
+        self.audit.health().dropped_total
     }
 }
 
@@ -507,7 +582,7 @@ mod tests {
                 .is_some());
             assert!(
                 matches!(
-                    store.rotate(&issued.token.id, now()),
+                    store.rotate(&issued.token.id),
                     Err(crate::Error::AlreadyRevoked(_))
                 ),
                 "revocation ends a credential's life"
@@ -527,7 +602,7 @@ mod tests {
         let issued = store
             .add("spin", Tier::Browse, &["D:/notes".into()], now())
             .expect("granted");
-        let rotated = store.rotate(&issued.token.id, now()).expect("rotated");
+        let rotated = store.rotate(&issued.token.id).expect("rotated");
         assert_eq!(rotated.token.id, issued.token.id, "same id");
         assert_eq!(rotated.token.label, issued.token.label, "same label");
         assert_eq!(rotated.token.tier, issued.token.tier, "same tier");
@@ -590,7 +665,12 @@ mod tests {
             ),
             "the stale store must refuse rather than drop the other process's row"
         );
-        assert_eq!(stale.tokens().len(), 2, "it still holds what it read");
+        assert_eq!(
+            stale.tokens().len(),
+            1,
+            "a refused save leaves the store holding the rows it read, not those plus the one it \
+             tried to add - this assertion used to say 2, which was the bug"
+        );
         assert_eq!(current.tokens().len(), 2);
         // The stale store reloads cleanly and can then proceed, which is what a person does after
         // being told: run it again.
@@ -674,12 +754,103 @@ mod tests {
         store
             .add("temp", Tier::Browse, &["D:/notes".into()], now())
             .expect("granted");
-        assert!(!scratch
-            .root
-            .path()
-            .join("auth/mcp-tokens.toml.tmp")
-            .exists());
+        let leftovers: Vec<String> = fs::read_dir(scratch.file().parent().expect("a dir"))
+            .expect("readable")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("mcp-tokens.toml") && name != "mcp-tokens.toml")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a save leaves one file: {leftovers:?}"
+        );
         assert!(scratch.file().exists());
+    }
+
+    /// Two changes in one process. The stale-file guard compares against what this store read, so
+    /// unless a successful save moves that baseline forward, the second change in any session is
+    /// refused - and the refusal looks exactly like somebody else editing the file.
+    #[test]
+    fn a_second_change_in_the_same_session_is_not_a_conflict() {
+        let scratch = Scratch::new();
+        let issued;
+        {
+            let mut first = scratch.store();
+            issued = first
+                .add("pair", Tier::Edit, &["D:/notes".into()], now())
+                .expect("granted");
+        }
+        // Reopened, so the file existed when this store read it - that is the case with a baseline.
+        let mut again = scratch.store();
+        again.rotate(&issued.token.id).expect("rotated");
+        again
+            .revoke(&issued.token.id, now())
+            .expect("revoked after rotating");
+        let reopened = scratch.store();
+        assert_eq!(
+            reopened.tokens().len(),
+            1,
+            "both changes are on file, not just the first"
+        );
+        assert!(reopened.tokens()[0].revoked_at.is_some());
+        assert!(
+            reopened.verify(&issued.credential()).is_none(),
+            "and the last one won"
+        );
+    }
+
+    /// The window a first grant falls into: two processes both open an absent file, so neither has a
+    /// baseline to compare against. "No baseline" must mean "the file still has to not be there",
+    /// otherwise the later rename publishes a table the earlier one never read, and what gets lost is
+    /// whoever revoked something.
+    #[test]
+    fn a_store_that_read_no_file_refuses_to_overwrite_one_that_appeared() {
+        let scratch = Scratch::new();
+        let mut first = scratch.store();
+        let mut second = scratch.store();
+        first
+            .add("early", Tier::Browse, &["D:/notes".into()], now())
+            .expect("granted");
+        assert!(
+            matches!(
+                second.add("late", Tier::Browse, &["D:/notes".into()], now()),
+                Err(crate::Error::ConcurrentEdit { .. })
+            ),
+            "the second process may not write a table it never saw"
+        );
+        assert_eq!(scratch.store().tokens().len(), 1);
+    }
+
+    /// A misspelled key is the mistake a person editing this file actually makes, and the ordinary
+    /// serde answer to it - ignore the unknown field - is the direction that loses a revoke.
+    #[test]
+    fn a_misspelled_key_is_refused_rather_than_read_as_a_default() {
+        let scratch = Scratch::new();
+        let mut store = scratch.store();
+        let issued = store
+            .add("typo", Tier::Browse, &["D:/notes".into()], now())
+            .expect("granted");
+        store.revoke(&issued.token.id, now()).expect("revoked");
+        let text = fs::read_to_string(store.path()).expect("readable");
+        assert!(text.contains("revoked_at"), "{text}");
+        for spelling in ["revokedAt", "revoked", "revoked_at_"] {
+            let widened = text.replace("revoked_at", spelling);
+            fs::write(store.path(), &widened).expect("writable");
+            let error = scratch
+                .try_store()
+                .expect_err("{spelling} must not read as a live row");
+            assert!(
+                matches!(error, crate::Error::Parse { .. }),
+                "{spelling}: got {error:?}"
+            );
+        }
+        // And the table itself: `[[tokens]]` is one character from `[[token]]`, and read as an absent
+        // key it is an empty store - which the next `add` would then save over the real rows.
+        fs::write(store.path(), text.replace("[[token]]", "[[tokens]]")).expect("writable");
+        let error = scratch
+            .try_store()
+            .expect_err("a misspelled table is not an empty credential file");
+        assert!(matches!(error, crate::Error::Parse { .. }), "got {error:?}");
     }
 
     /// Not a gate - a number, for the note that prices this layer. Run it with

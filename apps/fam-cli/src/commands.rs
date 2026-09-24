@@ -489,7 +489,7 @@ file: {}",
             );
         }
         TokenAction::Rotate { id } => {
-            let outcome = store.rotate(id, now);
+            let outcome = store.rotate(id);
             if let Err(error) = &outcome {
                 refused(&store, Op::TokenRotate, &format!("id={id}"), error);
             }
@@ -500,6 +500,17 @@ file: {}",
             println!("credential {}", rotated.credential());
             println!("the previous secret stopped working at once");
         }
+    }
+    // A change that is on disk with no line about it is the one disagreement the file and the trail
+    // are not allowed to have, and by now the store cannot take the change back - so it says so here,
+    // where a person is reading. The count is the session's, not this command's alone.
+    let dropped = store.trail_dropped();
+    if dropped > 0 {
+        eprintln!(
+            "warning: {dropped} trail line(s) could not be written this session - what is in {} is \
+             not all of it, `fam audit stats` has the reason",
+            config.mcp_token_file.display()
+        );
     }
     Ok(())
 }

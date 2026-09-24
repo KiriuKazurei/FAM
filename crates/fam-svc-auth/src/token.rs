@@ -3,11 +3,16 @@
 //! The secret itself is never stored. What is stored is a salted digest of it, and the salt is
 //! per-token rather than shared - one random value per row - so that two tokens issued at the same
 //! moment cannot be told apart by their digests, and so a leaked file cannot be attacked as a whole.
-//! A token secret is 128 bits of the operating system's randomness, which is why plain SHA-256 is
+//! A token secret is 256 bits of the operating system's randomness, which is why plain SHA-256 is
 //! enough here: the thing being protected is not guessable, so the salt is for correlation, not for
 //! slowing down a dictionary attack. (If a lower-entropy credential is ever added to this file, this
 //! paragraph is the one that has to change first, to something like PBKDF2.)
+//!
+//! The `Debug` impls in this file hide the secret and the digest for the same reason the audit line
+//! does: [`TokenStore::audit`] hands the log to callers on purpose, and a `{:?}` on a parsed
+//! credential is one keystroke away from writing an agent's live secret into the trail.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use serde::de::Error as _;
@@ -19,7 +24,7 @@ use crate::tier::Tier;
 /// The prefix of a credential string, so a token can be recognised in a config file by eye.
 pub const PREFIX: &str = "fam";
 
-/// How many random bytes a secret holds. As hex that is 64 characters, and 128 bits of guessing left.
+/// How many random bytes a secret holds. As hex that is 64 characters, and 256 bits of guessing left.
 pub(crate) const SECRET_BYTES: usize = 32;
 /// Bytes of salt per token.
 pub(crate) const SALT_BYTES: usize = 16;
@@ -30,7 +35,7 @@ pub(crate) const ID_HEX_CHARS: usize = 8;
 /// digest from a different scheme must not verify by coincidence.
 const DIGEST_SCOPE: &[u8] = b"fam-mcp-token-v1";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Token {
     pub id: String,
     pub label: String,
@@ -47,11 +52,37 @@ pub struct Token {
     pub revoked_at: Option<String>,
 }
 
+impl fmt::Debug for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Token")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("tier", &self.tier)
+            .field("workspaces", &self.workspaces)
+            .field("salt", &self.salt)
+            .field("secret_hash", &HIDDEN)
+            .field("created_at", &self.created_at)
+            .field("revoked_at", &self.revoked_at)
+            .finish()
+    }
+}
+
 /// A credential and the plaintext that goes with it. The plaintext exists only here, only once.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Issued {
     pub token: Token,
     pub secret: String,
+}
+
+impl fmt::Debug for Issued {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Issued")
+            .field("id", &self.token.id)
+            .field("label", &self.token.label)
+            .field("tier", &self.token.tier)
+            .field("secret", &HIDDEN)
+            .finish()
+    }
 }
 
 impl Issued {
@@ -61,11 +92,23 @@ impl Issued {
     }
 }
 
+/// What a `Debug` impl prints in place of anything that unlocks a credential.
+const HIDDEN: &str = "<hidden>";
+
 /// The two halves of a presented credential.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Credential {
     pub id: String,
     pub secret: String,
+}
+
+impl fmt::Debug for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Credential")
+            .field("id", &self.id)
+            .field("secret", &HIDDEN)
+            .finish()
+    }
 }
 
 impl Credential {
@@ -250,7 +293,14 @@ pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 /// A row as it sits in the TOML file: `revoked_at` is an optional string and everything else is
 /// required, and the derived impls are what let a hand-edited file be rejected field by field.
+///
+/// `deny_unknown_fields` is the half of that which matters most. A misspelled key - `revokedAt`,
+/// `revoked`, `[[tokens]]` for the row array - would otherwise parse into a row with no
+/// `revoked_at`, which reads as *live*: the revoke somebody just ran would stop working the next
+/// time the file was opened, and a store that read `[[tokens]]` as an empty table would delete every
+/// row the next time it saved. Silence is the dangerous direction for this file.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TokenRow {
     pub id: String,
     pub label: String,
@@ -375,7 +425,9 @@ mod tests {
         assert_eq!(parsed.secret, issued.secret);
         // A hex secret never contains an underscore, but a hand-written credential is somebody's
         // problem: everything after the first underscore is the secret, so a too-short or non-hex
-        // tail is refused and a longer one is not.
+        // tail is refused and a longer one is not. The length is a garbage filter, not the security
+        // boundary - what decides is the digest comparison, and a tail that is not the one that was
+        // minted fails it whatever it measures.
         assert!(Credential::parse(&format!("fam_{}_aa_bb", issued.token.id)).is_none());
         let long = Credential::parse(&format!("fam_{}_{}", issued.token.id, "a".repeat(70)))
             .expect("a longer secret is still one secret");
@@ -405,6 +457,37 @@ mod tests {
         let issued = issue("ws-bot", Tier::Browse);
         let padded = format!("  {}\n", issued.credential());
         assert!(Credential::parse(&padded).is_some());
+    }
+
+    /// `TokenStore::audit` is public on purpose, so that a caller can record the attempts it refused
+    /// before any change was made - which means a caller can also hand a parsed credential to
+    /// `Draft::args(format!("{:?}", credential))`. Nothing that unlocks a token may come out of a
+    /// `Debug` impl, because that is the one path with no review at the call site.
+    #[test]
+    fn a_debug_dump_hides_everything_that_unlocks_a_credential() {
+        let issued = issue("debug-bot", Tier::Browse);
+        let credential = issued.credential();
+        let parsed = Credential::parse(&credential).expect("round trips");
+        for (what, shown) in [
+            ("Issued", format!("{issued:?}")),
+            ("Token", format!("{:?}", issued.token)),
+            ("Credential", format!("{parsed:?}")),
+        ] {
+            assert!(!shown.contains(&issued.secret), "{what} printed the secret");
+            assert!(
+                !shown.contains(&credential),
+                "{what} printed the credential"
+            );
+            assert!(
+                !shown.contains(&issued.token.secret_hash),
+                "{what} printed the digest - with the file in hand that is an offline check of any \
+                 guess against this exact row"
+            );
+        }
+        assert!(
+            format!("{:?}", issued.token).contains("id:"),
+            "the parts a person needs to debug with are still there"
+        );
     }
 
     #[test]
