@@ -82,6 +82,14 @@ enum Commands {
     },
     /// Report database contents.
     Stats,
+    /// Manage the credentials an out-of-process agent presents.
+    ///
+    /// This is the only place a grant is made or taken away, and it is a command a person runs:
+    /// neither the ABI nor the MCP surface can reach it.
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
     /// Read the audit log.
     ///
     /// The core never exposes this over the ABI, which is the point: whatever can ask the tool for
@@ -90,6 +98,36 @@ enum Commands {
         #[command(subcommand)]
         action: AuditAction,
     },
+}
+
+#[derive(Subcommand)]
+enum McpAction {
+    /// Issue, inspect, revoke and rotate agent credentials.
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TokenAction {
+    /// Issue a credential. The secret is printed once and never stored in a readable form.
+    Add {
+        /// The name the audit trail will show. Letters, digits, dot, dash, underscore.
+        label: String,
+        /// browse, edit or admin.
+        #[arg(long, default_value = "browse")]
+        tier: String,
+        /// A directory the token may reach; repeatable. Only `admin` may pass `*`.
+        #[arg(long = "workspace")]
+        workspace: Vec<String>,
+    },
+    /// Every credential on file, with what each one is allowed to do.
+    List,
+    /// Retire a credential. Its row stays, so the trail keeps resolving its label.
+    Revoke { id: String },
+    /// New secret, same identity and same policy.
+    Rotate { id: String },
 }
 
 #[derive(Subcommand)]
@@ -225,6 +263,7 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         ),
         Commands::Watch { dirs, seconds } => commands::watch(&config, dirs, *seconds),
         Commands::Stats => commands::stats(&config),
+        Commands::Mcp { action } => commands::mcp(&config, action),
         Commands::Audit { action } => commands::audit(&config, action),
     }
 }

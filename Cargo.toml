@@ -8,6 +8,7 @@ members = [
     "crates/fam-svc-everything",
     "crates/fam-svc-walk",
     "crates/fam-svc-audit",
+    "crates/fam-svc-auth",
     "crates/fam-sched",
     "crates/fam-ffi",
     "crates/fam-bench",
@@ -29,6 +30,7 @@ fam-svc-index = { path = "crates/fam-svc-index" }
 fam-svc-everything = { path = "crates/fam-svc-everything" }
 fam-svc-walk = { path = "crates/fam-svc-walk" }
 fam-svc-audit = { path = "crates/fam-svc-audit" }
+fam-svc-auth = { path = "crates/fam-svc-auth" }
 fam-sched = { path = "crates/fam-sched" }
 fam-ffi = { path = "crates/fam-ffi" }
 
@@ -49,6 +51,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
     "Win32_UI_Shell",
+    "Win32_Security_Cryptography",
 ] }
 
 [profile.release]

@@ -282,6 +282,7 @@ dependencies = [
  "fam-core",
  "fam-sched",
  "fam-svc-audit",
+ "fam-svc-auth",
  "fam-svc-index",
  "fam-svc-store",
  "fam-svc-walk",
@@ -341,6 +342,21 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "fam-svc-auth"
+version = "0.1.0"
+dependencies = [
+ "fam-core",
+ "fam-svc-audit",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

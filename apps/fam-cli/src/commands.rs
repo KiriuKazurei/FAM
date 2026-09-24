@@ -1,16 +1,18 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, bail, Result};
 use fam_core::{path_buf_from_units, AppPaths, Config, SearchHit, SearchRequest as NameRequest};
 use fam_sched::{spawn, Batch, SchedulerConfig};
+use fam_svc_audit::{Draft, Op};
+use fam_svc_auth::{Tier, TokenStore};
 use fam_svc_index::SearchRouter;
 use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
 use fam_svc_walk::KIND_ORDER;
 use fam_svc_walk::{collect, Cancellation, Entry, Kind, WalkPolicy, WalkReport};
 
-use crate::{AuditAction, ConfigAction, TagAction};
+use crate::{AuditAction, ConfigAction, McpAction, TagAction, TokenAction};
 
 /// How many hits `search` accumulates unless `--limit` says otherwise. A ceiling rather than none,
 /// because every row is held in memory until it is printed and a root like `D:\` does not run out.
@@ -337,6 +339,168 @@ pub fn stats(config: &Config) -> Result<()> {
         "tags:     {} (manual {} / auto {})",
         stats.tags, stats.manual, stats.auto
     );
+    Ok(())
+}
+
+/// The human-only half of the credential story. Every branch here goes through `TokenStore`, which
+/// owns the audit trail it writes into, so a grant cannot be made without a line saying so.
+pub fn mcp(config: &Config, action: &McpAction) -> Result<()> {
+    match action {
+        McpAction::Token { action } => token(config, action),
+    }
+}
+
+/// A grant attempt that never became a change still gets its line: "someone asked for this and the
+/// store said no" is the fact a credential trail has to keep, and the store only records what it did.
+fn refused(store: &TokenStore, op: Op, attempt: &str, error: &fam_svc_auth::Error) {
+    store.audit().record(
+        Draft::new(op)
+            .args(attempt)
+            .result(format!("error {error}")),
+    );
+}
+
+fn token(config: &Config, action: &TokenAction) -> Result<()> {
+    let now = SystemTime::now();
+    let mut store = TokenStore::open(config)?;
+    match action {
+        TokenAction::Add {
+            label,
+            tier,
+            workspace,
+        } => {
+            let attempt = format!(
+                "label={label} tier={tier} workspaces={}",
+                workspace.join(",")
+            );
+            // These two refusals are the CLI's own, ahead of the store: a tier that is not a `Tier`
+            // never reaches it, and an empty workspace list is a call nobody meant to make. They get
+            // a line anyway, in the same shape as a store refusal, because "asked for and refused" is
+            // the fact the trail exists to keep.
+            let Some(tier) = Tier::parse(tier) else {
+                let error = fam_svc_auth::Error::UnknownTier(tier.clone());
+                refused(&store, Op::TokenAdd, &attempt, &error);
+                return Err(error.into());
+            };
+            if workspace.is_empty() {
+                let error = fam_svc_auth::Error::NoWorkspaces(label.clone());
+                refused(&store, Op::TokenAdd, &attempt, &error);
+                bail!(
+                    "a token needs a --workspace to act inside; without one it could read nothing at all"
+                );
+            }
+            let outcome = store.add(label, tier, workspace, now);
+            if let Err(error) = &outcome {
+                refused(&store, Op::TokenAdd, &attempt, error);
+            }
+            let issued = outcome?;
+            for granted in &issued.token.workspaces {
+                if !granted.exists() {
+                    // Not a refusal: a folder created next week is a legitimate grant today. It is a
+                    // typo-catching warning, and it goes to stderr so scripted output stays clean.
+                    eprintln!("warning: {} is not a directory right now", granted.text());
+                }
+            }
+            println!("id         {}", issued.token.id);
+            println!("label      {}", issued.token.label);
+            println!(
+                "tier       {} ({})",
+                issued.token.tier,
+                issued.token.tier.summary()
+            );
+            println!(
+                "workspaces {}",
+                issued
+                    .token
+                    .workspaces
+                    .iter()
+                    .map(|workspace| workspace.text())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            println!("created    {}", issued.token.created_at);
+            println!();
+            println!("credential {}", issued.credential());
+            println!(
+                "
+This is the only time the secret is shown. It is stored as a salted digest, so it cannot be
+recovered from {file} - to replace a lost one, run `fam mcp token rotate {id}`.",
+                file = config.mcp_token_file.display(),
+                id = issued.token.id
+            );
+        }
+        TokenAction::List => {
+            // The one credential command that changes nothing, recorded anyway: without it a
+            // `token list` session is two bracket lines that do not say what ran, and a bare session
+            // is then ambiguous between "someone listed their grants" and "something died early".
+            let on_file = store.tokens().len();
+            store
+                .audit()
+                .record(Draft::new(Op::TokenList).result(format!("{on_file} on file")));
+            if store.tokens().is_empty() {
+                println!("no credentials in {} yet", config.mcp_token_file.display());
+                return Ok(());
+            }
+            println!(
+                "{:<9} {:<20} {:<7} {:<6} workspaces",
+                "id", "label", "tier", "state"
+            );
+            for token in store.tokens() {
+                let workspaces: Vec<String> = token
+                    .workspaces
+                    .iter()
+                    .map(|workspace| workspace.text())
+                    .collect();
+                println!(
+                    "{:<9} {:<20} {:<7} {:<6} {}{}",
+                    token.id,
+                    token.label,
+                    token.tier,
+                    if token.is_active() { "live" } else { "gone" },
+                    workspaces.join(" "),
+                    token
+                        .revoked_at
+                        .as_deref()
+                        .map(|when| format!("   revoked {when}"))
+                        .unwrap_or_default()
+                );
+            }
+            println!(
+                "
+file: {}",
+                config.mcp_token_file.display()
+            );
+        }
+        TokenAction::Revoke { id } => {
+            let outcome = store.revoke(id, now);
+            if let Err(error) = &outcome {
+                refused(&store, Op::TokenRevoke, &format!("id={id}"), error);
+            }
+            let revoked = outcome?;
+            println!(
+                "revoked {} ({}) at {}",
+                revoked.id,
+                revoked.label,
+                revoked.revoked_at.as_deref().unwrap_or("an unknown time")
+            );
+            println!(
+                "the row stays in {} so the audit trail keeps resolving its label",
+                config.mcp_token_file.display()
+            );
+        }
+        TokenAction::Rotate { id } => {
+            let outcome = store.rotate(id, now);
+            if let Err(error) = &outcome {
+                refused(&store, Op::TokenRotate, &format!("id={id}"), error);
+            }
+            let rotated = outcome?;
+            println!("id         {}", rotated.token.id);
+            println!("label      {}", rotated.token.label);
+            println!("tier       {}", rotated.token.tier);
+            println!("credential {}", rotated.credential());
+            println!("the previous secret stopped working at once");
+        }
+    }
     Ok(())
 }
 

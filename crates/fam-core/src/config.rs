@@ -82,6 +82,14 @@ impl AppPaths {
     pub fn default_audit_dir() -> PathBuf {
         Self::resolve().data_dir.join("audit")
     }
+
+    /// Where the MCP credentials live. Beside the configuration rather than inside the data
+    /// directory, because it is a file a person edits and not something the program regenerates - and
+    /// because `Config::mcp_token_file`'s parent is excluded from the indexed set, which only makes
+    /// sense for a directory that holds nothing a user wants found.
+    pub fn default_token_file() -> PathBuf {
+        Self::resolve().config_dir.join("mcp-tokens.toml")
+    }
 }
 
 /// What a loader does when the file does not exist.
@@ -111,6 +119,11 @@ pub struct Config {
     /// from every listing, and a search root placed under it stops the program from starting at all
     /// (see `fam_svc_audit::conflicting_root`).
     pub audit_dir: PathBuf,
+    /// The MCP credential file: which agents may ask this program to touch files, and what for.
+    /// Written only by `fam mcp token`, read by the MCP server at start-up, and never reachable over
+    /// the ABI. Its parent directory is excluded from every listing for the same reason the audit
+    /// directory is - see `Prune::from_config`.
+    pub mcp_token_file: PathBuf,
     /// Whether the calls that read back an answer already on screen - fetching a window of rows,
     /// paging a search - get an audit line each. Off, the log keeps every question and every change
     /// and loses only the row-by-row reading of a result. A view polling for changes never gets a
@@ -135,6 +148,7 @@ impl Default for Config {
             ui_batch_ms: DEFAULT_UI_BATCH_MS,
             memory_limit_mb: None,
             audit_dir: AppPaths::default_audit_dir(),
+            mcp_token_file: AppPaths::default_token_file(),
             audit_record_reads: true,
             audit_daily_limit_mb: DEFAULT_AUDIT_DAILY_LIMIT_MB,
         }
@@ -258,6 +272,12 @@ impl Config {
             return Err(ConfigError::Invalid(format!(
                 "audit_daily_limit_mb must be within {AUDIT_DAILY_LIMIT_MB_MIN}..={AUDIT_DAILY_LIMIT_MB_MAX}, got {}",
                 self.audit_daily_limit_mb
+            )));
+        }
+        if !self.mcp_token_file.is_absolute() {
+            return Err(ConfigError::Invalid(format!(
+                "mcp_token_file must be an absolute path, got {}",
+                self.mcp_token_file.display()
             )));
         }
         if self.audit_dir.as_os_str().is_empty() {

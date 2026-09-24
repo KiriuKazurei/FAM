@@ -16,7 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::actor::Actor;
 use crate::chain::{self, GENESIS};
-use crate::record::{clip, epoch_ms, format_utc, utc_date, Draft, Op, Record, Weight};
+use crate::record::{clip, Draft, Op, Record, Weight};
+use fam_core::{epoch_ms, format_utc, utc_date};
 
 /// What the files are called, and what `inspect` looks for. The date is UTC, so a file boundary is
 /// not the user's midnight.

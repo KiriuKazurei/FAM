@@ -211,13 +211,26 @@ impl FamCore {
         // The audit log is not a feature that can be missing, so it is opened before anything else
         // that has a side effect: no view, no watch, no database handle exists if the trail cannot
         // be written.
-        if let Some(root) = fam_svc_audit::conflicting_root(&config.audit_dir, &config.search_roots)
-        {
-            return Err(format!(
-                "the audit directory {} would contain the search root {}; move one of them",
-                config.audit_dir.display(),
-                root.display()
-            ));
+        // The two directories the program writes its own state into must not contain a search root:
+        // honouring such a root would mean indexing the audit trail or the credential file, and
+        // excluding them would mean silently deleting a folder the configuration named. Asking the
+        // audit crate is deliberate - the predicate is a path question, and `fam-svc-auth` is not and
+        // must not become a dependency here, or the ABI would grow a way to reach credentials.
+        let credential_directory = config
+            .mcp_token_file
+            .parent()
+            .unwrap_or(config.mcp_token_file.as_path());
+        for (what, directory) in [
+            ("audit directory", config.audit_dir.as_path()),
+            ("credential directory", credential_directory),
+        ] {
+            if let Some(root) = fam_svc_audit::conflicting_root(directory, &config.search_roots) {
+                return Err(format!(
+                    "the {what} {} would contain the search root {}; move one of them",
+                    directory.display(),
+                    root.display()
+                ));
+            }
         }
         let audit = AuditLog::open(AuditOptions {
             directory: config.audit_dir.clone(),

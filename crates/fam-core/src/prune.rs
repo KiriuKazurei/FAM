@@ -36,6 +36,14 @@ impl Prune {
         // configured, so it goes on the list here rather than in `excluded_dirs`, where
         // `fam config show` would present it as something they asked for.
         prefixes.push(path_key(&config.audit_dir));
+        // The credential file lives beside the configuration, and a search that can name
+        // `mcp-tokens.toml` is a search that can hand its contents to whoever asked. Excluding the
+        // directory rather than the single file is deliberate: the walk enforces prefixes on the
+        // directory it is about to enter, which is where it can refuse cheaply and completely - and
+        // a lone file path in this list would be matched by nothing.
+        if let Some(directory) = config.mcp_token_file.parent() {
+            prefixes.push(path_key(directory));
+        }
         Self {
             prefixes,
             names: config.excluded_name_keys(),
@@ -257,44 +265,51 @@ mod tests {
         ));
     }
 
-    /// The audit log is in the exclusion list without anyone asking for it, because the data
-    /// directory sits under the default home root on Windows: enumerated, it would be searched, and
-    /// the tool would be reading its own trail.
+    /// The audit log and the credential file are in the exclusion list without anyone asking for
+    /// them, because on Windows both live under the user's home directory - which is the default
+    /// search root. Left in, the walk would enumerate them, a search would report them, and the tool
+    /// would be reading its own trail and handing out its own keys.
     #[test]
-    fn the_audit_log_is_never_reported() {
-        let root = Path::new("C:/Users/Kirig");
+    fn the_programs_own_directory_is_never_reported() {
+        let home = Path::new("C:/Users/Kirig");
+        let own = home.join("AppData/Roaming/FileAutoManage");
         let config = Config {
-            search_roots: vec![root.to_path_buf()],
-            audit_dir: root.join("AppData/Roaming/FileAutoManage/audit"),
+            search_roots: vec![home.to_path_buf()],
+            audit_dir: own.join("audit"),
+            mcp_token_file: own.join("mcp-tokens.toml"),
+            database_path: own.join("tags.db"),
             ..Config::default()
         };
         let rules = Prune::from_config(&config);
-        assert!(rules.excludes(Path::new(
-            "C:/Users/Kirig/AppData/Roaming/FileAutoManage/audit/audit-2026-09-23.jsonl"
-        )));
-        assert!(rules.excludes(Path::new(
-            "C:/Users/Kirig/AppData/Roaming/FileAutoManage/audit"
-        )));
-        // The tag database next door is a different question, and this rule does not answer it: the
-        // exclusion is the audit directory, not everything the program owns.
-        assert!(!rules.excludes(Path::new(
-            "C:/Users/Kirig/AppData/Roaming/FileAutoManage/tags.db"
-        )));
-        assert!(!rules.excludes(Path::new("C:/Users/Kirig/Documents/notes.md")));
+        assert!(rules.excludes(&own.join("audit/audit-2026-09-23.jsonl")));
+        assert!(rules.excludes(&own.join("audit")));
+        assert!(rules.excludes(&own.join("mcp-tokens.toml")));
+        // The credential file's directory is the data directory on Windows, so the tag database
+        // inside it is excluded by the same rule. That is not an accident being tolerated: a listing
+        // that can name `tags.db` is a listing that can hand over every tag assignment the user has
+        // ever made, and increment 10's note lists it as the one remaining half of that question.
+        assert!(rules.excludes(&own.join("tags.db")));
+        // What the rule is not: a claim about everything the user owns.
+        assert!(!rules.excludes(&home.join("Documents/notes.md")));
+        assert!(!rules.excludes(&own.with_file_name("FileAutoManageBackup/notes.md")));
     }
 
-    /// A configured `excluded_dirs` entry and the automatic one are the same kind of rule, so the
-    /// user's list survives the injection.
+    /// A configured `excluded_dirs` entry and the automatic ones are the same kind of rule, so the
+    /// user's list survives the injection - and each automatic prefix is its own entry, so removing
+    /// one cannot take the others with it.
     #[test]
-    fn the_configured_exclusions_and_the_audit_one_are_both_honoured() {
+    fn the_configured_exclusions_and_the_automatic_ones_are_all_honoured() {
         let config = Config {
             excluded_dirs: vec![PathBuf::from("D:/secret")],
             audit_dir: PathBuf::from("D:/audit"),
+            mcp_token_file: PathBuf::from("D:/state/mcp-tokens.toml"),
             ..Config::default()
         };
         let rules = Prune::from_config(&config);
-        assert_eq!(rules.prefixes().len(), 2);
+        assert_eq!(rules.prefixes().len(), 3, "one configured, two automatic");
         assert!(rules.excludes(Path::new("D:/secret/key.pem")));
         assert!(rules.excludes(Path::new("D:/audit/audit-2026-09-23.jsonl")));
+        assert!(rules.excludes(Path::new("D:/state/mcp-tokens.toml")));
+        assert!(!rules.excludes(Path::new("D:/work/notes.md")));
     }
 }
