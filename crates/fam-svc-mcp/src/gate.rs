@@ -6,7 +6,8 @@
 //!
 //! 1. **tier** - does this token's whitelist contain this verb at all?
 //! 2. **scope** - is this path inside one of the workspaces this token was granted?
-//! 3. **exclusion** - is this path the program's own state (the audit trail, the credential file)?
+//! 3. **exclusion** - is this path the program's own state (its audit trail, its credential file,
+//!    its tag database)?
 //! 4. **reparse** - does the path *actually* stay inside, once the filesystem resolves it?
 //!
 //! Question 3 is here because the answer to 2 alone was not enough. `fam_open_dir` lists a directory
@@ -28,7 +29,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use fam_core::{PathKey, Prune};
+use fam_core::{Config, PathKey, Prune};
 use fam_svc_auth::{Token, Verb, Workspace};
 
 /// Why a call was refused. The text goes to the agent, so it says what is true about the request and
@@ -83,14 +84,42 @@ pub struct Gate {
     /// The roots the program manages, which is what a `*` workspace expands to.
     roots: Vec<PathBuf>,
     prune: Prune,
+    /// This program's own files, named exactly rather than by folder. `Prune` can only exclude a
+    /// directory and everything under it, which is the right shape for the audit trail and the
+    /// credential folder and the wrong shape for the tag database: a database file sitting *above*
+    /// a search root would exclude that whole root and answer "no results" for a folder that is
+    /// full. So the database joins the gate's own list instead of the walk's.
+    own: Vec<PathKey>,
 }
 
 impl Gate {
-    pub fn new(roots: &[PathBuf], prune: Prune) -> Self {
+    pub fn new(roots: &[PathBuf], prune: Prune, own: &[PathBuf]) -> Self {
         Self {
             roots: roots.to_vec(),
             prune,
+            own: own.iter().map(|path| PathKey::of(path.as_path())).collect(),
         }
+    }
+
+    /// The files that belong to this program rather than to the data it is showing. The three SQLite
+    /// names, because a database is a header plus a write-ahead log plus a shared-memory file and
+    /// all three hold rows.
+    pub fn program_files(config: &Config) -> Vec<PathBuf> {
+        let database = &config.database_path;
+        [
+            Some(database.to_path_buf()),
+            sidecar(database, "-wal"),
+            sidecar(database, "-shm"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Whether this path is the program's own state: inside a directory it keeps, or one of the
+    /// files it writes for itself.
+    fn own_state(&self, path: &Path) -> bool {
+        self.prune.excludes(path) || self.own.iter().any(|key| key == &PathKey::of(path))
     }
 
     pub fn roots(&self) -> &[PathBuf] {
@@ -115,7 +144,7 @@ impl Gate {
                 path: path.to_path_buf(),
             });
         }
-        if self.prune.excludes(path) {
+        if self.own_state(path) {
             return Err(Refusal::Excluded {
                 path: path.to_path_buf(),
             });
@@ -133,9 +162,14 @@ impl Gate {
             }
             match self.first_escape(&root, path) {
                 Ok(()) => return Ok(()),
-                // This root does not work, but another granted workspace might: a token with two
-                // workspaces must not be refused by whichever one the path happened to match first.
-                Err(at) => {
+                // The program's own state is not a property of which workspace was tried: it holds
+                // for every root the token has, so this answer goes out unchanged.
+                Err(Crossing::Excluded(at)) => {
+                    return Err(Refusal::Excluded { path: at });
+                }
+                Err(Crossing::Link(at)) => {
+                    // This root does not work, but another granted workspace might: a token with two
+                    // workspaces must not be refused by whichever one the path happened to match first.
                     if escape.is_none() {
                         escape = Some(at);
                     }
@@ -159,47 +193,102 @@ impl Gate {
     /// and measured 648 µs for one admission - sixty times the cost of writing the audit line that
     /// follows it. `symlink_metadata` per component costs a few microseconds, and a path with no
     /// reparse point on it cannot resolve to anywhere its own spelling does not point.
-    fn first_escape(&self, root: &Path, path: &Path) -> Result<(), PathBuf> {
-        let mut cursor = PathBuf::from(root);
-        let mut link: Option<PathBuf> = None;
-        for component in below(root, path) {
-            cursor.push(component.as_os_str());
-            if is_link(&cursor) {
-                link = Some(cursor);
-                break;
-            }
-        }
-        // The walk pushes every component below the root *including the last one*, so the leaf is
-        // already covered: a symlinked file costs the same stat the loop just spent. A separate leaf
-        // check here would be a second metadata call per request, and one metadata call on this
-        // machine measures 120-130 µs across runs - the whole gate is paid for in those.
-        let Some(link) = link else {
-            return Ok(());
+    fn first_escape(&self, root: &Path, path: &Path) -> Result<(), Crossing> {
+        let Some(components) = below(root, path) else {
+            // The two spellings do not line up - a granted `\\?\C:\dir` against a requested
+            // `C:\dir`, say - even though the folded identity says they name the same folder, so
+            // there is no telling which parts of the request are "below the root". Resolve the whole
+            // thing and judge the result: this is the case where paying for a `canonicalize`
+            // unconditionally is the only safe answer, and it cannot be reached by a caller who
+            // spells their path the way the grant reads.
+            let resolved = canonical(path).unwrap_or_else(|| path.to_path_buf());
+            return self.judge(root, &resolved);
         };
+        let mut cursor = PathBuf::from(root);
+        let mut hops = 0;
+        for component in components {
+            cursor.push(component.as_os_str());
+            if !is_link(&cursor) {
+                if hops > 0 {
+                    // Every step *after* a link is a step somewhere the caller did not name. The
+                    // two questions the caller's own spelling already answered - "not this program's
+                    // state", "still inside the grant" - have to be asked again about where the walk
+                    // has actually arrived, or a junction standing in a granted folder is a door.
+                    self.judge(root, &cursor)?;
+                }
+                continue;
+            }
+            hops += 1;
+            if hops > MAX_LINK_HOPS {
+                // `a -> b` and `b -> a` would spin here forever.
+                return Err(Crossing::Link(cursor));
+            }
+            let Some(resolved) = canonical(&cursor) else {
+                // A dangling link has no target, and a target that cannot be resolved cannot be
+                // *proven* to be inside. Refuse it: the alternative is to let an agent walk through
+                // a link whose destination this process cannot name.
+                return Err(Crossing::Link(cursor));
+            };
+            cursor = resolved;
+            self.judge(root, &cursor)?;
+        }
+        Ok(())
+    }
 
+    /// Where the walk is standing, asked against the granted root: still inside, and still not this
+    /// program's own state.
+    fn judge(&self, root: &Path, here: &Path) -> Result<(), Crossing> {
+        if self.own_state(here) {
+            return Err(Crossing::Excluded(here.to_path_buf()));
+        }
         let real_root = match canonical(root) {
             Some(resolved) => resolved,
             // A granted root that does not exist cannot be escaped from, and a token granted a folder
             // that has not been created yet is the ordinary case - the grant is for next week's
             // directory.
-            None => return Err(link),
+            None => return Ok(()),
         };
-        let root_key = PathKey::of(&real_root);
-        // A dangling link has no target, and a target that cannot be resolved cannot be *proven* to
-        // be inside. Refuse it: the alternative is to let an agent walk through a link whose
-        // destination this process cannot name.
-        match canonical(&link) {
-            Some(resolved) if root_key.is_within(&PathKey::of(&resolved)) => Ok(()),
-            _ => Err(link),
+        if PathKey::of(&real_root).is_within(&PathKey::of(here)) {
+            Ok(())
+        } else {
+            Err(Crossing::Link(here.to_path_buf()))
         }
     }
 }
 
-/// Whether this name is a reparse point - a symlink, a junction, or an alias.
+/// What the component walk found. Private to this file because the difference only matters to
+/// [`Gate::stays_inside`]: an exclusion is final, while a link is a reason to try the token's next
+/// granted workspace before refusing.
+enum Crossing {
+    /// A reparse point at or below the granted root leads out of it.
+    Link(PathBuf),
+    /// The walk landed inside this program's own state.
+    Excluded(PathBuf),
+}
+
+/// A guard against a pair of links that point at each other, not a policy about depth. Real chains
+/// are one or two links long; `canonicalize` has its own kernel limit and reports failure there.
+const MAX_LINK_HOPS: u32 = 32;
+
+/// Whether this name is a reparse point. Deliberately wider than `file_type().is_symlink()`, which
+/// answers only for symlink and mount-point tags: the listing this gate protects reports *any*
+/// reparse point (`ItemFlags::REPARSE`), so a tag that redirects without being a symlink must not be
+/// the one thing the gate assumes cannot exist.
 fn is_link(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false)
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT, 0x400 - the same bit the enumeration layer turns into
+        // `ItemFlags::REPARSE`.
+        meta.file_attributes() & 0x400 != 0 || meta.file_type().is_symlink()
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
 }
 
 /// The directories this token's scope names: the paths it was granted, plus the configured roots when
@@ -219,16 +308,28 @@ fn granted(token: &Token, roots: &[PathBuf]) -> Vec<PathBuf> {
     granted
 }
 
-/// The components of `path` below `root`. `Path::strip_prefix` is used rather than a component count,
-/// because the two spellings of one directory differ in separators and case and the count would then
-/// skip the wrong number of parts.
-fn below<'a>(root: &Path, path: &'a Path) -> Vec<Component<'a>> {
-    match path.strip_prefix(root) {
-        Ok(rest) => rest.components().collect(),
-        Err(_) => path.components().collect(),
-    }
+/// The components of `path` below `root`, or `None` when the two spellings cannot be lined up.
+///
+/// `Path::strip_prefix` is used rather than a component count because a count is not stable across
+/// spellings the folded identity calls one folder: `\\?\C:\dir` and `C:\dir`, or a grant stored in
+/// another case. `None` is not a refusal - the caller resolves the whole path and judges that - but
+/// it must never be answered by walking `path`'s components *onto* `root`, which would build a path
+/// nobody asked about, find no links on it, and report the check as passed.
+fn below<'a>(root: &Path, path: &'a Path) -> Option<Vec<Component<'a>>> {
+    path.strip_prefix(root)
+        .ok()
+        .map(|rest| rest.components().collect())
 }
 
 fn canonical(path: &Path) -> Option<PathBuf> {
     fs::canonicalize(path).ok()
+}
+
+/// `tags.db` beside a write-ahead log is `tags.db-wal` - SQLite's own spelling, which is not an
+/// extension and so cannot be reached with `with_extension`.
+fn sidecar(path: &Path, suffix: &str) -> Option<PathBuf> {
+    let name = path.file_name()?.to_os_string();
+    let mut name = name.into_string().ok()?;
+    name.push_str(suffix);
+    Some(path.parent()?.join(name))
 }

@@ -106,19 +106,59 @@ fn even_an_admin_with_the_wildcard_cannot_read_the_programs_own_files() {
         assert!(failure, "listing the parent worked: {answer}");
     }
 
-    // And the refusals are in the trail, which is the point of refusing loudly rather than silently.
+    // The tag database is the third piece of state, and it is the one whose folder is not excluded:
+    // it sits beside the configuration, so a *directory* rule either misses it or swallows the
+    // folder the user is working in. Three names then, with their parent still listable - which is
+    // where the difference from the two above lives.
+    let database = bench.config.database_path.clone();
+    let sidecars = ["-wal", "-shm"];
+    let mut own = vec![database.clone()];
+    own.extend(sidecars.iter().map(|suffix| {
+        let name = format!(
+            "{}{suffix}",
+            database.file_name().expect("a file name").to_string_lossy()
+        );
+        database.with_file_name(name)
+    }));
+    for path in &own {
+        let (answer, failure) = call(&mut server, "fs_read", json!({"path": spelled(path)}));
+        assert!(failure, "{} was readable: {answer}", path.display());
+        assert!(
+            answer["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("own state")),
+            "{answer}"
+        );
+    }
+    let (answer, failure) = call(
+        &mut server,
+        "fs_list",
+        json!({"path": spelled(database.parent().expect("a parent"))}),
+    );
+    assert!(
+        !failure,
+        "the folder holding the database has to stay listable: {answer}"
+    );
+
+    // And the refusals are in the trail, which is the point of refusing loudly rather than silently:
+    // every `fs_read` this test issued was refused, so every one of them is an error line, and
+    // nothing is claimed that did not happen.
     let lines = bench.agent_lines();
+    let reads = lines
+        .iter()
+        .filter(|line| line["op"] == "fs_read")
+        .collect::<Vec<_>>();
     assert_eq!(
-        lines
-            .iter()
-            .filter(|line| line["op"] == "fs_read"
-                && line["result"]
-                    .as_str()
-                    .expect("a result")
-                    .starts_with("error "))
-            .count(),
-        2,
-        "{lines:?}"
+        reads.len(),
+        2 + own.len(),
+        "one read per state file, plus the credential and the trail"
+    );
+    assert!(
+        reads.iter().all(|line| line["result"]
+            .as_str()
+            .expect("a result")
+            .starts_with("error ")),
+        "a read of this program's own state was allowed: {reads:?}"
     );
 }
 
@@ -282,6 +322,165 @@ fn a_changed_credential_file_stops_the_running_server() {
     );
 }
 
+#[test]
+fn an_unscoped_search_is_refused_when_a_second_root_is_not_granted() {
+    // `Router::allows` lets *any* configured root produce rows once no scope is named, so the gate
+    // has to ask about all of them. Asking about `search_roots[0]` was the bug this pins - and the
+    // bench is built so that the first root *is* covered by the credential, because a token that
+    // covers neither root is refused by both the broken and the fixed code and the test would prove
+    // nothing either way.
+    let bench = Bench::at(Tier::Browse, &[Place::Root]);
+    let second = tempfile::tempdir().expect("a second configured root");
+    std::fs::write(second.path().join("quarterly-report.txt"), "x\n").expect("write");
+    let mut two = bench.config.clone();
+    two.search_roots = vec![bench.root.clone(), second.path().to_path_buf()];
+    let mut server = fam_svc_mcp::Server::authenticate(two, &bench.credential)
+        .expect("the credential this bench issued still opens a session");
+
+    let (answer, failure) = call(&mut server, "fs_search", json!({"query": "quarterly"}));
+    assert!(failure, "the ungranted root was searchable: {answer}");
+    assert!(
+        !answer.to_string().contains("quarterly-report"),
+        "the hit came back with the refusal: {answer}"
+    );
+    let message = answer["error"].as_str().expect("a sentence");
+    assert!(
+        !message.contains(&spelled(second.path())),
+        "the refusal named a root this credential was not granted: {message}"
+    );
+
+    // Scoped to what was granted, the same call answers normally - the refusal is about the scope,
+    // not about searching.
+    let (answer, failure) = call(
+        &mut server,
+        "fs_search",
+        json!({"query": "alpha", "within": spelled(&bench.inbox)}),
+    );
+    assert!(!failure, "{answer}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_junction_is_not_a_door_into_the_programs_own_state() {
+    // The exclusion is asked about the caller's spelling, and for a path with no links on it that
+    // spelling *is* the path. Put a junction in the granted folder pointing at `state/` and the
+    // answer to "is this my own state?" changes halfway through the request - which is the same
+    // mistake that let the credential file be read at all one increment ago, arrived at from the
+    // other side.
+    let bench = Bench::at(Tier::Admin, &[Place::Wildcard]);
+    let link = bench.inbox.join("state-door");
+    let made = Command::new("cmd.exe")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(bench.state())
+        .output()
+        .expect("cmd.exe runs");
+    assert!(
+        made.status.success(),
+        "mklink /J failed: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+
+    let mut server = bench.server();
+    for path in [
+        link.join("auth/mcp-tokens.toml"),
+        link.join("audit"),
+        link.join("tags.db"),
+    ] {
+        let (answer, failure) = call(&mut server, "fs_read", json!({"path": spelled(&path)}));
+        assert!(failure, "through the junction it was readable: {answer}");
+        assert!(
+            answer["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("own state")),
+            "the refusal should be the exclusion, not a scope complaint: {answer}"
+        );
+    }
+    // The junction itself is still listed - it is a name inside the granted folder - with its
+    // reparse flag set, so the caller is told rather than silently blocked.
+    let (answer, failure) = call(
+        &mut server,
+        "fs_list",
+        json!({"path": spelled(&bench.inbox)}),
+    );
+    assert!(!failure, "{answer}");
+    let row = answer["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|row| row["name"] == "state-door")
+        .expect("the junction is listed");
+    assert_eq!(row["reparse"], true, "{row}");
+    let _ = std::fs::remove_dir(&link);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_link_below_a_link_is_still_a_link() {
+    // The walk used to stop at the first reparse point and ask one question about it: does *that*
+    // link stay inside? Two links answer it - the first points into a folder that is still granted,
+    // the second points out - and the components below the first were never looked at.
+    let bench = Bench::at(Tier::Browse, &[Place::Inbox]);
+    let outside = bench.temp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("a folder to point at");
+    std::fs::write(outside.join("crown-jewel.txt"), "not granted\n").expect("write");
+    let inner = bench.inbox.join("inner");
+    std::fs::create_dir_all(&inner).expect("inner");
+    let mklink = |name: &std::path::Path, target: &std::path::Path| {
+        let made = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(name)
+            .arg(target)
+            .output()
+            .expect("cmd.exe runs");
+        assert!(
+            made.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    };
+    let hop_one = bench.inbox.join("via-one");
+    mklink(&hop_one, &inner);
+    let hop_two = inner.join("via-two");
+    mklink(&hop_two, &outside);
+
+    let mut server = bench.server();
+    let escaping = hop_one.join("via-two/crown-jewel.txt");
+    let (answer, failure) = call(&mut server, "fs_read", json!({"path": spelled(&escaping)}));
+    assert!(
+        failure,
+        "two links carried the token out of the grant: {answer}"
+    );
+    assert!(
+        answer["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("leaves the granted workspace")),
+        "{answer}"
+    );
+
+    // The same escape spelled the way the verbatim Windows API wants it. `covers` folds `\\?\`
+    // away, so this is still in scope, but the component walk cannot line it up with the granted
+    // root by counting parts - when the two do not align the gate resolves the whole path and
+    // judges that, rather than finding no links to check.
+    let verbatim = format!(r"\\?\{}", escaping.display());
+    let (answer, failure) = call(&mut server, "fs_read", json!({"path": verbatim}));
+    assert!(
+        failure,
+        "a verbatim spelling walked past the check: {answer}"
+    );
+
+    // And a chain that never leaves stays allowed: the check is about leaving, not about links.
+    let (answer, failure) = call(
+        &mut server,
+        "fs_list",
+        json!({"path": spelled(&bench.inbox.join("via-one"))}),
+    );
+    assert!(!failure, "a link that stays inside was refused: {answer}");
+    let _ = std::fs::remove_dir(&hop_two);
+    let _ = std::fs::remove_dir(&hop_one);
+    let outside: &Path = outside.as_path();
+    assert!(outside.exists());
+}
 /// The junction test. A junction is a Windows reparse point that needs no privilege to create, and
 /// it is exactly the shape the `covers` check cannot see: the path still starts with the granted
 /// folder.

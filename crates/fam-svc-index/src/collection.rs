@@ -33,6 +33,10 @@ pub struct Collection {
     direction: Order,
     terms: Vec<String>,
     kind: Option<Kind>,
+    /// Whether directories lead the ordering, ahead of the sort key rather than inside it.
+    /// Off by default: the shell's columns are navigated by name, and only a caller that pages
+    /// needs the grouping to survive the page boundary.
+    grouped: bool,
 }
 
 impl Collection {
@@ -45,6 +49,7 @@ impl Collection {
             direction: Order::Ascending,
             terms: Vec::new(),
             kind: None,
+            grouped: false,
         };
         collection.rebuild();
         collection
@@ -79,6 +84,17 @@ impl Collection {
         }
         self.sort = sort;
         self.direction = direction;
+        self.rebuild();
+    }
+
+    /// Put directories ahead of everything else in the ordering. `fs_list` needs this because a
+    /// caller that pages cannot group a page afterwards - grouping is a key of the ordering here,
+    /// not a pass over whatever rows a page happened to collect.
+    pub fn set_grouped(&mut self, grouped: bool) {
+        if self.grouped == grouped {
+            return;
+        }
+        self.grouped = grouped;
         self.rebuild();
     }
 
@@ -175,6 +191,20 @@ impl Collection {
     fn compare(&self, a: u32, b: u32) -> Ordering {
         let left = self.table.item(a).expect("index in range");
         let right = self.table.item(b).expect("index in range");
+        // Folders first is a *primary key of the ordering*, not a pass over a page. A caller that
+        // grouped after slicing gets a different first page from a caller that grouped before it,
+        // and the rows that sort past the window never appear at all - which is invisible until a
+        // directory has more entries than one page holds.
+        if self.grouped {
+            let (left_dir, right_dir) = (left.flags().is_directory(), right.flags().is_directory());
+            if left_dir != right_dir {
+                return if left_dir {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+            }
+        }
         let primary = match self.sort {
             SortKey::Name => self.by_name(left, right),
             SortKey::Size => left.size.cmp(&right.size),

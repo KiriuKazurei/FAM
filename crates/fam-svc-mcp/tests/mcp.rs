@@ -9,7 +9,7 @@ mod common;
 
 use common::{call, request, spelled, Bench, Place};
 use fam_svc_auth::{Tier, Verb};
-use fam_svc_mcp::{Server, TOOLS};
+use fam_svc_mcp::{Server, PROTOCOL_VERSION, TOOLS};
 use serde_json::{json, Value};
 
 /// The path as the tools spell it: one separator style, whatever the caller used.
@@ -164,6 +164,156 @@ fn the_handshake_answers_in_the_shape_a_client_expects() {
     );
     let ping = request(&mut server, "ping", json!({}));
     assert_eq!(ping["result"]["protocolVersion"], "2025-06-18");
+
+    // A client asking for a version this server does not speak is told which version it is getting.
+    // The assertion above cannot tell this apart from the bug, because it asks for the one version
+    // that answers: echoing whatever was typed would let both sides believe a protocol nobody
+    // implements, and the client would never learn to leave.
+    let other = request(
+        &mut server,
+        "initialize",
+        json!({
+            "protocolVersion": "1999-01-01",
+            "capabilities": {},
+            "clientInfo": {"name": "test-harness", "version": "0"}
+        }),
+    );
+    assert_eq!(
+        other["result"]["protocolVersion"], PROTOCOL_VERSION,
+        "the answer was the client's own string, not the server's"
+    );
+}
+
+#[test]
+fn a_tool_call_without_an_id_is_answered_rather_than_dropped() {
+    // A notification asks for nothing and gets nothing - correct for `notifications/initialized`.
+    // A `tools/call` with no id is not asking for nothing: it named a tool and passed arguments.
+    // Dropping it in silence leaves the client waiting for a reply that will never come.
+    let bench = Bench::at(Tier::Edit, &[Place::Inbox]);
+    let mut server = bench.server();
+    let answer = server
+        .handle(
+            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"note_set","arguments":{}}}"#,
+        )
+        .expect("answered with a protocol error rather than with nothing");
+    let envelope: Value = serde_json::from_str(&answer).expect("one JSON line");
+    assert_eq!(envelope["error"]["code"], -32600, "{envelope}");
+    assert!(envelope.get("result").is_none(), "{envelope}");
+    // Nothing ran, so nothing is claimed: the session's own opening line is there, and no tool op.
+    let lines = bench.agent_lines();
+    let tools = lines
+        .iter()
+        .filter(|line| {
+            !line["op"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("session.")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        tools.is_empty(),
+        "an unanswerable call still reached a tool: {tools:?}"
+    );
+}
+
+#[test]
+fn a_query_in_any_language_is_clipped_not_fatal() {
+    // The audit line carries a summary of the caller's own text. Clipping it on a *byte* boundary
+    // panics inside the code that writes that line, which means the call leaves no trace and the
+    // process dies - from a `browse` credential, on the cheapest request there is.
+    let bench = Bench::at(Tier::Browse, &[Place::Inbox]);
+    let mut server = bench.server();
+    for length in [199, 200, 201, 500] {
+        let query = "字".repeat(length);
+        let (answer, _) = call(
+            &mut server,
+            "fs_search",
+            json!({"query": query, "within": spelled(&bench.inbox)}),
+        );
+        let _ = answer;
+    }
+    // The line for the longest one exists, is clipped, and does not carry the whole call.
+    let lines = bench.agent_lines();
+    let args = lines
+        .iter()
+        .filter(|line| line["op"] == "fs_search")
+        .filter_map(|line| line["args"].as_str())
+        .next_back()
+        .expect("a search line with args");
+    // The clip is by characters - which for these queries is far fewer bytes than the ceiling, and
+    // that is exactly the point: the byte-counting version panicked trying to land on 200.
+    assert!(
+        args.chars().count() <= 200,
+        "{} characters is over the ceiling",
+        args.chars().count()
+    );
+    assert!(
+        args.ends_with('~'),
+        "not clipped the way the writer clips: {args}"
+    );
+}
+
+#[test]
+fn a_folder_that_does_not_fit_one_page_still_leads_with_its_folders() {
+    // Grouping has to be a property of the ordering, not of the page: group after slicing and the
+    // folders that sort past the first window never appear in any page, while some rows repeat
+    // across two. This folder is built so that two of its directories sort *after* most files -
+    // which is the case the broken shape hides, because the first page looks fine.
+    let bench = Bench::at(Tier::Browse, &[Place::Inbox]);
+    for name in ["b1.txt", "b2.txt", "b3.txt", "b4.txt"] {
+        std::fs::write(bench.inbox.join(name), "x\n").expect("write");
+    }
+    for name in ["z-first", "z-second"] {
+        std::fs::create_dir_all(bench.inbox.join(name)).expect("dir");
+    }
+    let mut server = bench.server();
+
+    let mut seen: Vec<(String, bool)> = Vec::new();
+    let mut total = 0;
+    for page in 0..20 {
+        let (answer, failure) = call(
+            &mut server,
+            "fs_list",
+            json!({"path": spelled(&bench.inbox), "limit": 3, "offset": page * 3}),
+        );
+        assert!(!failure, "{answer}");
+        total = answer["total"].as_u64().expect("a total") as usize;
+        let rows = answer["entries"].as_array().expect("entries");
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            let name = row["name"].as_str().expect("a name").to_owned();
+            assert!(
+                !seen.iter().any(|(seen, _)| *seen == name),
+                "{name} came back on two pages"
+            );
+            seen.push((name, row["directory"].as_bool().unwrap_or(false)));
+        }
+    }
+    assert_eq!(
+        seen.len(),
+        total,
+        "the pages did not cover the folder exactly once: {seen:?}"
+    );
+    let folders: Vec<&str> = seen
+        .iter()
+        .filter(|(_, is_dir)| *is_dir)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        folders.len(),
+        4,
+        "a directory went unreachably off the pages: {seen:?}"
+    );
+    assert!(
+        seen.iter().take(folders.len()).all(|(_, is_dir)| *is_dir),
+        "the first page started with a file: {seen:?}"
+    );
+    assert!(
+        seen.iter().skip(folders.len()).all(|(_, is_dir)| !*is_dir),
+        "a folder appeared after the files: {seen:?}"
+    );
 }
 
 #[test]
@@ -513,10 +663,13 @@ fn the_price_of_the_gate_and_a_request() {
     let gated_request = started.elapsed();
 
     // The gate on its own, with the syscalls it makes: one `symlink_metadata` per component below
-    // the granted root, and `canonicalize` only on a component that actually is a link.
+    // the granted root, and `canonicalize` only on a component that actually is a link. Built the
+    // same way the server builds it, own-file list included, so this number is the one a request
+    // pays and not a cheaper approximation of it.
     let gate = fam_svc_mcp::Gate::new(
         &bench.config.search_roots,
         fam_core::Prune::from_config(&bench.config),
+        &fam_svc_mcp::Gate::program_files(&bench.config),
     );
     let token = server.token().clone();
     let started = std::time::Instant::now();

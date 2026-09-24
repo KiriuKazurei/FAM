@@ -115,7 +115,11 @@ impl Server {
         let index = DirIndex::with_budget_bytes(config.cache_budget_bytes());
         let router = Arc::new(SearchRouter::from_config(&config));
         let tags = fam_svc_store::TagStore::open(&config.database_path)?;
-        let gate = Gate::new(&config.search_roots, Prune::from_config(&config));
+        let gate = Gate::new(
+            &config.search_roots,
+            Prune::from_config(&config),
+            &Gate::program_files(&config),
+        );
         Ok(Self {
             config,
             token,
@@ -164,7 +168,20 @@ impl Server {
                 id?,
                 json!({ "tools": tools::TOOLS.iter().map(|tool| tool.to_json()).collect::<Vec<_>>() }),
             ),
-            "tools/call" => self.call(&request, id?),
+            "tools/call" => match id {
+                Some(id) => self.call(&request, id),
+                // A tool call with no id is not a notification. A notification asks for nothing;
+                // this one asked to change a file. Dropping it in silence leaves the client waiting
+                // for an answer that will never come and puts no line in the trail, so say what is
+                // wrong instead - and say nothing more, because nothing was executed.
+                None => Response::error(
+                    None,
+                    ProtocolError::new(
+                        crate::proto::INVALID_REQUEST,
+                        "tools/call needs an id, because it is the one method that must be answered",
+                    ),
+                ),
+            },
             other => Response::error(
                 id,
                 ProtocolError::new(
@@ -183,15 +200,14 @@ impl Server {
             return Response::Nothing;
         };
         self.initialized = true;
-        let asked = request
-            .params
-            .get("protocolVersion")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
         Response::ok(
             id,
             json!({
-                "protocolVersion": if asked.is_empty() { PROTOCOL_VERSION } else { asked },
+                // The version this server speaks, not the one that was asked for. Echoing the client
+                // back to itself would let both sides believe a version nobody implements: a client
+                // that asked for something older has to be told what it is actually getting, which is
+                // the only way it can decide to leave.
+                "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": {
                     "name": SERVER_NAME,
@@ -441,27 +457,13 @@ impl Server {
         let mut collection = Collection::from_snapshot(snapshot);
         collection.set_sort(sort, Order::Ascending);
         let total = collection.len();
-        // Grouped here rather than in the index: a Miller column is navigated by descending into a
-        // folder, so the folders belong at the top of the page, and paging has to happen *after* the
-        // grouping or the first page of a file-heavy folder shows no folders at all. The window is
-        // bounded by `MAX_ROWS`, which is also the ceiling on a single call's rows.
-        let window = collection.fetch(0, (offset + limit).min(total).max(1));
-        let mut ordered: Vec<&fam_svc_index::FetchedRow> = Vec::with_capacity(window.len());
-        let mut files: Vec<&fam_svc_index::FetchedRow> = Vec::with_capacity(window.len());
-        for row in &window {
-            if row.item.flags().is_directory() {
-                ordered.push(row);
-            } else {
-                files.push(row);
-            }
-        }
-        ordered.extend(files);
-        let entries: Vec<Value> = ordered
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .map(|row| json_row(&path, row))
-            .collect();
+        // Grouping is a key of the ordering, so the page boundary cannot cut between a folder and
+        // the folder below it: grouping a window and then slicing the window shows the folders only
+        // on whichever page happened to contain them. The window stays bounded by `limit`, which is
+        // also the ceiling on a single call's rows.
+        collection.set_grouped(true);
+        let window = collection.fetch(offset, limit.min(total.saturating_sub(offset)));
+        let entries: Vec<Value> = window.iter().map(|row| json_row(&path, row)).collect();
         ToolAnswer::ok(json!({
             "path": path.display().to_string(),
             "generation": generation,
@@ -500,12 +502,24 @@ impl Server {
                 "limit": MAX_FILE_BYTES,
             }));
         }
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(source) => {
-                return ToolAnswer::error(format!("cannot read {}: {source}", path.display()))
-            }
-        };
+        // Read through a `take` window, not `fs::read`: the size check above is a `metadata` call,
+        // and between that call and this one the file is free to grow. Reading whatever it now holds
+        // would let a 1 MiB limit be exceeded by an allocation this server makes on a caller's
+        // behalf. One extra byte is enough to tell "exactly at the limit" from "over it".
+        let mut bytes: Vec<u8> = Vec::new();
+        let opened = std::fs::File::open(path).and_then(|file| {
+            use std::io::Read;
+            file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)
+        });
+        if let Err(source) = opened {
+            return ToolAnswer::error(format!("cannot read {}: {source}", path.display()));
+        }
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return ToolAnswer::ok(json!({
+                "error": format!("{} grew past the read limit", path.display()),
+                "limit": MAX_FILE_BYTES,
+            }));
+        }
         match String::from_utf8(bytes) {
             Ok(text) => ToolAnswer::ok(json!({
                 "path": path.display().to_string(),
@@ -560,13 +574,21 @@ impl Server {
             return ToolAnswer::error(
                 "this program has no configured roots, so a search has nothing to cover",
             );
-        } else if let Err(why) = self.admit(Verb::FsSearch, &self.config.search_roots[0]) {
-            // An unscoped search reads every configured root, so the credential has to cover all of
-            // them - otherwise a token granted one folder could learn the names of files in another.
-            return ToolAnswer::error(format!(
+        } else if self
+            .config
+            .search_roots
+            .iter()
+            .any(|root| self.admit(Verb::FsSearch, root).is_err())
+        {
+            // An unscoped search reads **every** configured root - `Router::allows` lets any of them
+            // produce rows once no scope is named - so the credential has to cover all of them.
+            // Asking about `search_roots[0]` alone was the bug: with two roots, a token granted one
+            // got file names out of the other. The refused root is not named in the answer either,
+            // because a caller who has not earned the second root has not earned knowing its path.
+            return ToolAnswer::error(
                 "a search without `within` covers every configured root, and this credential does \
-                 not: {why}"
-            ));
+                 not",
+            );
         }
         let mut hits: Vec<Value> = Vec::new();
         let mut overflowed = false;
@@ -659,7 +681,7 @@ fn path_argument(verb: Verb, request: &Request) -> Option<PathBuf> {
 /// What was asked, in as little space as will still answer "which call was this" a month later.
 /// Never a file's contents: a `fs_write` line carries the byte count, not the bytes.
 fn args_of(verb: Verb, request: &Request) -> String {
-    let mut text = match verb {
+    let text = match verb {
         Verb::FsSearch => format!(
             "query={}",
             request
@@ -709,10 +731,11 @@ fn args_of(verb: Verb, request: &Request) -> String {
         ),
         _ => String::new(),
     };
-    if text.len() > 200 {
-        text.truncate(200);
-    }
-    text
+    // Clipped by characters, through the same helper the audit layer writes its own fields with.
+    // `String::truncate` cuts on a *byte* index and panics when that index falls inside a character -
+    // and the query and the move ends are caller text, so a 100-character non-ASCII query would have
+    // killed this process on the way to writing the line about it.
+    fam_svc_audit::clip(&text, 200)
 }
 
 /// The `result` of a successful call: the counts a reader cares about, not the payload.

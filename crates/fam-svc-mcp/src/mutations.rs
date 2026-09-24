@@ -10,7 +10,10 @@
 //!   this surface could do, and the caller can always delete the contents first - deliberately, one
 //!   call at a time, each of which is in the trail.
 //! * `fs_move` will not overwrite an existing target.
-//! * `fs_write` and `fs_create` will not invent a parent directory.
+//! * `fs_write` will not invent a parent directory, and neither will `fs_create` of a **file**: a
+//!   typo in the last component of a path must not quietly relocate the file somewhere else.
+//!   `fs_create` of a *directory* does create the chain, because making directories is the whole
+//!   job of that call and every part of the chain was already inside the grant.
 //!
 //! What is *not* here: any way to widen, shorten or end a credential. Those are the four
 //! `fam mcp token` commands, run by a person, and this crate never calls `add`, `revoke` or
