@@ -150,6 +150,28 @@ sha256("fam-mcp-token-v1" ‖ "78770eea963cede06c65b22d5fb151e5" ‖ "67280c18" 
   它永远匹配不上任何被列举出来的绝对路径，留着等于一张静默失效的票。
 - `any_of_several_workspaces_is_the_union`：多个工作区是并集，不是交集，也不是最长匹配。
 
+**但"用了 PathKey"不等于"回答了正确的问题"。** 复查时被抓出来的一条：`PathKey` 折叠分隔符、
+ASCII 大小写与 `\\?\` 前缀，**它不解析组件**——解析需要文件系统（`..` 落在一个 junction 下面，
+指向的不是调用方以为的父目录）。于是键 `D:\NOTES\..\WINDOWS` 里那两个点还在原地，
+`is_within(D:\NOTES, 那个键)` 回答"在范围内"，而 `CreateFile` 打开的是 `D:\WINDOWS`：
+**一张只授权看一个文件夹的票可以列举盘根**。父目录写法是干净的演示，
+`fs_list("D:/notes/..")` 就够。
+
+修法不是在这里做规范化（那会让这层对"路径指向哪"的判断和真正去打开它的那一层不一致），
+而是**两侧都不接受没解析过的写法**：`Workspace::parse` 拒收带 `.` / `..` 的授权
+（新错误 `DottedWorkspace`），`covers` 对带点的查询路径一律回答"不覆盖"，
+文件里的行也读不进来。规则写在 `scope.rs` 的 `has_dots` 上，
+它拆的是原始文本而不是 `Path::components`——后者会**悄悄丢掉内部的 `.` 段**，
+`D:/notes/./x` 与 `D:/notes/.` 都拿不到 `CurDir`，用它的判断会漏掉尾部那个点，
+而一张拼成 `D:/notes/.` 的票恰好就是"静默什么都不覆盖"的那种票。
+钉住它的两条：`a_path_that_has_not_been_resolved_covers_nothing`、
+`the_file_round_trips_both_spellings` 里新增的那句 `workspace = "D:/notes/../secrets"` 必须读不进来。
+
+同一个形状在 `Prune` 的排除前缀上也在（`D:/notes/../secret` 不会被 `D:/notes` 那条排除挡住）。
+那次没动它：排除的是"什么可以被报出来"，越界的方向是**多报**，而今天没有任何调用方会把
+未解析的路径递给 prune——写它的人是从 `fam_open_dir` 或配置里拿的绝对路径。
+严重度与归属记在复查账上。
+
 ### 2.7 等级和范围是一次决定，不是两步问
 
 `Verb::names_a_path()` 是唯一一处"这个动词作不作路径主张"的判断，
@@ -161,7 +183,7 @@ sha256("fam-mcp-token-v1" ‖ "78770eea963cede06c65b22d5fb151e5" ‖ "67280c18" 
 这条是 §2.1 那个"协议面上不存在"的**命名层面**的保险：以后有人往 MCP 上摆工具时，
 名字里出现这些词就是当场可疑。
 
-### 2.8 凭据文件自己不能是数据
+### 2.8 凭据文件不能被搜出来——但单层直开仍然能
 
 `Prune::from_config` 现在注入**两**条自动前缀：`audit_dir` 与 `mcp_token_file.parent()`
 （`crates/fam-core/src/prune.rs`）。一条真跑的证据，把凭据文件放进搜索根**之内**：
@@ -194,6 +216,23 @@ database_path   = 'C:\Users\Kirig\AppData\Roaming\FileAutoManage\tags.db'
 配置的搜索根落在凭据目录之内时拒绝启动并点名是哪一个。这条**没有**为默认配置开后门：
 默认 `mcp_token_file` 的父目录在 `search_roots = ['C:\Users\Kirig']` 之内，方向是"凭据在根里"，
 那是常态，交给 prune。
+
+**这句话说的是"搜不出来"，不是"碰不到"。** 复查时把这句话演了一遍才算数：
+`fam_open_dir` 走的是单层列举，而单层列举**根本不问 `Prune`**——
+
+```
+$ abi-smoke.exe C:\...\fam11r\config.toml C:\...\fam11r\auth      # 树参数直接给凭据目录
+dir token=1 rows=1 generation=1
+first row=mcp-tokens.toml kind=6 directory=0
+```
+
+也就是说通过 `famcore.dll` 能知道"这个目录里有一个 `mcp-tokens.toml`，多大，什么时候改的"
+（行数就是票数的上界），但**读不到里面的字节**：今天 21 个导出里没有任何读文件内容的入口，
+`fam_dir_fetch` 给的是目录行的定长记录。这跟增量 10 §4.3 第 1 条是同一个口子（那里是审计目录），
+归属也一样：**增量 12 的 `fs_read` 一落地，这条就从"元数据"变成"完整泄露"**——
+票、salt、摘要会一起被读走。所以修它的正确时机不是现在，是 12 给 `covers` 递 `Prune` 的那一刻：
+让"在排除里"与"在范围里"在同一次判断里问完，而不是在这层再立一个判据。
+严重度：中（今天只泄露存在性与尺寸；12 之后是全部）。归属：增量 12。
 
 ### 2.9 没发生的授权也必须留痕（这条是自查发现的，不是我一开始做对的）
 
@@ -245,9 +284,11 @@ created_at = "2026-09-24T05:49:09.410Z"
 凭据字符串 `fam_<8hex id>_<64hex secret>`：id 在前缀里，所以校验时先按 id 定位行，
 再比对该行的摘要——**不需要把全表逐个试一遍**（那会让"命中"与"没命中"的时间差成倍数）。
 
-`Credential::parse` 用 `split_once('_')` 加显式校验（id 必须 8 位十六进制、secret 必须 ≥ 64 位十六进制），
-不是 `split_at(8)`：后者对短串或非 ASCII 输入会 panic，而输入是外人递的。
-未知 id、错秘密、已撤销、格式坏四种情况返回**同一个** `None`，不看错误种类就不给方向。
+`Credential::parse` 用 `split_once('_')` 加显式校验（id 必须 8 位十六进制；secret 只要求
+≥ 32 个十六进制字符，即 `SECRET_BYTES` 个**字符**——真正的判定是摘要比对，这个下限只是把明显
+是垃圾的输入挡在哈希之前），不是 `split_at(8)`：后者对短串或非 ASCII 输入会 panic，
+而输入是外人递的。未知 id、错秘密、已撤销、格式坏四种情况返回**同一个** `None`，
+不看错误种类就不给方向。
 
 ### 3.2 人工面：四条命令
 
@@ -303,9 +344,11 @@ label 的规则 `[A-Za-z0-9._-]{1,48}`，且 `user` / `system` / `unnamed` 保�
 
 ### 4.1 正面证据
 
-`cargo test --workspace`：**440 通过、0 失败、1 条 `#[ignore]`**（那条是 §4.2 的测价，
-命令写在它的注释里）。分目标：fam-svc-auth 43、fam-core 56、fam-svc-audit 42、fam-cli 19
-（12 → 19，+7）、其余目标不变。`cargo clippy --workspace --all-targets` 零告警；
+`cargo test --workspace`：**446 通过、0 失败、1 条 `#[ignore]`**（那条是 §4.2 的测价，
+命令写在它的注释里）。分目标：fam-svc-auth 48、fam-core 56、fam-svc-audit 42、fam-cli 19
+（12 → 19，+7）、`crates/fam-ffi/tests/audit.rs` 12。
+其中 440 是本增量写完时的数，446 是复查之后的数（差 6 条，逐条见
+`increment-11-review-findings.md`）。`cargo clippy --workspace --all-targets` 零告警；
 `cargo check -p fam-svc-auth -p fam-svc-audit --target aarch64-unknown-linux-musl` 通过。
 `abi-smoke` 在新建的 GNU `famcore.dll` 上 `insert=1 cut=1 -> ok`，退出 0。
 
@@ -398,9 +441,12 @@ volume_scan_capped 586534→519647us 0.89x ok   walk_large_tree 205068→193330u
    严重度：中（如果今天有人照名字理解"admin 更大"，实际只多一个 `*`）。
    归属：增量 12 落地工具清单时一并决定词表动词，然后 `admin_has_no_verb_that_edit_lacks` 会当场红——
    那条测试是快照，改的人必须显式改它。
-3. **时间差会泄露"id 在不在表里"**（1.6 µs vs 0.26 µs，§4.2 第三行）。
-   能被读到这一点的前提是能让本机进程反复试并测到亚微秒，而那个前提已经等于 §1 的绕过。
-   严重度：极低。归属：不修，写了理由，等哪天"按 id 定位"改成"全表扫"时这条自然消失。
+3. **时间差会回答三个问题，而返回值只回答一个**（实测 §4.2：未知 id 0.26 µs、错秘密 1.52 µs、
+   正确 1.6 µs；已撤销的行在算摘要之前就返回，与未知 id 同档）。返回值确实是同一个 `None`，
+   被读出的是"这个 id 在不在表里、是不是活的"。能被读到这一点的前提是能让本机进程反复试并测到亚微秒，
+   而那个前提已经等于 §4.3 第 1 条的绕过。严重度：极低。
+   归属：不修，写了理由；哪天"按 id 定位"改成"全表扫"时这条自然消失。
+   注意别把它当成已经修好：`verify` 的注释说的是"四种 no 给同一个答案"，说的是答案不是时间。
 4. **排除的是凭据文件的父目录**，自定义到别处时罩不住 `config.toml` / `tags.db`；
    反过来，把凭据文件放进 `%APPDATA%\FileAutoManage` 会把那一整片变成不可搜。
    严重度：低（默认布局是好的，实测见 §2.8）。归属：如果哪天真要"排除到文件而非目录"，
