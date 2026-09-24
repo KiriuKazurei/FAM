@@ -24,6 +24,7 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 | `crates/fam-bench` | 度量台与地板门槛 |
 | `apps/fam-cli` | `fam` 命令行（无头测试台） |
 | `apps/fam-shell` | Qt6 Widgets 界面 |
+| `apps/fam-design` | Ant Design 5 样式的**独立样机**：只链 Qt，不链 `famcore`，产品窗口一行未改 |
 
 工程处于**资源管理器重建**之中：浏览与搜索都已改为懒目录索引 + 流式虚拟化，
 名字检索按"能答全才问"在 Everything 与遍历之间路由，两者共用同一套范围规则。

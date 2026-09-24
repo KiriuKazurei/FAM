@@ -18,6 +18,9 @@ probe, query compilation, paged results), `fam-sched` (events merged into batche
 `fam-ffi` (the ABI producing `famcore.dll`: rows as fixed-size buffers with windowed reads, control
 payloads as JSON - v1's view and watch entry points were deleted in increment 9),
 `fam-bench` (measurements and the floor gate), `apps/fam-cli` and `apps/fam-shell` (Qt6 Widgets).
+`apps/fam-design` is separate from all of them: an Ant Design 5 sample of the shell's window that
+links Qt only - no `famcore`, no Rust crate - so the product's own appearance stays untouched.
+See `docs/notes/design-sample-wears-ant-design-5.md`.
 
 The rebuild is under way: browsing and search both run on the lazy directory index with streamed,
 virtualised results, and a name search is routed between Everything and enumeration by which of them
