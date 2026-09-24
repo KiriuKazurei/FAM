@@ -365,6 +365,23 @@ label 的规则 `[A-Za-z0-9._-]{1,48}`，且 `user` / `system` / `unnamed` 保�
 **每进程一次的文件读**：`TokenStore::open` 读 TOML 并逐行 `accept()`。
 本次**未实测**其耗时（几 KB 的一次读，与增量 10 记过的同类读同量级——这是估计不是测量）。
 
+**基准闸门。** `cargo run -p fam-bench -- check` 十条 measured case 全部在门槛内
+（`all measured cases within gate`）。这一句值得单独写，因为 prune 这次**又多注入一条前缀**
+（凭据文件的父目录），"每个被列举的目录要问几次前缀"从 1 变 2：
+
+```
+audit_append 41us 1.00x ok   open_flat_dir 1032→983us 0.95x ok   open_mixed_dir 1.00x ok
+patch_256_of_20k 1.01x ok    read_flat_std 0.95x ok   read_flat_win32 0.97x ok
+rebuild_view_20k 0.99x ok    viewport_from_cache 1.00x ok
+volume_scan_capped 586534→519647us 0.89x ok   walk_large_tree 205068→193330us 0.94x ok
+```
+
+**其中优于地板的部分不计为收益**：这台机器在跑这次基准之前，D: 卷只剩 24 MB 可用（连接器
+因此报 `LNK1318 PDB LIMIT`），我清掉了 3.4 GB 的增量编译缓存才跑得动。
+`volume_scan_capped` 与 `walk_large_tree` 上次被压红正是那块满盘造成的
+（见 `benchmark-floors-are-machine-state.md` 与增量 10 的 §4.2）。
+**机器状态变了，地板按既定原则没有重记。**
+
 **复杂度。** 多一个 crate、七个模块、一个配置项（`mcp_token_file`）、一条 CLI 子命令树；
 动词×等级是**人工维护的三份列表**，加一个动词要改三处并有 42 组断言兜着——
 这是有意的摩擦，不是没找到更聪明的写法。
