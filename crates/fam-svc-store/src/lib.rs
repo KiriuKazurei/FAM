@@ -5,10 +5,12 @@
 
 mod error;
 mod model;
+mod notes;
 mod store;
 
 pub use error::StoreError;
 pub use model::{
     display_order, validate_tag, FileTags, NewTag, SearchRequest, Source, TagRecord, MAX_TAG_CHARS,
 };
-pub use store::{AddOutcome, StoreStats, TagStore, DEFAULT_SEARCH_LIMIT};
+pub use notes::{NoteRecord, MAX_NOTE_BYTES};
+pub use store::{AddOutcome, StoreStats, TagStore, DEFAULT_SEARCH_LIMIT, SCHEMA_VERSION};

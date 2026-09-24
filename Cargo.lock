@@ -321,6 +321,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fam-mcp"
+version = "0.1.0"
+dependencies = [
+ "fam-core",
+ "fam-svc-audit",
+ "fam-svc-auth",
+ "fam-svc-mcp",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "fam-sched"
 version = "0.1.0"
 dependencies = [
@@ -391,6 +403,23 @@ dependencies = [
  "tempfile",
  "thiserror",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "fam-svc-mcp"
+version = "0.1.0"
+dependencies = [
+ "fam-core",
+ "fam-svc-audit",
+ "fam-svc-auth",
+ "fam-svc-index",
+ "fam-svc-store",
+ "fam-svc-walk",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

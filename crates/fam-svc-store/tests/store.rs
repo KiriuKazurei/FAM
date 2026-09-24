@@ -398,3 +398,81 @@ fn tag_names_for_returns_display_order_per_file() {
     assert!(!grouped.contains_key(&keys[2]));
     assert!(store.tag_names_for(&[]).unwrap().is_empty());
 }
+
+/// The migration path a fresh in-memory database never takes: a v1 file on disk, with rows in it,
+/// opened by a build that expects v2.
+///
+/// The v1 DDL is written out here rather than imported, on purpose - a test that builds the old
+/// schema from the same constant the migration runs would pass even if the two drifted apart.
+#[test]
+fn a_v1_database_gains_the_notes_table_and_keeps_its_rows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("tags.db");
+    {
+        let old = rusqlite::Connection::open(&file).expect("create v1");
+        old.execute_batch(
+            r#"
+CREATE TABLE files (
+    path_norm  TEXT PRIMARY KEY,
+    path       TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE tags (
+    id         INTEGER PRIMARY KEY,
+    path_norm  TEXT NOT NULL REFERENCES files(path_norm) ON DELETE CASCADE,
+    tag        TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','auto')),
+    priority   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (path_norm, tag, source)
+);
+CREATE INDEX tags_tag_source_idx ON tags(tag, source);
+"#,
+        )
+        .expect("v1 schema");
+        old.execute_batch(
+            "INSERT INTO files (path_norm, path) VALUES ('D:/NOTES.OLD', 'D:/notes.old');
+             INSERT INTO tags (path_norm, tag) VALUES ('D:/NOTES.OLD', 'kept');",
+        )
+        .expect("v1 rows");
+        old.pragma_update(None, "user_version", 1_i64)
+            .expect("stamp v1");
+    }
+
+    let store = TagStore::open(&file).expect("a v1 database opens");
+    let tags = store
+        .tags_of(Path::new("D:/notes.old"), None)
+        .expect("the old tag is still there");
+    assert_eq!(tags.len(), 1, "{:?}", tags);
+    assert_eq!(tags[0].tag, "kept");
+
+    store
+        .set_note(Path::new("D:/notes.old"), "written after the upgrade")
+        .expect("the new table is usable");
+    assert_eq!(
+        store
+            .note(Path::new("D:/notes.old"))
+            .expect("read")
+            .expect("there is a note")
+            .body,
+        "written after the upgrade"
+    );
+    assert_eq!(
+        store.stats().expect("stats").tags,
+        1,
+        "and nothing was duplicated"
+    );
+
+    /* A database from the future is refused rather than half-understood: opening it and quietly
+     * ignoring the tables this build does not know about would let a downgrade delete them. */
+    let newer = rusqlite::Connection::open(&file).expect("reopen");
+    newer
+        .pragma_update(None, "user_version", 99_i64)
+        .expect("stamp ahead");
+    drop(newer);
+    match TagStore::open(&file) {
+        Err(fam_svc_store::StoreError::SchemaTooNew(found)) => assert_eq!(found, 99),
+        Err(other) => panic!("a v99 database must be refused as too new, got {other:?}"),
+        Ok(_) => panic!("a v99 database opened; it should have been refused"),
+    }
+}

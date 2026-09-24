@@ -1,0 +1,22 @@
+[package]
+name = "fam-svc-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fam-core.workspace = true
+fam-svc-audit.workspace = true
+fam-svc-auth.workspace = true
+fam-svc-index.workspace = true
+fam-svc-store.workspace = true
+fam-svc-walk.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

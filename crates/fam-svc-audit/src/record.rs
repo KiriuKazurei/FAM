@@ -65,6 +65,24 @@ pub enum Op {
     TokenAdd,
     TokenRevoke,
     TokenRotate,
+    /// The fourteen MCP tools, named **exactly** as the protocol names them (`Verb::name()`), so a
+    /// line in the trail can be grepped for the same string a client sent. A dotted spelling here
+    /// would be a second vocabulary for one thing, and the second vocabulary is where "we checked
+    /// the log" goes wrong.
+    McpFsList,
+    McpFsRead,
+    McpFsSearch,
+    McpFsWrite,
+    McpFsCreate,
+    McpFsDelete,
+    McpFsMove,
+    McpTagsGet,
+    McpTagsSet,
+    McpTagsRemove,
+    McpNoteGet,
+    McpNoteSet,
+    McpNoteClear,
+    McpWhoAmI,
     /// A person read the grant list. Not a change, and recorded anyway: it is an `Ask`, and without
     /// it a `fam mcp token list` session is two bracket lines that say nothing about what ran.
     TokenList,
@@ -97,15 +115,35 @@ impl Op {
             Self::TokenAdd => "token.add",
             Self::TokenRevoke => "token.revoke",
             Self::TokenRotate => "token.rotate",
+            Self::McpFsList => "fs_list",
+            Self::McpFsRead => "fs_read",
+            Self::McpFsSearch => "fs_search",
+            Self::McpFsWrite => "fs_write",
+            Self::McpFsCreate => "fs_create",
+            Self::McpFsDelete => "fs_delete",
+            Self::McpFsMove => "fs_move",
+            Self::McpTagsGet => "tags_get",
+            Self::McpTagsSet => "tags_set",
+            Self::McpTagsRemove => "tags_remove",
+            Self::McpNoteGet => "note_get",
+            Self::McpNoteSet => "note_set",
+            Self::McpNoteClear => "note_clear",
+            Self::McpWhoAmI => "whoami",
             Self::TokenList => "token.list",
             Self::SessionOpen => "session.open",
             Self::SessionClose => "session.close",
         }
     }
 
+    /// Which calls the `audit_record_reads` knob and the daily cap may silence.
+    ///
+    /// `fs_list` and `fs_read` join the `Read` stream because they are the same kind of event as
+    /// `dir.fetch`: content being carried out of a directory. The MCP server opens its log with
+    /// `record_reads` forced on, so this classification costs it nothing - the knob exists for the
+    /// shell's polling-heavy reads, not to make an agent's file reads invisible.
     pub fn weight(self) -> Weight {
         match self {
-            Self::DirFetch | Self::SearchPage => Weight::Read,
+            Self::DirFetch | Self::SearchPage | Self::McpFsList | Self::McpFsRead => Weight::Read,
             Self::DirState | Self::DirPoll => Weight::Poll,
             _ => Weight::Ask,
         }
@@ -227,6 +265,37 @@ mod tests {
         assert_eq!(Op::TagAdd.weight(), Weight::Ask);
         assert_eq!(Op::DirClose.weight(), Weight::Ask);
         assert_eq!(Op::SessionClose.weight(), Weight::Ask);
+    }
+
+    /// The tools an agent calls are named in the trail by the same string the client sent, and the
+    /// two that carry content out of a directory are weighed like the shell's own read stream.
+    #[test]
+    fn the_mcp_tools_are_named_as_the_protocol_names_them() {
+        for (op, name) in [
+            (Op::McpFsList, "fs_list"),
+            (Op::McpFsRead, "fs_read"),
+            (Op::McpFsSearch, "fs_search"),
+            (Op::McpFsWrite, "fs_write"),
+            (Op::McpFsCreate, "fs_create"),
+            (Op::McpFsDelete, "fs_delete"),
+            (Op::McpFsMove, "fs_move"),
+            (Op::McpTagsGet, "tags_get"),
+            (Op::McpTagsSet, "tags_set"),
+            (Op::McpTagsRemove, "tags_remove"),
+            (Op::McpNoteGet, "note_get"),
+            (Op::McpNoteSet, "note_set"),
+            (Op::McpNoteClear, "note_clear"),
+            (Op::McpWhoAmI, "whoami"),
+        ] {
+            assert_eq!(op.name(), name);
+            let weight = op.weight();
+            let expected = match op {
+                Op::McpFsList | Op::McpFsRead => Weight::Read,
+                _ => Weight::Ask,
+            };
+            assert_eq!(weight, expected, "{name} is weighed wrong");
+            assert_ne!(weight, Weight::Poll, "{name} is never a heartbeat");
+        }
     }
 
     #[test]

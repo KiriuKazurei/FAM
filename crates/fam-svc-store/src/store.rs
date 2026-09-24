@@ -12,7 +12,9 @@ use crate::model::{
     descendant_range, validate_tag, FileTags, NewTag, SearchRequest, Source, TagRecord,
 };
 
-const SCHEMA_VERSION: i64 = 1;
+/// The schema this build writes and expects. Public because a caller that reports store health
+/// (`fam stats`, `whoami`) should quote the same number the migration ran to, not its own guess.
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Rows returned by a search that does not ask for a page.
 pub const DEFAULT_SEARCH_LIMIT: i64 = 500;
@@ -42,6 +44,26 @@ CREATE TABLE tags (
 );
 
 CREATE INDEX tags_tag_source_idx ON tags(tag, source);
+"#;
+
+/// Version 2 adds the notes table.
+///
+/// A note is deliberately **not** a tag and deliberately **not** in the index:
+///   * it is one free-text body per path, so it has no vocabulary, no priority, no source, and no
+///     place in `tags` - mixing them would make `tag.list` answer a question nobody asked;
+///   * it is not in the directory index, so it cannot leak into a listing or a search result and the
+///     agent-facing tools are the only way to read it back;
+///   * `REFERENCES files ON DELETE CASCADE` means a note dies with the row it annotates, which is
+///     the only way to stop a database full of notes about paths that no longer exist.
+///
+/// `IF NOT EXISTS` because a brand-new database runs v1 and v2 in one go, and a v1 database has
+/// already had v1 applied - the migration below is a ladder, not a rebuild.
+const SCHEMA_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS notes (
+    path_norm  TEXT PRIMARY KEY REFERENCES files(path_norm) ON DELETE CASCADE,
+    body       TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +113,15 @@ impl TagStore {
         if version > SCHEMA_VERSION {
             return Err(StoreError::SchemaTooNew(version));
         }
-        if version < SCHEMA_VERSION {
+        /* A ladder, not a rebuild: v1's DDL cannot be replayed over a database that already has it
+         * (`CREATE TABLE files` would fail), so each step runs only for a database below it. */
+        if version < 1 {
             conn.execute_batch(SCHEMA_V1)?;
+        }
+        if version < 2 {
+            conn.execute_batch(SCHEMA_V2)?;
+        }
+        if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(Self { conn })

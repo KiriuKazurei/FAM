@@ -21,4 +21,12 @@ pub enum StoreError {
     InvalidSearch(String),
     #[error("nothing to change")]
     NothingToChange,
+    #[error("a note on {} would be {bytes} bytes; the limit is {limit}", .path.display())]
+    NoteTooLong {
+        path: PathBuf,
+        bytes: usize,
+        limit: usize,
+    },
+    #[error("a note on {} must say something; use clear_note to remove one", .path.display())]
+    EmptyNote { path: PathBuf },
 }
