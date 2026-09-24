@@ -12,17 +12,19 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 | 位置 | 内容 |
 |---|---|
 | `crates/fam-core` | 配置与 Windows 路径归一（`path_key`） |
-| `crates/fam-svc-store` | SQLite 标签存储 |
+| `crates/fam-svc-store` | SQLite 标签存储 + 按路径的备注（`tags` 与 `notes` 两张表，schema v2） |
 | `crates/fam-svc-enumerate` | 单层目录列举（Win32 后端 + 可取消、可超时的读者） |
 | `crates/fam-svc-walk` | 递归遍历，以及"遍历"这一个名字检索后端 |
 | `crates/fam-svc-audit` | 审计日志：追加式 JSONL、一天一文件、按会话串 SHA-256 哈希链 |
 | `crates/fam-svc-auth` | MCP 令牌的签发与判定：三等级 × 动词白名单、工作区路径范围、加盐摘要存储 |
+| `crates/fam-svc-mcp` | 给 agent 的那一面：JSON-RPC 2.0 分行协议、14 个工具、门（等级 → 范围 → 排除 → reparse） |
 | `crates/fam-svc-index` | 懒目录索引（定长表 + 缓存 + 按目录就地改行）、视图窗口，以及搜索后端的路由与范围规则 |
 | `crates/fam-svc-everything` | Everything 客户端：运行期绑定、状态探测、查询编译、按页取结果 |
 | `crates/fam-sched` | 监视事件 → 有界队列 → 批量合并的行变更 |
 | `crates/fam-ffi` | 对 C++ 暴露的 ABI（`famcore.dll`）：行是定长缓冲 + 窗口化，控制载荷（stats、标签、find、配置）是 JSON。v1 的视图与监视入口已在增量 9 删除 |
 | `crates/fam-bench` | 度量台与地板门槛 |
 | `apps/fam-cli` | `fam` 命令行（无头测试台） |
+| `apps/fam-mcp` | MCP stdio 服务器进程：读一行答一行，凭据只从 `FAM_MCP_TOKEN` 环境变量来 |
 | `apps/fam-shell` | Qt6 Widgets 界面 |
 | `apps/fam-design` | Ant Design 5 样式的**独立样机**：只链 Qt，不链 `famcore`，产品窗口一行未改 |
 
@@ -34,11 +36,17 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 日志写不出来时 core 直接拒绝启动；而**读这份日志的路只有 CLI**——
 `fam audit tail|verify|stats`，`famcore.dll` 的导出表里没有任何读接口。
 代价是实测的：单次追加 41µs（debug 构建），一次完整浏览会话 24 行 / 5.8 KB。
-agent 的凭证也已经在同一侧：**签发、撤销、轮换只有人手那条面**（
+agent 的凭证已经在同一侧：**签发、撤销、轮换只有人手那条面**（
 `fam mcp token add|list|revoke|rotate`），`fam-svc-auth` 不是 `fam-ffi` 的依赖，
-所以协议面上不存在任何 token/permission/audit 的入口——不是运行时检测出来的，是链接期就没有这条路。
-三个等级是动词白名单而不是可以比较大小的阶梯，谁都不能越出自己那几个工作区目录；
-明文只在 `add` 的那一次打印，文件里只有每令牌独立 salt 与摘要，单次认证实测 1.6µs。
+所以 ABI 面上不存在任何 token/permission/audit 的入口——不是运行时检测出来的，是链接期就没有这条路。
+给 agent 的那一面（`apps/fam-mcp`，stdio 上一行一条 JSON-RPC）今天真的存在了，
+它同样管不了凭据：14 个工具的名字是快照测试钉住的，
+`token` `grant` `revoke` `rotate` `audit` `config` `secret` `credential` `mcp` 这些词出现在
+任何一个名字里就会让测试红。三个等级是动词白名单而不是可以比较大小的阶梯，
+谁都不能越出自己那几个工作区目录；未解析的写法（带 `.` 或 `..`）一律算越界，
+授权根之下的 junction 也不算在里面，程序的审计目录与凭据文件本身对 tools 不可达。
+明文只在 `add` 的那一次打印，文件里只有每令牌独立 salt 与摘要，单次认证实测 1.6µs；
+每次工具调用（包括被拒的）在审计日志里留下一行，一次带门的请求实测 246µs（门）/ 750µs（整条）。
 旧栈的规格见 `docs/legacy-specs.md`，逐增量的取舍见 `docs/notes/`。
 
 #### 构建
@@ -48,6 +56,21 @@ CLI 与测试用默认工具链：
 cargo test --workspace
 cargo build --release -p fam-cli
 ```
+
+给 agent 的那一面是 `apps/fam-mcp`，一个 stdio 上的进程，不需要 Qt：
+
+```bash
+cargo build --release -p fam-mcp
+fam mcp token add organizer --tier edit --workspace "D:/inbox"   # 明文只印这一次
+FAM_MCP_TOKEN=fam_xxxxxxxx_... \
+  target/release/fam-mcp.exe --config <path/to/config.toml>
+```
+
+**没有 `--token` 这个旗标**：命令行上的令牌对本机每个进程可见（一行 `Get-CimInstance Win32_Process`
+就抄走了），环境变量只对这个进程可见。没有凭据时这个进程**拒绝启动**并且说清缺的是什么，
+而不是起一个"连不上"的服务；日志与那句拒绝都走 stderr，stdout 上只有协议。
+`docs/notes/mcp-server-four-questions-before-the-disk.md` 记着 14 个工具的边界、
+每次请求的实测代价，以及没解决的那一串（没有 HTTP 传输、没有区间读、没有速率限制）。
 
 `famcore.dll` 必须用 GNU 工具链构建（Qt 侧是 MinGW kit，MSVC 版无法与之链接），
 且 PATH 首位须是 Qt 自带的 posix MinGW——系统里那个 MCF 线程模型的 MinGW 会让 GNU 工具链链接失败：
