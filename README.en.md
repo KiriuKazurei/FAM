@@ -15,7 +15,9 @@ enumeration search backend), `fam-svc-audit` (the audit trail: append-only JSONL
 day, an SHA-256 hash chain per session), `fam-svc-auth` (MCP credentials: three tiers as verb
 whitelists, workspace-scoped, salted-digest storage), `fam-svc-mcp` (the agent-facing surface: a
 line-delimited JSON-RPC 2.0 protocol, 14 tools, and the gate - tier, then scope, then exclusion,
-then reparse), `fam-svc-index` (the lazy directory index, view windows, and the search
+then reparse), `fam-svc-fs` (move and copy in exactly one place: `transfer(from, to, Move|Copy)`,
+with the rules - never overwrite, a directory is never copied, a cross-volume directory is refused -
+so an agent and a person hit the same sentence), `fam-svc-index` (the lazy directory index, view windows, and the search
 router with its scope rules), `fam-svc-everything` (the Everything client: runtime binding, state
 probe, query compilation, paged results), `fam-sched` (events merged into batched row deltas),
 `fam-ffi` (the ABI producing `famcore.dll`: rows as fixed-size buffers with windowed reads, control
@@ -35,6 +37,15 @@ virtualised results, and a name search is routed between Everything and enumerat
 can answer the whole request - under one shared set of scope rules. The interface is now Miller
 columns: one directory, one v2 token and one model per column, a per-column sort control, and a drive
 sidebar; each row's shell icon is resolved from its extension, so no paint ever opens a path.
+The split is a display choice behind a `Split` button on the toolbar: collapsed, this is one
+browsing surface filling the window; expanded, it is two independent ones - each with its own column
+chain, its own result list and its own search token, because two panes sharing a token would have one
+pane's poll rewriting the other's rows. Dragging a row into another column really moves the file:
+plain drag is a move, Ctrl is a copy, the destination is the folder that column shows, the name is
+kept, and a name that already exists there is refused rather than replaced. The drag payload is a
+private type (`application/x-fam-paths`), so dragging to or from Windows Explorer does not work -
+deliberately, because a second route to the same files would bypass `fam_path_op`, bypass
+"never overwrite", and leave nothing in the audit trail.
 The shell renders through Fusion rather than the native Windows style, because wherever the style
 sheet is silent the native style draws its own gradients and focus glows and disagrees with the token
 set; `--theme light|dark|system` picks the scheme at start-up. File rows are painted by a delegate -
@@ -109,10 +120,16 @@ PATH="<Qt>/6.11.2/mingw_64/bin:<Qt>/Tools/mingw1310_64/bin:target/x86_64-pc-wind
 ```
 
 `--self-check` is the headless gate: it renders the window, writes a screenshot and a `.log` beside
-it, and exits. `--self-check-mutate` additionally **creates and then deletes a file inside the
-watched directory**, so the "new file -> reconciled re-read -> windowed diff" and "deletion -> cut"
-channels both run in one pass, and the log carries the icon extract/destroy counts and the IPC call
-counts - those numbers are what "no HICON leak" and "a poll is cheap" mean in practice.
+it, and exits. `--self-check-mutate` additionally **writes two files into the watched tree and
+removes them again**: one runs the "new file -> reconciled re-read -> windowed diff" and
+"deletion -> cut" channels, the other runs the three drag-and-drop cases (open the split, point the
+two panes at two folders inside that tree, then drop with no modifier = move, with Ctrl = copy, and
+back onto the folder already holding it = no call at all). The log says which path exists on disk
+after each one, because whether the source is still there is the only observation that tells a move
+apart from a copy. Finally the log carries the icon extract/destroy counts and the IPC call counts -
+those numbers are what "no HICON leak" and "a poll is cheap" mean in practice. **If the process is
+killed mid-run those two files stay in the tree you pointed it at**; both are named
+`fam-self-check-*.txt`.
 
 #### Software Architecture (the legacy system, as it was before the rebuild)
 

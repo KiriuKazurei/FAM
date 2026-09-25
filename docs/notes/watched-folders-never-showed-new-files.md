@@ -108,6 +108,13 @@ icons: extracted=9 destroyed=9 cached=9 pending=0
 另外一次跑因为上一轮异常退出留了探针，日志是 `reconciled in 2 pair(s)` 且总数不变——那正是
 "改了一行已存在的行"（一删一插），与 `sameRow` 的定义一致，不是抖动。
 
+> **增量 14d 在这句话上停住了，而它不该停。** 上面那句 `selection kept` 只保证了"没重建整屏"，
+> 没保证"读者的当前行没动"——而"一删一插"删掉的如果正是当前那一行，
+> `QItemSelectionModel` 会把当前索引挪到下一行，列链把这次挪动读成一次点击。
+> 当时我看见了 2 对，把它判成"与定义一致"就放过去了。
+> 现在两个开销分开作证（`pairs` 与 `modified`），详见
+> [reconcile-moved-the-readers-row.md](reconcile-moved-the-readers-row.md)。
+
 **闸门：** 全仓 **337 条**绿、clippy `--all-targets` 零告警、fmt 干净、
 `cargo check -p fam-svc-index --target aarch64-unknown-linux-musl` 通过；GNU `famcore.dll` 与壳可构建；
 `abi-smoke` 一字未改退出 0（v1 通路不受影响）；不带 mutate 的搜索自检照旧
