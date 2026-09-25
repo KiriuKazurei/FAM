@@ -1,10 +1,17 @@
 # FAM 界面样机 · Ant Design 5 样式
 
-这是**样机，不是产品**。它把资源管理器主窗口按 Ant Design 5 的设计体系画了一遍：驱动器栏、
+这是**设计基准，不是产品**。它把资源管理器主窗口按 Ant Design 5 的设计体系画了一遍：驱动器栏、
 两列 Miller 目录、工具栏、行绘制、空态与错误态、亮/暗两套。
 
-它和 `apps/fam-shell` 完全分开：只链 Qt，不链 `famcore`，不依赖任何 Rust crate。
-**原项目的界面保持独立**——在这里改样式不会动到产品窗口一眼；哪天真要采纳，那是一次单独的改动。
+它和 `apps/fam-shell` 一样，都编译 `apps/fam-ui` 里那**唯一一份**设计系统（token → QSS 与那张手绘的
+文件行），所以"改一处、另一处还是旧的"这种漂移在这里不可能发生。`apps/fam-ui` 只链 `Qt6::Widgets`，
+不链 `famcore`、不依赖任何 Rust crate——参考物不能依赖被参考的东西，这条边界照旧守着。
+
+**2026-09-25 之前这里写着"原项目的界面保持独立，哪天真要采纳那是一次单独的改动"。**
+那一天用户改口"保留 Ant Design 样式版本，接下来的开发均基于这个版本"，采纳已经发生，
+账在 `docs/notes/shell-wears-the-ant-design-baseline.md`。这个目标现在的作用有两个：
+**基准**（产品窗口应该长这样）与**截图工具**（`--shot` 出图、stdout 打实测对比度表）。
+产品功能不再长在这里。
 
 ## 跑起来
 
@@ -25,7 +32,7 @@ apps/fam-design/build/fam-design.exe --theme dark
 
 ## 设计体系在哪
 
-`src/theme.{h,cpp}` 是唯一的颜色与尺寸来源：
+`apps/fam-ui/src/theme.{h,cpp}` 是唯一的颜色与尺寸来源（两个界面都从这里取）：
 
 - `Tokens` 用 Ant Design 自己的名字（`colorText` / `colorBgContainer` / `borderRadius` /
   `controlHeight` / `paddingXS` …），亮暗两套在同一个构造函数里按同一套算法派生。
@@ -51,8 +58,9 @@ apps/fam-design/build/fam-design.exe --theme dark
 
 ## 已知不做
 
-- 没有 shell 图标（那要 `shell32`）。行里的 16px 槽位**永远占着**，画不出图标时画一个单色线稿，
-  所以图标到位前后名字不会横移。
+- 这里没有 shell 图标（那要 `shell32`，产品壳有）。行里的 16px 槽位**永远占着**，画不出图标时画一个
+  单色线稿，所以图标到位前后名字不会横移。产品壳里同一个线稿不是占位装饰，它是"图标还在工作线程上"
+  的那一瞬间的形状——那层是异步的，所以每一行都先从这里开始。
 - 没有监视、分页、标签、轮询——那些是行为不是长相。
 - `QLabel` 不省略号，列标题按标称列宽预先裁（`elideTitle`），列比标称宽时名字整段显示。
 - 焦点环：antd 用 2px box-shadow，Qt 样式表没有 box-shadow，这里退化成 1px 边框加宽。

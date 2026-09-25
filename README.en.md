@@ -21,16 +21,27 @@ probe, query compilation, paged results), `fam-sched` (events merged into batche
 `fam-ffi` (the ABI producing `famcore.dll`: rows as fixed-size buffers with windowed reads, control
 payloads as JSON - v1's view and watch entry points were deleted in increment 9),
 `fam-bench` (measurements and the floor gate), `apps/fam-cli`, `apps/fam-mcp` (the stdio server
-process) and `apps/fam-shell` (Qt6 Widgets).
-`apps/fam-design` is separate from all of them: an Ant Design 5 sample of the shell's window that
-links Qt only - no `famcore`, no Rust crate - so the product's own appearance stays untouched.
-See `docs/notes/design-sample-wears-ant-design-5.md`.
+process) and `apps/fam-shell` (Qt6 Widgets, the product face).
+`apps/fam-ui` is the design system in exactly one place - Ant Design 5's tokens turned into a style
+sheet, plus the one row this design paints by hand - and it links `Qt6::Widgets` only: no `famcore`,
+no Rust crate. Both Qt faces compile that one copy, so a token changed for the product cannot stay
+old in the reference. `apps/fam-design` is now the design baseline and its capture tool
+(`--shot`, `--theme`, and the measured contrast table on stdout); product features do not grow there.
+See `docs/notes/design-sample-wears-ant-design-5.md` for the colour decisions and
+`docs/notes/shell-wears-the-ant-design-baseline.md` for the adoption.
 
 The rebuild is under way: browsing and search both run on the lazy directory index with streamed,
 virtualised results, and a name search is routed between Everything and enumeration by which of them
 can answer the whole request - under one shared set of scope rules. The interface is now Miller
 columns: one directory, one v2 token and one model per column, a per-column sort control, and a drive
 sidebar; each row's shell icon is resolved from its extension, so no paint ever opens a path.
+The shell renders through Fusion rather than the native Windows style, because wherever the style
+sheet is silent the native style draws its own gradients and focus glows and disagrees with the token
+set; `--theme light|dark|system` picks the scheme at start-up. File rows are painted by a delegate -
+name in demi-bold, size in the tertiary text colour, kind as a Tag chip - and a folder no longer
+prints `0 B`, because that zero means "nothing wrote a size here", not "this has no size".
+Readability is measured, not copied: `Theme::contrastReport()` recomputes the WCAG ratios, and the
+shell's `--self-check` log carries the table (13 gated pairs, two exempt ones still named).
 Every request the core answers leaves one line in the audit trail, and the core refuses to start if
 that trail cannot be written - while **reading it back is only possible through the CLI**
 (`fam audit tail|verify|stats`): `famcore.dll` exports no read surface at all. The cost is measured,

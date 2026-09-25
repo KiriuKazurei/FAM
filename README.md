@@ -25,13 +25,20 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 | `crates/fam-bench` | 度量台与地板门槛 |
 | `apps/fam-cli` | `fam` 命令行（无头测试台） |
 | `apps/fam-mcp` | MCP stdio 服务器进程：读一行答一行，凭据只从 `FAM_MCP_TOKEN` 环境变量来 |
-| `apps/fam-shell` | Qt6 Widgets 界面 |
-| `apps/fam-design` | Ant Design 5 样式的**独立样机**：只链 Qt，不链 `famcore`，产品窗口一行未改 |
+| `apps/fam-ui` | 设计系统的**唯一一份**：Ant Design 5 的 token → QSS，以及那张手绘的文件行；只链 `Qt6::Widgets`，不链 `famcore` |
+| `apps/fam-shell` | Qt6 Widgets 界面（产品面）。吃 `apps/fam-ui` 的主题，渲染走 Fusion，`--theme light\|dark\|system` |
+| `apps/fam-design` | Ant Design 5 的**设计基准**：与壳共用 `apps/fam-ui`，只链 Qt；`--shot`/`--theme` 出图并把实测对比度表打到 stdout。产品功能不再长在这里 |
 
 工程处于**资源管理器重建**之中：浏览与搜索都已改为懒目录索引 + 流式虚拟化，
 名字检索按"能答全才问"在 Everything 与遍历之间路由，两者共用同一套范围规则。
 界面已经是 Miller 列：一列一个目录、一个 v2 token、一个模型，列头按列各管各的排序，
 左侧是驱动器栏；每行的 shell 图标走"扩展名→系统图像列表"，不在绘制路径上打开任何路径。
+样式是 Ant Design 5 的 token 集，**产品壳与设计基准共用同一份实现**（`apps/fam-ui`），
+渲染走 Fusion 而不是原生 Windows 样式——sheet 沉默处原生样式会自己画渐变与焦点环，与 token 打架。
+文件行由委托手绘：名字带 demi-bold、尺寸三级色、类型是 Tag 芯片，
+**文件夹不再印 `0 B`**（那字段的零是"没写"，不是"没有大小"）。
+可读性是量出来的不是抄来的：`Theme::contrastReport()` 现算 WCAG 比，
+壳的 `--self-check` 日志里就带着这张表（13 对受门槛、两处免除照点名）。
 每一次被 core 回答的请求都会在审计日志里留下一行（追加式 JSONL，一天一文件，链按会话串），
 日志写不出来时 core 直接拒绝启动；而**读这份日志的路只有 CLI**——
 `fam audit tail|verify|stats`，`famcore.dll` 的导出表里没有任何读接口。

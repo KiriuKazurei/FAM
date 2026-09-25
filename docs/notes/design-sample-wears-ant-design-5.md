@@ -5,6 +5,15 @@
 - 涉及：`apps/fam-design/{CMakeLists.txt,README.md,src/*}`（新目录）；
   **`apps/fam-shell` 一行未改**
 
+> **这篇记录的是它写下那一天的状态，两句已经不再成立。** 次日用户改口
+> "保留 Ant Design 样式版本，接下来的开发均基于这个版本"，于是产品壳吃下了这套主题，
+> 而 `theme.*` / `rowdelegate.*` 也从 `apps/fam-design/src/` 搬进了两个界面共用的
+> `apps/fam-ui/`——样机目录里现在只剩 `main.cpp` / `preview.*` / `previewmodel.*`。
+> 采纳那一笔的账（包括壳的闸门为什么全部重跑、以及一处"我按常识写了道理，然后用一个像素把它撤了"）
+> 在 [shell-wears-the-ant-design-baseline.md](shell-wears-the-ant-design-baseline.md)。
+> 本篇里那些**实测出来的颜色决定**（暗色气泡 1.35:1、`primary` 与 `accentText` 的分工、
+> 两处免除仍照测点名）仍然有效，而且现在两边共用同一份实现。
+
 ## 1. 描述问题
 
 要求是"界面风格设计为 Ant Design 5 样式，并且继续完成未完成的内容"，同时明确
