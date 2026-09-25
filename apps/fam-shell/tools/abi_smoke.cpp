@@ -35,6 +35,17 @@ void dump(const char *label, const QJsonValue &value) {
     printf("%s %s\n", label, text.constData());
 }
 
+/* What is actually in a file, for the claims that are only true if the bytes did not move. A failed
+ * read answers empty, which is enough: an empty comparison against a file that had content fails,
+ * and that is the direction this gate wants to fail in. */
+QByteArray readFileBytes(const QString &path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return QByteArray();
+    }
+    return file.readAll();
+}
+
 /* Polls until `ask` says it is done, the way the shell's 250ms timer does - just faster, because a
  * smoke gate should not spend a human's minute waiting for one file. */
 template <typename Try> bool until(Try ask) {
@@ -196,9 +207,76 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "the deletion never came back as a cut\n");
     }
 
+    /* --- the transfer: the first call on this surface that changes the disk -------------------
+     *
+     * Worth running through the real DLL rather than trusting the Rust unit tests, because the part
+     * under test here is the boundary: two C strings in, one JSON object out, and a refusal that
+     * arrives as a message instead of a half-done move. The rules themselves are tested where they
+     * live. */
+
+    const QString moved = tree + QStringLiteral("/fam-abi-moved.txt");
+    const QString kept = tree + QStringLiteral("/fam-abi-kept.txt");
+    const QString twin = tree + QStringLiteral("/fam-abi-twin.txt");
+    QFile::remove(moved);
+    QFile::remove(kept);
+    QFile::remove(twin);
+    auto seed = [](const QString &path) {
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) {
+            return false;
+        }
+        file.write("content\n");
+        file.close();
+        return true;
+    };
+
+    bool movedOk = false, copiedOk = false, overwriteRefused = false;
+    if (seed(tree + QStringLiteral("/fam-abi-move.txt")) && seed(kept)) {
+        QJsonValue answer;
+        if (!bridge.pathOp(tree + QStringLiteral("/fam-abi-move.txt"), moved, false, &answer,
+                           &error)) {
+            fprintf(stderr, "the move failed: %s\n", qUtf8Printable(error));
+        } else {
+            /* The source not being there any more is the whole claim; `by` says which way the bytes
+             * got moved, and on one volume that had better be a rename. */
+            movedOk = !QFile::exists(tree + QStringLiteral("/fam-abi-move.txt"))
+                && QFile::exists(moved)
+                && answer.toObject().value(QStringLiteral("by")).toString()
+                    == QStringLiteral("renamed");
+        }
+
+        if (!bridge.pathOp(kept, twin, true, &answer, &error)) {
+            fprintf(stderr, "the copy failed: %s\n", qUtf8Printable(error));
+        } else {
+            copiedOk = QFile::exists(kept) && QFile::exists(twin)
+                && answer.toObject().value(QStringLiteral("by")).toString()
+                    == QStringLiteral("copied");
+        }
+
+        /* The drag that would have replaced a file: refused, and both files exactly as they were. */
+        const QString onto = twin;
+        const QByteArray before = readFileBytes(onto);
+        const bool accepted = bridge.pathOp(moved, onto, false, &answer, &error);
+        overwriteRefused = !accepted && readFileBytes(onto) == before && QFile::exists(moved);
+        if (accepted) {
+            fprintf(stderr, "an overwrite was allowed: %s onto %s\n", qUtf8Printable(moved),
+                    qUtf8Printable(onto));
+        } else {
+            printf("overwrite refused: %s\n", qUtf8Printable(error));
+        }
+    }
+
+    QFile::remove(moved);
+    QFile::remove(kept);
+    QFile::remove(twin);
+    QFile::remove(tree + QStringLiteral("/fam-abi-move.txt"));
+    printf("move=%d copy=%d overwrite-refused=%d\n", movedOk ? 1 : 0, copiedOk ? 1 : 0,
+           overwriteRefused ? 1 : 0);
+
     bridge.closeDir(dir);
-    const bool passed = sawInsert && sawCut;
-    printf("insert=%d cut=%d -> %s\n", sawInsert ? 1 : 0, sawCut ? 1 : 0,
+    const bool passed = sawInsert && sawCut && movedOk && copiedOk && overwriteRefused;
+    printf("insert=%d cut=%d move=%d copy=%d refuse-overwrite=%d -> %s\n", sawInsert ? 1 : 0,
+           sawCut ? 1 : 0, movedOk ? 1 : 0, copiedOk ? 1 : 0, overwriteRefused ? 1 : 0,
            passed ? "ok" : "FAILED");
     return passed ? 0 : 1;
 }

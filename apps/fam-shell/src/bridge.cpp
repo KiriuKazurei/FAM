@@ -134,6 +134,17 @@ bool FamBridge::find(const QStringList &tags, bool matchAll, const QString &with
     return invoke(code, out, err, result, error);
 }
 
+bool FamBridge::pathOp(const QString &from, const QString &to, bool copy, QJsonValue *result,
+                       QString *error) {
+    const QByteArray utf8From = from.toUtf8();
+    const QByteArray utf8To = to.toUtf8();
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_path_op(m_core, utf8From.constData(), utf8To.constData(),
+                                 copy ? FAM_PATH_COPY : 0u, &out, &err);
+    return invoke(code, out, err, result, error);
+}
+
 /* --- v2: directory views ------------------------------------------------------------------- */
 
 namespace {

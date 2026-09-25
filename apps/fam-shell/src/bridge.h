@@ -122,6 +122,13 @@ public:
     bool find(const QStringList &tags, bool matchAll, const QString &within, QJsonValue *result,
               QString *error);
 
+    /* Move `from` onto `to` - a full destination path, name included - or copy it when `copy` is
+     * set. This is the first call on the bridge that changes what is on disk, so the rules that
+     * refuse it (never overwrite, a directory is never copied, a cross-volume directory is refused)
+     * are the ones in `famcore.h` beside `fam_path_op`, and `error` carries whichever one said no. */
+    bool pathOp(const QString &from, const QString &to, bool copy, QJsonValue *result,
+                QString *error);
+
 private:
     static QString take(char *raw);
     bool invoke(int code, char *out, char *err, QJsonValue *result, QString *error) const;

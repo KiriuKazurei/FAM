@@ -166,6 +166,25 @@ int fam_tag_remove(FamCore *core, const char *path, const char *tags_json, const
 int fam_find(FamCore *core, const char *tags_json, int match_all, const char *within,
              const char *source, uint32_t limit, char **out, char **err);
 
+/* --- moving a file -------------------------------------------------------------------------------
+ *
+ * The first entry point on this surface that changes what is on disk. Everything above it reads.
+ *
+ * Both arguments are full paths: `to` is the destination *name*, not the folder being dropped into,
+ * because only the caller knows whether the person meant "into here" or "rename it to this".
+ * The answer is JSON naming what happened and how: `"by"` is `renamed` for a same-volume move,
+ * `copied-then-removed` for a file that had to cross a volume, `copied` when `FAM_PATH_COPY` was
+ * set or when the source could not be deleted after a successful copy.
+ *
+ * The rules are the same ones the agent's `fs_move` tool is held to, because both call one
+ * implementation: a target that exists is refused rather than overwritten, a missing source is
+ * refused, a directory is never copied, and a directory that would have to cross a volume is refused
+ * by name. `err` carries the sentence that says which rule refused it. */
+#define FAM_PATH_COPY 1u
+
+int fam_path_op(FamCore *core, const char *from, const char *to, uint32_t flags,
+                char **out, char **err);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

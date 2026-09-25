@@ -399,6 +399,26 @@ impl FamCore {
         ))
     }
 
+    /// Move or copy one path. The rules are not here - they live in `fam_svc_fs`, which the agent's
+    /// MCP tools call through the same function - so a refusal the person reading a status line sees
+    /// is word-for-word the refusal an agent gets.
+    fn path_op(&self, from: &Path, to: &Path, copy: bool) -> Result<String, String> {
+        let action = if copy {
+            fam_svc_fs::Action::Copy
+        } else {
+            fam_svc_fs::Action::Move
+        };
+        let done = fam_svc_fs::transfer(from, to, action).map_err(|error| error.to_string())?;
+        serde_json::to_string(&serde_json::json!({
+            "from": done.from.display().to_string(),
+            "to": done.to.display().to_string(),
+            "action": done.action.name(),
+            "by": done.by.name(),
+            "source_gone": done.by != fam_svc_fs::By::Copied,
+        }))
+        .map_err(|error| error.to_string())
+    }
+
     fn tag_list(&self, path: &Path) -> Result<String, String> {
         let store = self.store();
         let records = store
@@ -1121,6 +1141,48 @@ pub unsafe extern "C" fn fam_tag_add(
             .says(format!("tags={tags} source={source} priority={priority}"));
         borrow.tag_add(Path::new(path), tags, source, priority)
     })
+}
+
+/// With this bit set, `fam_path_op` copies instead of moving: the source stays where it is.
+/// No other bits mean anything yet, and an unknown bit is ignored rather than refused - the shell and
+/// the library are built together, and a flag nobody has defined yet should not break a call that
+/// asked for something it does understand.
+pub const FAM_PATH_COPY: u32 = 1;
+
+/// The first entry point on this surface that changes what is on disk.
+///
+/// `from` and `to` are both full paths - the caller composes the destination name, because only the
+/// caller knows whether the person meant "into this folder" or "rename it to this". The answer is a
+/// JSON object naming what happened and *how* (`"by": "renamed"`, `"copied-then-removed"`,
+/// `"copied"`); a refusal comes back in `err` with the rule that refused it.
+///
+/// This does not widen what an agent can reach: the MCP server has had `fs_move` since increment 12,
+/// behind a credential and a four-question gate. What changed is that the *human's* shell can now
+/// move a file without anyone adding a write path to the credential layer - which is what a person
+/// dragging a file in their own file manager always was.
+#[no_mangle]
+pub unsafe extern "C" fn fam_path_op(
+    core: *mut FamCore,
+    from: *const c_char,
+    to: *const c_char,
+    flags: u32,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    let copy = flags & FAM_PATH_COPY != 0;
+    with_core(
+        core,
+        Call::new(if copy { Op::PathCopy } else { Op::PathMove }),
+        out,
+        err,
+        move |borrow, call| {
+            let from = required_str(from, "from")?;
+            let to = required_str(to, "to")?;
+            call.names(from);
+            call.says(format!("to={to}"));
+            borrow.path_op(Path::new(from), Path::new(to), copy)
+        },
+    )
 }
 
 #[no_mangle]
