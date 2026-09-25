@@ -1,8 +1,12 @@
 #include "mainwindow.h"
 
+#include <QAbstractItemModel>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDir>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -13,6 +17,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListView>
+#include <QMimeData>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QStackedWidget>
@@ -24,6 +29,19 @@
 #include "iconcache.h"
 #include "rowdelegate.h"
 #include "theme.h"
+
+namespace {
+
+/* The file the headless transfer steps move and copy. Named for what it is so a person who finds it
+ * left behind can tell it from their own, and so the cleanup step's log line reads as plainly as the
+ * creation one. */
+const char *const kDragProbe = "fam-self-check-drag.txt";
+
+} /* namespace */
+
+QString MainWindow::folderKey(const QString &path) {
+    return QDir::cleanPath(QDir::fromNativeSeparators(path)).toLower();
+}
 
 MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, QWidget *parent)
     : QWidget(parent) {
@@ -122,6 +140,10 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     m_active = m_right;
     for (Pane *pane : {m_left, m_right}) {
         QObject::connect(pane, &Pane::activated, pane, [this, pane] { setActivePane(pane); });
+        /* Both panes' columns hand their own folder to the same handler, which is the whole point of
+         * building them the same way: a drop from the left onto the right is one call to `pathOp` with
+         * the two paths the panes supplied, and nothing in it knows which side of the window is which. */
+        QObject::connect(pane, &Pane::dropped, this, &MainWindow::handleDrop);
     }
 
     m_status = new QLabel(this);
@@ -520,6 +542,66 @@ void MainWindow::tagSelectedFile() {
     }
 }
 
+/* A drop is the one way a pointer can ask this window to change what is on disk, so this is where its
+ * meaning is fixed: the destination is the folder the column shows, the item keeps its name, and the
+ * transfer is the core's - which is the same `fam_svc_fs::transfer` the MCP tools go through, so the
+ * rule that refuses to overwrite a file refuses a person's drag too, in the same words.
+ *
+ * `copy` came from the modifier the drop event carried: plain drag means move, Ctrl means copy. */
+void MainWindow::handleDrop(const QString &folder, const QStringList &paths, bool copy) {
+    if (!m_healthy) {
+        return;
+    }
+    const QString verb = copy ? QStringLiteral("copied") : QStringLiteral("moved");
+    int done = 0;
+    int already = 0;
+    QStringList refused;
+    for (const QString &source : paths) {
+        const QFileInfo info(source);
+        const QString name = info.fileName();
+        if (name.isEmpty()) {
+            /* A volume root has no name of its own to put down inside another folder. That is a thing
+             * the drag could not mean rather than a rule that said no, so it is worded as the former. */
+            refused.append(QStringLiteral("%1 is not a file or folder with a name").arg(info.filePath()));
+            continue;
+        }
+        if (folderKey(info.absolutePath()) == folderKey(folder)) {
+            /* Dropped back where it came from. Skipping the call rather than making it is not only
+             * cheaper: the core would answer SamePath, and "cannot move: the source and the
+             * destination are the same path" is a bad thing to say about something a person did not ask. */
+            ++already;
+            continue;
+        }
+        QJsonValue result;
+        QString error;
+        if (m_bridge->pathOp(source, QDir(folder).filePath(name), copy, &result, &error)) {
+            ++done;
+        } else {
+            refused.append(error);
+        }
+    }
+    QStringList clauses;
+    if (done > 0) {
+        clauses.append(QStringLiteral("%1 %2 item(s) into %3")
+                           .arg(verb)
+                           .arg(done)
+                           .arg(QDir::toNativeSeparators(folder)));
+    }
+    if (already > 0) {
+        clauses.append(QStringLiteral("%1 item(s) were already in that folder").arg(already));
+    }
+    clauses.append(refused);
+    /* The counts go to the log as well as the sentence to the status line, because the headless gate
+     * reads words and a status bar is not something it can assert on. Both columns learn the new rows
+     * from their own watches on the next beat - which is the whole reason a drop into a folder that is
+     * *not* on screen is fine too: nothing has to be told. */
+    qInfo("drop %s into %s: %d transferred, %d already there, %d refused: %s",
+          qUtf8Printable(verb), qUtf8Printable(QDir::toNativeSeparators(folder)), done, already,
+          refused.size(), qUtf8Printable(clauses.join(QStringLiteral("; "))));
+    setStatus(clauses.isEmpty() ? QStringLiteral("the drop carried nothing to transfer")
+                                : clauses.join(QStringLiteral("; ")));
+}
+
 void MainWindow::keyPressEvent(QKeyEvent *event) {
     const bool back = event->key() == Qt::Key_Backspace
                       || (event->key() == Qt::Key_Left
@@ -596,12 +678,24 @@ void MainWindow::createSelfCheckProbe() {
 }
 
 void MainWindow::removeSelfCheckProbe() {
-    if (m_probe.isEmpty()) {
-        return;
+    /* Every file the run wrote into the watched tree, from whichever column it is in now: the transfer
+     * steps move one and copy another, so a path remembered at creation time is not necessarily where
+     * the file sits, and a copy leaves one at each end. */
+    for (QString *path : {&m_probe, &m_draggedFrom, &m_draggedTo}) {
+        if (path->isEmpty()) {
+            continue;
+        }
+        /* "not there" rather than "yes": a move means the file stopped existing at the end it was
+         * written at, and a cleanup that claimed to have removed it would be describing the far end
+         * twice. */
+        const QString verdict = !QFile::exists(*path)
+                                    ? QStringLiteral("not there")
+                                    : (QFile::remove(*path) ? QStringLiteral("yes")
+                                                           : QStringLiteral("no"));
+        qInfo("self-check removed %s: %s", qUtf8Printable(QDir::toNativeSeparators(*path)),
+              qUtf8Printable(verdict));
+        path->clear();
     }
-    const bool gone = QFile::remove(m_probe);
-    qInfo("self-check removed the probe: %s", gone ? "yes" : "no");
-    m_probe.clear();
 }
 
 void MainWindow::runSelfCheckSearch(const QString &terms) {
@@ -663,26 +757,21 @@ void MainWindow::goUpForSelfCheck() {
 /* Opens the second pane and puts the watched folder in it. The point is the two numbers at the end:
  * with one chain the left pane could only ever mirror the right, and a gate that never opens the
  * second pane would ship it untested. */
-void MainWindow::toggleSplitForSelfCheck(bool on)
-{
-    if (!m_healthy)
-    {
+void MainWindow::toggleSplitForSelfCheck(bool on) {
+    if (!m_healthy) {
         return;
     }
-    if (m_split->isChecked() != on)
-    {
+    if (m_split->isChecked() != on) {
         m_split->click();
     }
-    if (!on)
-    {
+    if (!on) {
         qInfo("self-check collapsed the split: left visible=%d active=%s", m_left->isVisible() ? 1 : 0,
               m_active == m_left ? "left" : "right");
         return;
     }
     const int rightBefore = m_right->chain->depth();
     QString error;
-    if (!m_watch.isEmpty())
-    {
+    if (!m_watch.isEmpty()) {
         openFolderIn(m_left, m_watch, &error);
     }
     /* The right pane keeps whatever the drive pick left it on: same depth, same folder. If opening
@@ -691,4 +780,228 @@ void MainWindow::toggleSplitForSelfCheck(bool on)
           "active=%s",
           m_left->isVisible() ? 1 : 0, m_left->chain->depth(), m_right->chain->depth(), rightBefore,
           m_active == m_left ? "left" : "right");
+}
+
+/* Puts a real drop on a real column view and asks the view what it did with it.
+ *
+ * It sends the pair a platform drag sends - an enter, then the drop - rather than the drop alone.
+ * That is not ceremony: `QAbstractItemView` only routes a Drop to `dropEvent` once the view has been
+ * put into drag state by an enter, so a drop posted on its own is answered by Qt's default and never
+ * reaches this window's handler at all. The first version of this posted the drop alone, the handler
+ * did not run, and the step still reported `taken=1` - a gate passing on an event nobody handled.
+ *
+ * The events go to the viewport, because that is where the platform delivers them: the scroll area's
+ * own filter turns them into the view's `dragEnterEvent` and `dropEvent` virtuals, so the code this
+ * reaches is the code a person's drag reaches. What it does not fake is the drag itself - a mouse
+ * gesture no headless run can perform - and `outcome` carries back the action the view answered with,
+ * which is the difference between "a handler ran somewhere" and "this view took the drop as a copy". */
+bool MainWindow::postDrop(FileView *view, const QString &source, bool copy, QString *outcome) {
+    if (view == nullptr || view->viewport() == nullptr) {
+        *outcome = QStringLiteral("no view");
+        return false;
+    }
+    const std::unique_ptr<QMimeData> data(FileView::mimeDataForPaths(QStringList{source}));
+    /* Somewhere inside the viewport, and it does not matter where: the destination is the folder the
+     * column owns rather than the row the point happens to be over. */
+    const QPoint at(view->viewport()->width() / 2, view->viewport()->height() / 2);
+    const Qt::DropActions wanted = copy ? Qt::CopyAction : Qt::MoveAction;
+    const Qt::KeyboardModifiers keys = copy ? Qt::ControlModifier : Qt::NoModifier;
+    QDragEnterEvent enter(at, wanted, data.get(), Qt::LeftButton, keys);
+    QCoreApplication::sendEvent(view->viewport(), &enter);
+    QDropEvent event(at, wanted, data.get(), Qt::LeftButton, keys);
+    QCoreApplication::sendEvent(view->viewport(), &event);
+    switch (event.dropAction()) {
+    case Qt::CopyAction: *outcome = QStringLiteral("copy"); break;
+    case Qt::MoveAction: *outcome = QStringLiteral("move"); break;
+    default: *outcome = QStringLiteral("ignored"); break;
+    }
+    return event.dropAction() == wanted;
+}
+
+/* The border, from the two sides it has to be refused on. A payload of ours is answered; a standard
+ * `text/uri-list` - which is what anything outside this window would carry - is not, so there is no
+ * second, unaccounted-for way for a file to be moved by dropping it here. */
+void MainWindow::checkBorderForSelfCheck(FileView *view, const QString &source) {
+    if (view == nullptr || view->viewport() == nullptr) {
+        qWarning("self-check had no view to check the border of");
+        return;
+    }
+    /* An integer position here where `QDropEvent` takes a floating one, which is the sort of thing a
+     * compile tells you before a note does. */
+    const QPoint at(view->viewport()->width() / 2, view->viewport()->height() / 2);
+    const std::unique_ptr<QMimeData> ours(FileView::mimeDataForPaths(QStringList{source}));
+    QDragEnterEvent ownEvent(at, Qt::CopyAction | Qt::MoveAction, ours.get(), Qt::LeftButton,
+                             Qt::NoModifier);
+    QCoreApplication::sendEvent(view->viewport(), &ownEvent);
+
+    auto foreign = std::make_unique<QMimeData>();
+    foreign->setUrls({QUrl::fromLocalFile(source)});
+    QDragEnterEvent foreignEvent(at, Qt::CopyAction | Qt::MoveAction, foreign.get(), Qt::LeftButton,
+                                 Qt::NoModifier);
+    QCoreApplication::sendEvent(view->viewport(), &foreignEvent);
+
+    qInfo("self-check border of %s: ours %s, text/uri-list %s",
+          qUtf8Printable(QDir::toNativeSeparators(view->dropFolder())),
+          ownEvent.isAccepted() ? "accepted" : "refused",
+          foreignEvent.isAccepted() ? "accepted" : "refused");
+}
+
+/* The payload a person's drag would carry, made the way a real drag makes it - out of a row that is
+ * actually listed, through `FamListModel::mimeData` - and read back with the decoder the drop side
+ * uses. A row that is already on screen rather than the file this step is about to write, because the
+ * watch has not had a beat to learn about that one yet; the claim here is about the format, not about
+ * which file came through it. */
+void MainWindow::reportDragPayload(FileView *view) {
+    const QAbstractItemModel *model = view == nullptr ? nullptr : view->model();
+    const QModelIndex row = model == nullptr ? QModelIndex() : model->index(0, 0);
+    if (!row.isValid()) {
+        qWarning("self-check had no listed row to encode");
+        return;
+    }
+    const QString path = row.data(FamListModel::PathRole).toString();
+    const std::unique_ptr<QMimeData> data(model->mimeData(QModelIndexList{row}));
+    const QStringList back = FileView::pathsOf(data.get());
+    qInfo("self-check encoded a listed row as a drag: %s carried %d path(s), same=%d",
+          qUtf8Printable(QFileInfo(path).fileName()), back.size(),
+          back.size() == 1 && back.first() == path ? 1 : 0);
+}
+
+void MainWindow::prepareTransferForSelfCheck() {
+    if (!m_healthy || m_watch.isEmpty()) {
+        qWarning("self-check transfer asked for without a watched folder");
+        return;
+    }
+    if (!m_split->isChecked()) {
+        m_split->click();
+    }
+    /* Both ends inside the tree `--watch` named. The drive pick earlier in the run had left the right
+     * pane on a volume root, and a test that wrote there would be writing somewhere nobody asked this
+     * program to touch. The left goes one level deeper than the right so that the two ends are two
+     * folders - and one chain's depth is what the other one's is not. */
+    QString error;
+    if (!openFolderIn(m_right, m_watch, &error)) {
+        qWarning("self-check could not open %s in the right pane: %s",
+                 qUtf8Printable(QDir::toNativeSeparators(m_watch)), qUtf8Printable(error));
+        return;
+    }
+    openFolderIn(m_left, m_watch, &error);
+    const int before = m_left->chain->depth();
+    m_left->chain->selectFirstFolder();
+    qInfo("self-check set up the transfer: left depth %d -> %d on %s, right on %s", before,
+          m_left->chain->depth(),
+          qUtf8Printable(QDir::toNativeSeparators(m_left->chain->deepestPath())),
+          qUtf8Printable(QDir::toNativeSeparators(m_right->chain->deepestPath())));
+}
+
+bool MainWindow::dropBetweenPanes(const QString &from, const QString &to, bool copy) {
+    if (from.isEmpty() || to.isEmpty() || folderKey(from) == folderKey(to)) {
+        qWarning("self-check has two different folders to transfer between: %s -> %s",
+                 qUtf8Printable(QDir::toNativeSeparators(from)),
+                 qUtf8Printable(QDir::toNativeSeparators(to)));
+        return false;
+    }
+    m_draggedFrom = QDir(from).filePath(QLatin1String(kDragProbe));
+    m_draggedTo = QDir(to).filePath(QLatin1String(kDragProbe));
+    if (!QFile::exists(m_draggedFrom)) {
+        QFile file(m_draggedFrom);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            qWarning("self-check could not create %s: %s",
+                     qUtf8Printable(QDir::toNativeSeparators(m_draggedFrom)),
+                     qUtf8Printable(file.errorString()));
+            m_draggedFrom.clear();
+            return false;
+        }
+        file.write("drag");
+        file.close();
+    }
+
+    FileView *target = nullptr;
+    for (Pane *pane : {m_left, m_right}) {
+        if (folderKey(pane->chain->deepestPath()) == folderKey(to)) {
+            target = pane->chain->deepestView();
+        }
+    }
+    if (target == nullptr) {
+        qWarning("self-check found no column showing %s to drop onto",
+                 qUtf8Printable(QDir::toNativeSeparators(to)));
+        return false;
+    }
+    checkBorderForSelfCheck(target, m_draggedFrom);
+    QString outcome;
+    const bool taken = postDrop(target, m_draggedFrom, copy, &outcome);
+    /* This is the line the step exists for. A move that quietly came back a copy would look identical
+     * in a status bar and identical in a log of handlers run, and the only thing that tells them apart
+     * is whether the file is still where it started - so both paths are checked on disk, by name, in
+     * the same sentence. */
+    qInfo("self-check %s by drop from %s to %s: left depth=%d, right depth=%d, view answered %s, "
+          "taken=%d, %s exists=%d, %s exists=%d",
+          copy ? "copied" : "moved", qUtf8Printable(QDir::toNativeSeparators(from)),
+          qUtf8Printable(QDir::toNativeSeparators(to)), m_left->chain->depth(),
+          m_right->chain->depth(), qUtf8Printable(outcome), taken ? 1 : 0,
+          qUtf8Printable(QDir::toNativeSeparators(m_draggedFrom)),
+          QFile::exists(m_draggedFrom) ? 1 : 0,
+          qUtf8Printable(QDir::toNativeSeparators(m_draggedTo)),
+          QFile::exists(m_draggedTo) ? 1 : 0);
+    return taken;
+}
+
+void MainWindow::moveAcrossPanesForSelfCheck() {
+    if (!m_healthy) {
+        return;
+    }
+    reportDragPayload(m_right->chain->deepestView());
+    if (!dropBetweenPanes(m_left->chain->deepestPath(), m_right->chain->deepestPath(), false)) {
+        return;
+    }
+    /* A move leaves the file at the far end, and the next step's source has to be the file that
+     * exists - not the path the last one was written at. */
+    if (!QFile::exists(m_draggedFrom) && QFile::exists(m_draggedTo)) {
+        m_draggedFrom = m_draggedTo;
+    }
+}
+
+void MainWindow::copyBackAcrossPanesForSelfCheck() {
+    if (!m_healthy) {
+        return;
+    }
+    if (!dropBetweenPanes(m_right->chain->deepestPath(), m_left->chain->deepestPath(), true)) {
+        return;
+    }
+    /* A copy leaves a file at both ends, which is the evidence - and the extra one is what the cleanup
+     * step is told about so it can remove it. */
+}
+
+/* The drop that goes nowhere: the item is dropped back into the folder already holding it. The claim
+ * is in the line `handleDrop` writes for itself - one item "already there", none transferred, none
+ * refused - because a guard that had not fired would have asked the core and been told SamePath, which
+ * reads as an error about something a person did by accident. */
+void MainWindow::dropInPlaceForSelfCheck() {
+    if (!m_healthy || m_draggedFrom.isEmpty()) {
+        qWarning("self-check had no file to drop back into its own folder");
+        return;
+    }
+    const QString home = QFileInfo(m_draggedFrom).absolutePath();
+    FileView *view = nullptr;
+    for (Pane *pane : {m_left, m_right}) {
+        if (folderKey(pane->chain->deepestPath()) == folderKey(home)) {
+            view = pane->chain->deepestView();
+        }
+    }
+    if (view == nullptr) {
+        qWarning("self-check found no column showing %s",
+                 qUtf8Printable(QDir::toNativeSeparators(home)));
+        return;
+    }
+    QString outcome;
+    const QString before = m_status->text();
+    const bool taken = postDrop(view, m_draggedFrom, false, &outcome);
+    /* The status line, before and after. `handleDrop` owns the sentence, so a line that changed is the
+     * proof the handler ran at all - which is the thing this step was written to find: posted on its
+     * own, with no drag-enter in front of it, the drop was answered by Qt's default and the step
+     * reported success while nothing in this window had seen the event. */
+    qInfo("self-check dropped %s back into its own folder: view answered %s, taken=%d, still there=%d, "
+          "status was \"%s\" now \"%s\"",
+          qUtf8Printable(QFileInfo(m_draggedFrom).fileName()), qUtf8Printable(outcome), taken ? 1 : 0,
+          QFile::exists(m_draggedFrom) ? 1 : 0, qUtf8Printable(before),
+          qUtf8Printable(m_status->text()));
 }

@@ -70,10 +70,15 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
 
     column->model = new FamListModel(column->frame);
     column->model->setIconCache(m_icons);
-    column->view = new QListView(column->frame);
+    column->view = new FileView(column->frame);
     column->view->setObjectName(QString::fromLatin1(Theme::listName()));
     column->view->setModel(column->model);
     column->view->setItemDelegate(new RowDelegate(&Theme::instance(), kFamRowRoles, column->view));
+    /* This column *is* a folder, so it is a place a drag can land. A column's directory never changes
+     * while it exists - a different folder gets a different column - which is why the target is named
+     * once here rather than re-asked on every drop. */
+    column->view->setDropFolder(path);
+    QObject::connect(column->view, &FileView::dropped, this, &ColumnChain::dropped);
     /* Hover is a row state the delegate reads, and a view only tracks it when asked. */
     column->view->setMouseTracking(true);
     column->view->viewport()->setAttribute(Qt::WA_Hover, true);
@@ -99,6 +104,12 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     /* A QLabel clips rather than elides, so the full path goes where hovering reaches it: a column
      * that is 230px wide cannot show `D:\Datas\...\深入一层` in any spelling. */
     title->setToolTip(column->path);
+    /* And it has to be told it may be clipped at all. A label's own minimum width is its full text,
+     * so in a header strip narrower than the path the layout over-commits and the label is drawn on
+     * top of the sort button - which is what three columns in a split window look like. Yielding
+     * everything it cannot show keeps the button's room, and the tooltip keeps the path's. */
+    title->setMinimumWidth(0);
+    title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     auto *button = new QPushButton(sortLabel(column->sort) + arrowFor(column->order), header);
     button->setObjectName(QString::fromLatin1(Theme::sortHeaderName()));
     button->setFlat(true);
@@ -135,8 +146,8 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
                         });
 
     QObject::connect(column->view->selectionModel(), &QItemSelectionModel::currentChanged, this,
-                     [this, token](const QModelIndex &, const QModelIndex &) {
-                         onCurrentChanged(token);
+                     [this, token](const QModelIndex &, const QModelIndex &previous) {
+                         onCurrentChanged(token, previous);
                      });
 
     m_layout->addWidget(column->frame);
@@ -270,9 +281,13 @@ QString ColumnChain::poll() {
         const quint32 before = column->head.totalRows;
         if (polled.resync()) {
             const auto outcome = column->model->reconcile(polled);
-            qInfo("column %s reconciled in %d pair(s), %u row(s), %s",
+            /* Both numbers, because they are two different costs: a pair is a row range the view has
+             * to re-lay-out around, and a modified row is one it only has to repaint. A re-read that
+             * spends pairs on rows that never moved is the shape that used to steal the reader's
+             * current row out from under them. */
+            qInfo("column %s reconciled in %d pair(s) + %d modified row(s), %u row(s), %s",
                   qUtf8Printable(QDir::toNativeSeparators(column->path)), outcome.pairs,
-                  column->model->totalRows(),
+                  outcome.modified, column->model->totalRows(),
                   outcome.rebuilt ? "window rebuilt" : "selection kept");
         } else {
             const int pairs = column->model->applyCuts(cuts);
@@ -377,10 +392,7 @@ int ColumnChain::indexOf(const Column *wanted) const {
     return -1;
 }
 
-void ColumnChain::onCurrentChanged(quint64 token) {
-    if (m_filling) {
-        return;
-    }
+void ColumnChain::onCurrentChanged(quint64 token, const QModelIndex &previous) {
     Column *found = find(token);
     if (found == nullptr) {
         /* The column was dropped while a queued selection change was still in flight. */
@@ -388,11 +400,22 @@ void ColumnChain::onCurrentChanged(quint64 token) {
     }
     Column &column = *found;
     const QModelIndex current = column.view->selectionModel()->currentIndex();
-    if (!current.isValid()) {
+    const bool valid = current.isValid();
+    const QString path = valid ? column.model->pathAt(current.row()) : QString();
+    const bool isDirectory = valid && column.model->data(current, FamListModel::DirectoryRole).toBool();
+    /* Every change of chain shape from here on is this row's doing, so the row is what belongs in the
+     * log - and the row it came from, because "the reader moved down one" and "a model reset
+     * re-resolved the current index onto whatever sits at that number now" look identical afterwards
+     * and differ entirely in what they mean. Printed even when the change is suppressed: a suppressed
+     * change still happened, and a chain that grew on its own has to be traceable to the signal. */
+    qInfo("column %s: current row %d (was %d, %d listed)%s, %s is %s",
+          qUtf8Printable(QDir::toNativeSeparators(column.path)), valid ? current.row() : -1,
+          previous.row(), column.model->rowCount(), m_filling ? " suppressed" : "",
+          qUtf8Printable(QFileInfo(path).fileName()),
+          !valid ? "nothing" : (isDirectory ? "a folder" : "a file"));
+    if (m_filling || !valid) {
         return;
     }
-    const QString path = column.model->pathAt(current.row());
-    const bool isDirectory = column.model->data(current, FamListModel::DirectoryRole).toBool();
     if (isDirectory) {
         m_filling = true;
         open(path);

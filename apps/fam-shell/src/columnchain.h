@@ -1,17 +1,18 @@
 #ifndef COLUMNCHAIN_H
 #define COLUMNCHAIN_H
 
+#include <QModelIndex>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 #include <QWidget>
 
 #include "bridge.h"
+#include "fileview.h"
 
 class FamListModel;
 class QHBoxLayout;
 class IconCache;
-class QListView;
 
 /* A Miller column chain: one directory per column, one v2 token per column, one model per column.
  *
@@ -29,6 +30,9 @@ class QListView;
  *     because a view nobody drains queues its cut positions for as long as it lives;
  *   - the sort. Each column's control calls `fam_dir_set_sort` for that column's token only -
  *     sorting a folder is a property of that folder's view, not of the chain.
+ *   - the drop target. A column is a FileView that names its own folder, so a drag landing in column
+ *     three goes into the directory column three is showing, whatever the rest of the chain or the
+ *     other pane happens to be on. The chain only relays what the column asked for.
  */
 class ColumnChain final : public QWidget {
     Q_OBJECT
@@ -65,8 +69,8 @@ public:
      * nothing has been picked yet. This is what "tag selected" acts on. */
     QString selectedPath() const;
 
-    /* The view a scroll or a keyboard shortcut should act on. */
-    QListView *deepestView() const {
+    /* The view a scroll, a keyboard shortcut or a headless drop should act on. */
+    FileView *deepestView() const {
         return m_columns.isEmpty() ? nullptr : m_columns.last()->view;
     }
 
@@ -85,12 +89,20 @@ public:
      * by the token the button captured. */
     bool clickDeepestHeader();
 
+signals:
+    /* A row was dropped onto one of the columns, and `folder` is that column's own directory. Emitted
+     * by the column's view and relayed unchanged - the chain has no idea which pane it belongs to, and
+     * the caller has to know that to say where the file came from. */
+    void dropped(const QString &folder, const QStringList &paths, bool copy);
+
 private:
     struct Column {
         quint64 token = 0;
         QString path;
         FamListModel *model = nullptr;
-        QListView *view = nullptr;
+        /* A FileView rather than a QListView because being a drop target for `path` is this view's
+         * job, and the folder it drops into is set once here and never again. */
+        FileView *view = nullptr;
         QWidget *frame = nullptr;
         /* What this column is sorted by, so a click can cycle name -> size -> modified without asking
          * the core what it currently is: the core has no getter for a view's order. */
@@ -99,7 +111,10 @@ private:
         FamWindow head;
     };
 
-    void onCurrentChanged(quint64 token);
+    /* The selection handler one column's current row change runs. `previous` comes with the signal and
+     * is logged, because the difference between "the reader moved down a row" and "a re-read left the
+     * current index pointing at a different item" is only visible in where it came from. */
+    void onCurrentChanged(quint64 token, const QModelIndex &previous);
     void onHeaderClicked(Column &column);
     void applySortTo(Column &column);
     Column *addColumn(const QString &path, quint64 token);

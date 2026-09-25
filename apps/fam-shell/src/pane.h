@@ -7,7 +7,6 @@
 #include "famlistmodel.h"
 
 class IconCache;
-class QListView;
 class QStackedWidget;
 
 /* One browsing pane: a chain of Miller columns, plus the search results that can cover them.
@@ -36,7 +35,9 @@ public:
      * the focus, and it needs all four to do that. */
     ColumnChain *chain = nullptr;
     FamListModel *model = nullptr;
-    QListView *results = nullptr;
+    /* A FileView that was never given a folder to drop into: its rows come from wherever the query
+     * reached, so it is a drag source and not a target. */
+    FileView *results = nullptr;
     QStackedWidget *pages = nullptr;
 
     /* The search this pane started, if one is still arriving. */
@@ -52,6 +53,10 @@ signals:
      * because the search box, the scope selector and the Tag button each act on exactly one of them,
      * and a second guess about which one a person meant is worse than asking them to click it. */
     void activated();
+
+    /* One of this pane's columns took a drop. Relayed straight from the chain, because the folder a
+     * drop lands in is the column's own and the window only needs to know a transfer was asked for. */
+    void dropped(const QString &folder, const QStringList &paths, bool copy);
 
 protected:
     /* Child views and their viewports swallow the press before a parent widget would see it, so the

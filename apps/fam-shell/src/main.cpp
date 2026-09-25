@@ -56,8 +56,9 @@ int main(int argc, char *argv[]) {
         QStringLiteral("path"));
     const QCommandLineOption mutateOption(
         QStringLiteral("self-check-mutate"),
-        QStringLiteral("With --watch and --self-check: create one file in the watched folder and "
-                       "remove it again, so a re-read happens while a view is open."));
+        QStringLiteral("With --watch and --self-check: write files into the watched folder, move one "
+                       "of them into another folder and copy it back, and remove them again - so a "
+                       "re-read and a transfer both happen while a view is open."));
     const QCommandLineOption deepOption(
         QStringLiteral("self-check-deep"),
         QStringLiteral("With --watch and --self-check: descend <count> folders, then click a column "
@@ -166,6 +167,20 @@ int main(int argc, char *argv[]) {
              * button the log proves, the expanded frame is the half a person will actually look at,
              * and one timeline can carry both without inventing a second screenshot path. */
             QTimer::singleShot(7500, [&window]() { window.toggleSplitForSelfCheck(true); });
+            /* Drag and drop last, because it is the part of the surface a run with no hands cannot
+             * do at all: the two panes are pointed at two folders of the watched tree, a file is
+             * written into one of them, and a real drop event is posted at the other one's column -
+             * once with no modifier, which is a move, and once with Ctrl, which is a copy. */
+            QTimer::singleShot(7900, [&window]() { window.prepareTransferForSelfCheck(); });
+            QTimer::singleShot(8300, [&window]() { window.moveAcrossPanesForSelfCheck(); });
+            QTimer::singleShot(8700, [&window]() { window.copyBackAcrossPanesForSelfCheck(); });
+            /* And the drop that is not a transfer: back into the folder the file is already in. A
+             * person does this by accident, and the difference between "nothing to do" and "the core
+             * refused it" is only visible in the sentence the window prints. */
+            QTimer::singleShot(9000, [&window]() { window.dropInPlaceForSelfCheck(); });
+            /* The same opt-in undo as the probe's, a beat after the copy has left a file at each end
+             * of the tree, so the run finishes with nothing of its own in the watched folder. */
+            QTimer::singleShot(9300, [&window]() { window.removeSelfCheckProbe(); });
         }
         /* The depth cap is only crossed by going deep, and crossing it is what drops a column from
          * the front of the chain - the one structural change that makes every captured position
@@ -180,7 +195,7 @@ int main(int argc, char *argv[]) {
                                [&window]() { window.clickHeaderForSelfCheck(); });
         }
         const int grabAt =
-            std::max({2500, mutate ? 8200 : 0, deep > 0 ? 2800 + deep * 300 : 0});
+            std::max({2500, mutate ? 9600 : 0, deep > 0 ? 2800 + deep * 300 : 0});
         QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so

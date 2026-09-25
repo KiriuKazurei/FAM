@@ -52,7 +52,8 @@ public:
      * the core's reconciled re-read happen while a view is open, which is the only way the shell's
      * reconcile path gets run in a headless gate - and it has to be driven from inside the process,
      * because a harness that creates the file from outside cannot tell whether the run is still
-     * alive. Opt-in: nothing writes into a folder the user pointed at unless asked. */
+     * alive. Opt-in: nothing writes into a folder the user pointed at unless asked. Removal undoes
+     * every file the run wrote into the watched tree, whichever column each ended up in. */
     void createSelfCheckProbe();
     void removeSelfCheckProbe();
 
@@ -78,6 +79,18 @@ public:
      * was constructed and never shown, and the headless gate would be certifying one pane while
      * shipping two. */
     void toggleSplitForSelfCheck(bool on);
+
+    /* The headless half of drag and drop: one file from one pane's folder into the other's, once with
+     * no modifier and once with Ctrl held, then the same file copied back the other way. The handler
+     * that runs is the one a person's drag runs - which is the point, since "the wiring works" and "the
+     * file is where the modifier said" are two different claims and only the second is about the disk.
+     * Opt-in like the probe, and it writes inside `--watch` only. */
+    void prepareTransferForSelfCheck();
+    void moveAcrossPanesForSelfCheck();
+    void copyBackAcrossPanesForSelfCheck();
+    /* A drop back into the folder the item is already in, which is the case the status line must not
+     * turn into an error and the core must not be asked about at all. */
+    void dropInPlaceForSelfCheck();
 
     /* Drops the deepest column, as Backspace would. */
     void goUpForSelfCheck();
@@ -120,6 +133,34 @@ private:
     /* Shows or hides the left pane. Collapsed, the window is one browsing surface - the shape a
      * person who never asked for a second column has been getting all along. */
     void toggleSplit();
+
+    /* --- drag and drop ---------------------------------------------------------------
+     *
+     * A drop is the shell's only way for a pointer to ask for a write, and every rule about what it
+     * means lives in these three: the destination is the folder the column shows (never the row the
+     * point is over), the name is kept, and the transfer itself is the core's - so the same
+     * never-overwrites rule that the MCP gate enforces is the one a person's drag runs into. */
+    void handleDrop(const QString &folder, const QStringList &paths, bool copy);
+
+    /* Posts a real drop event at a real column view, with the modifiers a person's hand would have
+     * left on the keyboard, and answers with the action the view wrote back. It posts the drop rather
+     * than driving a drag: the drag is a mouse gesture no headless run can perform, and everything
+     * worth certifying - which folder, which name, copy or move, what refused - is decided here. */
+    bool postDrop(FileView *view, const QString &source, bool copy, QString *outcome);
+    /* Says whether the target view lets a foreign payload past its border. Two claims, both about the
+     * decision not to have a second write path: ours is accepted, a standard `text/uri-list` is not. */
+    void checkBorderForSelfCheck(FileView *view, const QString &source);
+    /* Encodes a row that is actually listed the way a real drag would, and reads it back. */
+    void reportDragPayload(FileView *view);
+    /* One file from one pane's folder into the other's, then what the disk says about it. */
+    bool dropBetweenPanes(const QString &from, const QString &to, bool copy);
+
+    /* Two Windows paths name the same directory. `cleanPath` folds separators, duplicate separators,
+     * `.` and a trailing slash; the case fold is Windows' rather than the filesystem's, because the
+     * same folder opened by two panes with different spellings has to read as one place or a move
+     * onto itself would be attempted. */
+    static QString folderKey(const QString &path);
+
     QString deepestFolder() const { return m_active->chain->deepestPath(); }
 
     std::unique_ptr<FamBridge> m_bridge;
@@ -147,6 +188,10 @@ private:
     QStringList m_kinds;
     /* Set while the opt-in self-check mutation is in the watched folder, so it can be undone. */
     QString m_probe;
+    /* The two ends of the headless transfer, both remembered because a copy leaves a file at each of
+     * them and the cleanup step has to undo both. */
+    QString m_draggedFrom;
+    QString m_draggedTo;
     /* The folder `--watch` asked for, remembered so the headless timeline can put it in the *other*
      * pane and so prove the two are independent rather than two views of one chain. */
     QString m_watch;

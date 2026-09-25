@@ -36,6 +36,7 @@ add_executable(fam-shell WIN32
     src/bridge.cpp
     src/famlistmodel.cpp
     src/columnchain.cpp
+    src/fileview.cpp
     src/pane.cpp
     src/drivelist.cpp
     src/iconcache.cpp)
@@ -50,3 +51,18 @@ add_executable(abi-smoke
     src/bridge.cpp)
 target_include_directories(abi-smoke PRIVATE include src)
 target_link_libraries(abi-smoke PRIVATE Qt6::Core famcore)
+
+# A second console target for the model's diff, which is the one part of the shell whose failure is
+# invisible in the data: a re-read that announces a grown folder as a row that left and a row that
+# arrived paints the same table, and the only thing it costs is the reader's place in it - which the
+# column chain then reads as a click. Watching the signals is the only way to see it happen.
+add_executable(model-smoke
+    tools/model_smoke.cpp
+    src/famlistmodel.cpp
+    src/fileview.cpp
+    src/iconcache.cpp)
+target_include_directories(model-smoke PRIVATE include src)
+# Widgets, not just Core: the claim is about what a view's selection model does with these signals, so
+# the view is in the test. `fam-ui` because the model names the shared row delegate's role seam, and
+# the icon libraries because `FamListModel` names the icon layer's symbols.
+target_link_libraries(model-smoke PRIVATE Qt6::Widgets fam-ui shell32 comctl32 ole32)

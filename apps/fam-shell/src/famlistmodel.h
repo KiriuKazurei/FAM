@@ -51,6 +51,21 @@ public:
     QVariant data(const QModelIndex &index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
 
+    /* --- dragging rows out -------------------------------------------------------------------
+     *
+     * A row of this model is a file, and its `mimeData` is the path the drop side will act on. The
+     * payload is written by `FileView::mimeDataForPaths` so that the bytes a real drag carries and
+     * the bytes a headless transfer step hands over are produced by one function. */
+
+    QStringList mimeTypes() const override;
+    QMimeData *mimeData(const QModelIndexList &indexes) const override;
+    Qt::DropActions supportedDragActions() const override;
+
+    /* `Qt::ItemIsDragEnabled`, which `QAbstractItemModel::flags()` does not set - and
+     * `QAbstractItemView::canDrag()` refuses to start a drag without it, so this override is the line
+     * that makes a row pickable at all. */
+    Qt::ItemFlags flags(const QModelIndex &index) const override;
+
     void bind(quint64 token, const QString &directory, const QStringList &kinds, Fetcher fetch);
     void unbind();
 
@@ -64,6 +79,10 @@ public:
     struct Reconciled {
         /* Row-signal pairs spent on the change. */
         int pairs = 0;
+        /* Rows announced as modified rather than as gone-and-arrived: the same item in the same
+         * place, saying something different now. Zero pairs and a non-zero count here is the good
+         * shape - a modification that costs a removal is the one that moves the reader's row. */
+        int modified = 0;
         /* True when the window could not be reconciled and the view was rebuilt instead - which is
          * what costs the selection and the scroll position, so the caller logs it. */
         bool rebuilt = false;
@@ -95,8 +114,16 @@ private:
 
     /* Two rows are the same row when everything a delegate paints about them is equal: identity
      * within the view plus size, time and kind. A file that was only *modified* is therefore not the
-     * same row, and the diff spends a pair on it instead of leaving a stale number on screen. */
+     * same row, and the diff spends a `dataChanged` on it instead of leaving a stale number on
+     * screen - see `sameItem`, which is what the scan is aligned on. */
     static bool sameRow(const FamViewRow &left, const FamViewRow &right);
+    /* Two rows are the same *item* when they are the same name in the same place, whatever it now
+     * says about itself. That is the question the diff's prefix and suffix scans have to ask, because
+     * a folder whose contents changed is the same item with a different size - and if the scan calls
+     * that a row that left and a row that arrived, the view removes the reader's row and moves the
+     * current index down to the next one. The column chain reads a moved current index as a person
+     * having clicked it, and opens a folder nobody asked for. */
+    static bool sameItem(const FamViewRow &left, const FamViewRow &right);
 
     QString m_directory;
     QStringList m_kinds;

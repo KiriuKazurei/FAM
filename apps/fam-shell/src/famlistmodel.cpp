@@ -2,7 +2,11 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QMimeData>
 
+#include <algorithm>
+
+#include "fileview.h"
 #include "iconcache.h"
 
 QString formatSize(quint64 bytes) {
@@ -193,6 +197,42 @@ QHash<int, QByteArray> FamListModel::roleNames() const {
     };
 }
 
+Qt::ItemFlags FamListModel::flags(const QModelIndex &index) const {
+    return index.isValid() ? QAbstractListModel::flags(index) | Qt::ItemIsDragEnabled
+                           : QAbstractListModel::flags(index);
+}
+
+QStringList FamListModel::mimeTypes() const {
+    return {QString::fromLatin1(FileView::kMime)};
+}
+
+Qt::DropActions FamListModel::supportedDragActions() const {
+    /* Both, whatever the selection is. Which of the two a given drag turns into is the view's
+     * answer to whether Ctrl is held; answering Move only here would have the drag-and-drop layer
+     * refuse a Ctrl+drag before any drop event reached this window. */
+    return Qt::CopyAction | Qt::MoveAction;
+}
+
+QMimeData *FamListModel::mimeData(const QModelIndexList &indexes) const {
+    QStringList paths;
+    paths.reserve(indexes.size());
+    for (const QModelIndex &index : indexes) {
+        if (!index.isValid()) {
+            continue;
+        }
+        /* Composed through `pathAt`, so a directory row and a search row both yield the path a
+         * transfer needs - the first from the view's own prefix, the second from the row that spans
+         * directories and carries it. */
+        const QString path = pathAt(index.row());
+        if (!path.isEmpty()) {
+            paths.append(path);
+        }
+    }
+    /* Null rather than an empty payload: `QAbstractItemViewPrivate::startDrag` stops when the model
+     * hands back nothing, which is the right answer for a selection of rows the core could not name. */
+    return paths.isEmpty() ? nullptr : FileView::mimeDataForPaths(paths);
+}
+
 QString FamListModel::pathAt(int index) const {
     const FamViewRow *row = rowAt(index);
     if (row == nullptr) {
@@ -250,6 +290,10 @@ bool FamListModel::sameRow(const FamViewRow &left, const FamViewRow &right) {
            left.directory == right.directory && left.attrs == right.attrs;
 }
 
+bool FamListModel::sameItem(const FamViewRow &left, const FamViewRow &right) {
+    return left.name == right.name && left.path == right.path;
+}
+
 FamListModel::Reconciled FamListModel::reconcile(const FamWindow &window) {
     Reconciled outcome;
     const int oldTotal = int(m_total);
@@ -282,17 +326,29 @@ FamListModel::Reconciled FamListModel::reconcile(const FamWindow &window) {
     const QVector<FamViewRow> before = m_rows;
     const QVector<FamViewRow> &after = fresh.rows;
 
-    /* Everything that differs sits between a common prefix and a common suffix - which is exactly
-     * what a re-read of a sorted table does to a window: a new row lands in one place, and a row
-     * that only got bigger is not the same row (see `sameRow`). */
+    /* Everything that differs sits between a common prefix and a common suffix - which is exactly what
+     * a re-read of a sorted table does to a window: a new row lands in one place, and a row that only
+     * got bigger stays where it was. The scans align on `sameItem`, not on `sameRow`, because the two
+     * questions are different ones: "is this the same row of the listing" decides whether the view can
+     * keep its rows, and only "does it say the same thing" decides whether it has to be repainted.
+     * Aligning on the second question would call a grown folder a row that left and a row that
+     * arrived, and a removal at the reader's row moves the current index down to the next one. */
     int prefix = 0;
+    QVector<int> modified;
     while (prefix < before.size() && prefix < after.size() &&
-           sameRow(before.at(prefix), after.at(prefix))) {
+           sameItem(before.at(prefix), after.at(prefix))) {
+        if (!sameRow(before.at(prefix), after.at(prefix))) {
+            modified.append(prefix);
+        }
         ++prefix;
     }
     int suffix = 0;
     while (suffix < before.size() - prefix && suffix < after.size() - prefix &&
-           sameRow(before.at(before.size() - 1 - suffix), after.at(after.size() - 1 - suffix))) {
+           sameItem(before.at(before.size() - 1 - suffix), after.at(after.size() - 1 - suffix))) {
+        const int at = after.size() - 1 - suffix;
+        if (!sameRow(before.at(before.size() - 1 - suffix), after.at(at))) {
+            modified.append(at);
+        }
         ++suffix;
     }
     const int gone = before.size() - prefix - suffix;
@@ -347,6 +403,22 @@ FamListModel::Reconciled FamListModel::reconcile(const FamWindow &window) {
     m_rows = after;
     m_total = window.totalRows;
     m_state = window.state;
+    /* The rows the scan matched in place but not in content. `dataChanged` is the only signal that
+     * says "same row, different words", and it is the one a view can answer by repainting one row:
+     * nothing is removed, so nothing moves, and the reader's current index stays exactly where they
+     * left it. Emitted after the table is swapped, because a repaint this signal triggers reads the
+     * rows back out of the model. Runs are coalesced so a folder where thirty files grew costs thirty
+     * rows of one signal rather than thirty signals. */
+    std::sort(modified.begin(), modified.end());
+    for (int at = 0; at < modified.size();) {
+        int run = 1;
+        while (at + run < modified.size() && modified.at(at + run) == modified.at(at) + run) {
+            ++run;
+        }
+        emit dataChanged(index(modified.at(at)), index(modified.at(at) + run - 1));
+        at += run;
+    }
+    outcome.modified = modified.size();
     outcome.pairs = pairs;
     return outcome;
 }

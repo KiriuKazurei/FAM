@@ -18,7 +18,7 @@ Pane::Pane(FamBridge *bridge, IconCache *icons, const QStringList &kinds, QWidge
     model = new FamListModel(this);
     model->setIconCache(icons);
 
-    results = new QListView(this);
+    results = new FileView(this);
     results->setObjectName(QString::fromLatin1(Theme::listName()));
     results->setModel(model);
     results->setUniformItemSizes(true);
@@ -30,10 +30,14 @@ Pane::Pane(FamBridge *bridge, IconCache *icons, const QStringList &kinds, QWidge
     results->setItemDelegate(new RowDelegate(&Theme::instance(), kFamRowRoles, results));
     results->setMouseTracking(true);
     results->viewport()->setAttribute(Qt::WA_Hover, true);
+    /* Left a source-only FileView: no folder is named for it, so a drop that lands here is refused at
+     * the border rather than guessed at. Its rows can still be dragged out into a column. */
 
     pages = new QStackedWidget(this);
     pages->addWidget(chain);
     pages->addWidget(results);
+
+    QObject::connect(chain, &ColumnChain::dropped, this, &Pane::dropped);
 
     /* The pane needs a layout of its own. Without one, `pages` is a child that keeps whatever
      * geometry it was born with, and the window can hand this pane half the screen while the listing
