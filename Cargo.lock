@@ -311,6 +311,7 @@ dependencies = [
  "fam-core",
  "fam-sched",
  "fam-svc-audit",
+ "fam-svc-fs",
  "fam-svc-index",
  "fam-svc-store",
  "fam-svc-walk",
@@ -392,6 +393,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fam-svc-fs"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "fam-svc-index"
 version = "0.1.0"
 dependencies = [
@@ -412,6 +421,7 @@ dependencies = [
  "fam-core",
  "fam-svc-audit",
  "fam-svc-auth",
+ "fam-svc-fs",
  "fam-svc-index",
  "fam-svc-store",
  "fam-svc-walk",

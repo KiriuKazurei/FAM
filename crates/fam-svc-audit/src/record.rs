@@ -56,6 +56,12 @@ pub enum Op {
     SearchPage,
     SearchCancel,
     SearchClose,
+    /// A file or folder someone dragged somewhere. These are the first calls on the ABI surface that
+    /// change what is on disk, and they are in this list for the same reason the token verbs are: the
+    /// trail exists to date an act, and a move is the act a person most often wants dated - both
+    /// "where did it go" and "it was there before I moved it".
+    PathMove,
+    PathCopy,
     /// The credential verbs - three that change a grant and one that reads them. They are not ABI
     /// calls: the ABI has no credential surface at all, by design. Handing out a token, taking one
     /// away and swapping its secret are exactly the acts an audit trail exists to date, and the only
@@ -112,6 +118,8 @@ impl Op {
             Self::SearchPage => "search.page",
             Self::SearchCancel => "search.cancel",
             Self::SearchClose => "search.close",
+            Self::PathMove => "path.move",
+            Self::PathCopy => "path.copy",
             Self::TokenAdd => "token.add",
             Self::TokenRevoke => "token.revoke",
             Self::TokenRotate => "token.rotate",
@@ -295,6 +303,17 @@ mod tests {
             };
             assert_eq!(weight, expected, "{name} is weighed wrong");
             assert_ne!(weight, Weight::Poll, "{name} is never a heartbeat");
+        }
+    }
+
+    /// The two verbs a person's drag can produce. They are `Ask` - one act, one line, never a
+    /// heartbeat that could bury the act under it - and their names are on the wire, so a rename here
+    /// is a format change and this test is where that gets noticed.
+    #[test]
+    fn the_transfer_verbs_are_named_and_cost_one_ask() {
+        for (op, name) in [(Op::PathMove, "path.move"), (Op::PathCopy, "path.copy")] {
+            assert_eq!(op.name(), name);
+            assert_eq!(op.weight(), Weight::Ask, "{name} is not an Ask");
         }
     }
 

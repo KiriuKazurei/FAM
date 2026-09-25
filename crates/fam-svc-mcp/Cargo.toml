@@ -10,6 +10,7 @@ publish.workspace = true
 fam-core.workspace = true
 fam-svc-audit.workspace = true
 fam-svc-auth.workspace = true
+fam-svc-fs.workspace = true
 fam-svc-index.workspace = true
 fam-svc-store.workspace = true
 fam-svc-walk.workspace = true

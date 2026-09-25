@@ -20,7 +20,7 @@
 //! `rotate`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use fam_svc_auth::Verb;
 use fam_svc_store::NewTag;
@@ -161,33 +161,25 @@ impl Server {
         }
     }
 
-    pub(super) fn fs_move(&mut self, from: &PathBuf, to: &PathBuf) -> ToolAnswer {
+    pub(super) fn fs_move(&mut self, from: &Path, to: &Path) -> ToolAnswer {
         if let Err(why) = self.admit(Verb::FsMove, from) {
             return ToolAnswer::error(format!("the source is not reachable: {why}"));
         }
         if let Err(why) = self.admit(Verb::FsMove, to) {
             return ToolAnswer::error(format!("the destination is not reachable: {why}"));
         }
-        if !Path::new(from).exists() {
-            return ToolAnswer::error(format!("{} does not exist", from.display()));
-        }
-        if Path::new(to).exists() {
-            return ToolAnswer::error(format!(
-                "{} already exists; fs_move never overwrites",
-                to.display()
-            ));
-        }
-        match fs::rename(from, to) {
-            Ok(()) => ToolAnswer::ok(json!({
-                "from": from.display().to_string(),
-                "to": to.display().to_string(),
+        // The mechanics live in `fam-svc-fs`, shared with the human's shell, so that the two surfaces
+        // cannot disagree about what a refused transfer looks like. This layer's part is the gate and
+        // the answer string; the rules - never overwrite, a directory is never copied, a cross-volume
+        // directory is refused - are the same ones the person dragging a file gets.
+        match fam_svc_fs::transfer(from, to, fam_svc_fs::Action::Move) {
+            Ok(done) => ToolAnswer::ok(json!({
+                "from": done.from.display().to_string(),
+                "to": done.to.display().to_string(),
                 "moved": true,
+                "by": done.by.name(),
             })),
-            Err(source) => ToolAnswer::error(format!(
-                "cannot move {} to {}: {source}",
-                from.display(),
-                to.display()
-            )),
+            Err(why) => ToolAnswer::error(why.to_string()),
         }
     }
 

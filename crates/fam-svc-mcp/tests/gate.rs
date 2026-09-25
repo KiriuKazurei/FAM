@@ -250,6 +250,24 @@ fn a_delete_will_not_take_a_directory_that_still_has_something_in_it() {
         bench.inbox.join("beta.md").exists(),
         "and the source is intact"
     );
+
+    // The same call onto a name that is free: the file is really not there any more, and the answer
+    // says which way the bytes moved. Nothing else in this suite exercised the success path, so
+    // before this line the whole of `fs_move` past its two gates was untested.
+    let moved = bench.inbox.join("renamed.md");
+    let (answer, failure) = call(
+        &mut server,
+        "fs_move",
+        json!({"from": spelled(&bench.inbox.join("beta.md")), "to": spelled(&moved)}),
+    );
+    assert!(!failure, "{answer}");
+    assert_eq!(answer["moved"], true, "{answer}");
+    assert_eq!(answer["by"], "renamed", "one volume: {answer}");
+    assert!(!bench.inbox.join("beta.md").exists(), "the source is gone");
+    assert_eq!(
+        std::fs::read_to_string(&moved).expect("read"),
+        "# heading\n\nbody text\n"
+    );
 }
 
 #[test]

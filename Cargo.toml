@@ -9,6 +9,7 @@ members = [
     "crates/fam-svc-walk",
     "crates/fam-svc-audit",
     "crates/fam-svc-auth",
+    "crates/fam-svc-fs",
     "crates/fam-svc-mcp",
     "crates/fam-sched",
     "crates/fam-ffi",
@@ -33,6 +34,7 @@ fam-svc-everything = { path = "crates/fam-svc-everything" }
 fam-svc-walk = { path = "crates/fam-svc-walk" }
 fam-svc-audit = { path = "crates/fam-svc-audit" }
 fam-svc-auth = { path = "crates/fam-svc-auth" }
+fam-svc-fs = { path = "crates/fam-svc-fs" }
 fam-svc-mcp = { path = "crates/fam-svc-mcp" }
 fam-sched = { path = "crates/fam-sched" }
 fam-ffi = { path = "crates/fam-ffi" }
