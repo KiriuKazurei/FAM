@@ -79,6 +79,23 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     searchButton->setObjectName(QString::fromLatin1(Theme::primaryButtonName()));
     auto *openButton = new QPushButton(QStringLiteral("Open folder…"), this);
     auto *tagButton = new QPushButton(QStringLiteral("Tag selected"), this);
+    /* The split is a display choice, so it is a button rather than a mode the window can be stuck in:
+     * collapsed, this is one browsing surface - what a person who never wanted a second column has
+     * always been looking at. */
+    m_split = new QPushButton(QStringLiteral("Split"), this);
+    m_split->setObjectName(QString::fromLatin1(Theme::toggleButtonName()));
+    m_split->setCheckable(true);
+    m_split->setToolTip(QStringLiteral("Show a second, independent column pane on the left"));
+    connect(m_split, &QPushButton::toggled, this, [this](bool on) {
+        m_left->setVisible(on);
+        /* Collapsing onto the pane that is about to disappear would leave the toolbar pointed at
+         * nothing, so the focus moves to the one that stays. */
+        if (!on && m_active == m_left) {
+            setActivePane(m_right);
+        } else if (on && m_active == nullptr) {
+            setActivePane(m_right);
+        }
+    });
 
     /* A container rather than a bare layout, because `QWidget#toolbar` needs something to match: the
      * strip's own background and its bottom split are what separates the controls from the columns. */
@@ -93,29 +110,19 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     controls->addWidget(searchButton);
     controls->addWidget(openButton);
     controls->addWidget(tagButton);
+    controls->addWidget(m_split);
 
-    m_chain = new ColumnChain(m_bridge.get(), m_icons, m_kinds, this);
-
-    m_resultsModel = new FamListModel(this);
-    m_resultsModel->setIconCache(m_icons);
-    m_results = new QListView(this);
-    m_results->setObjectName(QString::fromLatin1(Theme::listName()));
-    m_results->setModel(m_resultsModel);
-    m_results->setUniformItemSizes(true);
-    m_results->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_results->setResizeMode(QListView::Adjust);
-    /* The delegate paints its own ground, so hover only arrives if the view is told to track it -
-     * and a row that cannot show its hover state is a row whose selected state is the only feedback a
-     * person gets about where the cursor is. */
-    m_results->setItemDelegate(new RowDelegate(&Theme::instance(), kFamRowRoles, m_results));
-    m_results->setMouseTracking(true);
-    m_results->viewport()->setAttribute(Qt::WA_Hover, true);
-
-    /* Two pages, not one model wearing two hats: the columns stay live behind the results, so coming
-     * back from a search is a page flip rather than a re-read of every folder in the chain. */
-    m_pages = new QStackedWidget(this);
-    m_pages->addWidget(m_chain);
-    m_pages->addWidget(m_results);
+    /* Two panes, built the same way, and only one of them on screen until the split button is
+     * pressed. The right one is the pane that has always been there; the left one is the new
+     * optional neighbour, which is why collapsing shows exactly the old window rather than a
+     * shrunken version of a new one. */
+    m_left = new Pane(m_bridge.get(), m_icons, m_kinds, this);
+    m_right = new Pane(m_bridge.get(), m_icons, m_kinds, this);
+    m_left->hide();
+    m_active = m_right;
+    for (Pane *pane : {m_left, m_right}) {
+        QObject::connect(pane, &Pane::activated, pane, [this, pane] { setActivePane(pane); });
+    }
 
     m_status = new QLabel(this);
     m_status->setObjectName(QString::fromLatin1(Theme::statusName()));
@@ -131,8 +138,10 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
 
     auto *body = new QHBoxLayout;
     body->setContentsMargins(0, 0, 0, 0);
+    body->setSpacing(0);
     body->addWidget(m_drives);
-    body->addWidget(m_pages, 1);
+    body->addWidget(m_left, 1);
+    body->addWidget(m_right, 1);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -185,48 +194,64 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
 
 MainWindow::~MainWindow() {
     if (!m_healthy) {
-        /* The chain was never built; there is nothing to close and `m_chain` is null. */
+        /* The panes were never built; there is nothing to close and their chains are null. */
         return;
     }
-    /* The chain closes the directories it holds, and that has to happen here rather than in its own
-     * destructor: a QObject child is destroyed after this class's members, and `m_bridge` owns the
-     * handle those calls need. Same reason for the search token. */
-    m_chain->clear();
-    if (m_searchToken != 0) {
-        m_bridge->closeSearch(m_searchToken);
-        m_searchToken = 0;
+    /* The chains close the directories they hold, and that has to happen here rather than in their own
+     * destructors: a QObject child is destroyed after this class's members, and `m_bridge` owns the
+     * handle those calls need. Same reason for the search tokens. */
+    for (Pane *pane : {m_left, m_right}) {
+        pane->chain->clear();
+        if (pane->searchToken != 0) {
+            m_bridge->closeSearch(pane->searchToken);
+            pane->searchToken = 0;
+        }
     }
 }
 
 bool MainWindow::openFolder(const QString &dir, QString *error) {
+    return openFolderIn(active(), dir, error);
+}
+
+bool MainWindow::openFolderIn(Pane *pane, const QString &dir, QString *error) {
     if (!m_healthy) {
         *error = QStringLiteral("core unavailable");
         return false;
     }
-    if (!m_chain->openRoot(dir)) {
+    if (!pane->chain->openRoot(dir)) {
         *error = QStringLiteral("cannot open %1").arg(QDir::toNativeSeparators(dir));
         return false;
     }
-    if (m_searchToken != 0) {
-        /* A folder on screen replaces the results, and the search that produced them is cancelled
-         * rather than left running to fill a token nobody pages any more. */
-        m_bridge->cancelSearch(m_searchToken);
-        m_bridge->closeSearch(m_searchToken);
-        m_searchToken = 0;
-        m_searchRunning = false;
+    if (pane->searchToken != 0) {
+        /* A folder on screen replaces this pane's results, and the search that produced them is
+         * cancelled rather than left running to fill a token nobody pages any more. The other pane's
+         * search is none of this call's business. */
+        m_bridge->cancelSearch(pane->searchToken);
+        m_bridge->closeSearch(pane->searchToken);
+        pane->searchToken = 0;
+        pane->searchRunning = false;
     }
-    m_pages->setCurrentWidget(m_chain);
-    refreshScopeAvailability();
-    const FamWindow head = m_chain->deepestHead();
+    pane->showFolder();
+    if (pane == active()) {
+        refreshScopeAvailability();
+    }
+    const FamWindow head = pane->chain->deepestHead();
     qInfo("folder on screen: %s at %lldms: state=%u total=%u generation=%llu",
           qUtf8Printable(QDir::toNativeSeparators(dir)), m_clock.elapsed(), head.state,
           head.totalRows, head.generation);
-    setStatus(folderStatus(dir, head, QStringLiteral("following changes")));
+    /* Only the pane a person is looking at gets the status line. Writing it from the other one is how
+     * the bottom of the window ends up describing a folder that is not what the toolbar will act on
+     * next - which the headless run caught by itself, and then I had to read the log to believe. */
+    if (pane == active()) {
+        setStatus(folderStatus(dir, head, QStringLiteral("following changes")));
+    }
     return true;
 }
 
 void MainWindow::openFolderDialog() {
-    const QString start = m_chain->isEmpty() ? QDir::homePath() : m_chain->deepestPath();
+    Pane *pane = active();
+    const QString start =
+        pane->chain->isEmpty() ? QDir::homePath() : pane->chain->deepestPath();
     const QString dir =
         QFileDialog::getExistingDirectory(this, QStringLiteral("Open folder"), start);
     if (dir.isEmpty()) {
@@ -239,71 +264,90 @@ void MainWindow::openFolderDialog() {
 }
 
 void MainWindow::showFolder() {
-    if (!m_healthy || m_searchToken == 0) {
+    Pane *pane = active();
+    if (!m_healthy || pane->searchToken == 0) {
         return;
     }
-    m_bridge->cancelSearch(m_searchToken);
-    m_bridge->closeSearch(m_searchToken);
-    m_searchToken = 0;
-    m_searchRunning = false;
-    if (m_chain->isEmpty()) {
+    m_bridge->cancelSearch(pane->searchToken);
+    m_bridge->closeSearch(pane->searchToken);
+    pane->searchToken = 0;
+    pane->searchRunning = false;
+    if (pane->chain->isEmpty()) {
         /* Nothing to go back to: the results were a search over every root, and clearing the box
          * leaves an empty view rather than a result set nobody is paging. */
-        m_resultsModel->unbind();
+        pane->model->unbind();
         setStatus(QStringLiteral("type a name to search"));
         return;
     }
-    m_pages->setCurrentWidget(m_chain);
+    pane->showFolder();
     refreshScopeAvailability();
-    setStatus(folderStatus(m_chain->deepestPath(), m_chain->deepestHead(),
+    setStatus(folderStatus(pane->chain->deepestPath(), pane->chain->deepestHead(),
                            QStringLiteral("following changes")));
 }
 
-void MainWindow::showResults() {
-    m_pages->setCurrentWidget(m_results);
-    refreshScopeAvailability();
+void MainWindow::refreshScopeAvailability() {
+    m_scope->setEnabled(!active()->chain->isEmpty());
 }
 
-void MainWindow::refreshScopeAvailability() {
-    m_scope->setEnabled(!m_chain->isEmpty());
+void MainWindow::setActivePane(Pane *pane) {
+    if (pane == nullptr || pane == m_active) {
+        return;
+    }
+    m_active = pane;
+    /* The toolbar reads the pane that now owns it: the scope selector is enabled by *that* pane's
+     * chain, and the status line is rewritten so it cannot keep describing the other one. */
+    refreshScopeAvailability();
+    if (pane->chain->isEmpty() && !pane->showingResults()) {
+        setStatus(QStringLiteral("no folder open in this pane · type a name to search"));
+    } else if (pane->showingResults()) {
+        setStatus(QStringLiteral("%1 row(s) in the results of this pane")
+                      .arg(pane->model->totalRows()));
+    } else {
+        setStatus(folderStatus(pane->chain->deepestPath(), pane->chain->deepestHead(),
+                              QStringLiteral("following changes")));
+    }
 }
+
+void MainWindow::toggleSplit() { m_split->click(); }
 
 void MainWindow::runSearch() {
     if (!m_healthy) {
         return;
     }
+    Pane *pane = active();
     QString error;
     const QString kind = m_kind->currentData().toString();
     /* The scope is the operator's, not a guess: "here" is what a person means after opening a folder,
      * and "everywhere" is what this box used to always mean. Either one alone is a regression. */
-    const bool here = !m_chain->isEmpty() && m_scope->currentData().toBool();
-    const QString within = here ? m_chain->deepestPath() : QString();
+    const bool here = !pane->chain->isEmpty() && m_scope->currentData().toBool();
+    const QString within = here ? pane->chain->deepestPath() : QString();
     quint64 token = 0;
     if (!m_bridge->beginSearch(m_search->text(), within, kind, 0, &token, &error)) {
         setStatus(error);
         return;
     }
-    if (m_searchToken != 0) {
-        m_bridge->closeSearch(m_searchToken);
+    if (pane->searchToken != 0) {
+        m_bridge->closeSearch(pane->searchToken);
     }
-    m_searchToken = token;
-    m_searchRunning = true;
+    pane->searchToken = token;
+    pane->searchRunning = true;
 
     const quint64 held = token;
     FamBridge *bridge = m_bridge.get();
     /* The same windowed fetch a column gets, against a token whose rows are still arriving: the model
      * asks for a viewport, and the core answers with the prefix it has. */
-    m_resultsModel->bind(token, QString(), m_kinds,
-                         [bridge, held](quint32 first, quint32 count, FamWindow *window) {
-                             return bridge->searchPage(held, first, count, window, nullptr);
-                         });
+    pane->model->bind(token, QString(), m_kinds,
+                      [bridge, held](quint32 first, quint32 count, FamWindow *window) {
+                          return bridge->searchPage(held, first, count, window, nullptr);
+                      });
     FamWindow head;
     if (!m_bridge->searchStatus(token, &head, &error)) {
         setStatus(error);
         return;
     }
-    m_resultsModel->readHead(head);
-    showResults();
+    pane->model->readHead(head);
+    pane->showResults();
+    refreshScopeAvailability();
     /* The line says which scope was actually asked for, because a search that quietly narrowed itself
      * is indistinguishable from one that found nothing elsewhere. */
     qInfo("search for %s in %s queued at %lldms: state=%u total=%u",
@@ -318,33 +362,42 @@ void MainWindow::pollChanges() {
     if (!m_healthy) {
         return;
     }
-    /* Both halves are served on every beat. The columns are polled even while results are on screen,
-     * because a view nobody drains queues its cut positions for as long as it lives. */
-    const QString changed = m_chain->poll();
-    if (!changed.isEmpty() && m_pages->currentWidget() == m_chain) {
-        setStatus(folderStatus(m_chain->deepestPath(), m_chain->deepestHead(), changed));
-    }
-    if (m_searchToken != 0 && m_searchRunning) {
-        pollSearch();
+    /* Both panes are served on every beat, and both halves of each pane: the columns are polled even
+     * while results are on screen, because a view nobody drains queues its cut positions for as long
+     * as it lives. A hidden pane still gets polled too - its watch is live, and stopping here is how
+     * a collapsed split comes back showing a stale folder. */
+    for (Pane *pane : {m_left, m_right}) {
+        const QString changed = pane->chain->poll();
+        if (!changed.isEmpty() && pane == active() && !pane->showingResults()) {
+            setStatus(folderStatus(pane->chain->deepestPath(), pane->chain->deepestHead(), changed));
+        }
+        if (pane->searchToken != 0 && pane->searchRunning) {
+            pollSearch(pane);
+        }
     }
 }
 
-void MainWindow::pollSearch() {
+void MainWindow::pollSearch(Pane *pane) {
     QString error;
     FamWindow polled;
-    if (!m_bridge->searchStatus(m_searchToken, &polled, &error)) {
-        m_searchRunning = false;
+    if (!m_bridge->searchStatus(pane->searchToken, &polled, &error)) {
+        pane->searchRunning = false;
         setStatus(error);
         return;
     }
-    m_resultsModel->readHead(polled);
+    pane->model->readHead(polled);
+    /* A search the person is no longer looking at still has to be finished - its rows are being
+     * fetched either way - but only the active pane gets the status line. */
+    const bool shown = pane == active();
     if (polled.state == FAM_LOADING) {
-        setStatus(QStringLiteral("%1 row(s) for %2 · still searching")
-                      .arg(m_resultsModel->totalRows())
-                      .arg(m_search->text()));
+        if (shown) {
+            setStatus(QStringLiteral("%1 row(s) for %2 · still searching")
+                          .arg(pane->model->totalRows())
+                          .arg(m_search->text()));
+        }
         return;
     }
-    m_searchRunning = false;
+    pane->searchRunning = false;
     const QString backend = searchBackendNote();
     const QString why = polled.state == FAM_FAILED
                             ? QStringLiteral(" · the search backend could not answer")
@@ -355,10 +408,12 @@ void MainWindow::pollSearch() {
      * note rides along so the log says which engine produced the number. */
     qInfo("search settled at %lldms: %u row(s)%s%s", m_clock.elapsed(), polled.totalRows,
           qUtf8Printable(why), qUtf8Printable(backend));
-    setStatus(QStringLiteral("%1 row(s) for %2%3%4")
-                  .arg(m_resultsModel->totalRows())
-                  .arg(m_search->text())
-                  .arg(why, backend));
+    if (shown) {
+        setStatus(QStringLiteral("%1 row(s) for %2%3%4")
+                      .arg(pane->model->totalRows())
+                      .arg(m_search->text())
+                      .arg(why, backend));
+    }
 }
 
 QString MainWindow::folderStatus(const QString &directory, const FamWindow &head,
@@ -425,15 +480,16 @@ void MainWindow::tagSelectedFile() {
     if (!m_healthy) {
         return;
     }
-    const bool showingResults = m_pages->currentWidget() == m_results;
+    Pane *pane = active();
+    const bool showingResults = pane->showingResults();
     QString path;
     if (showingResults) {
-        if (m_results->selectionModel() == nullptr) {
+        if (pane->results->selectionModel() == nullptr) {
             return;
         }
-        path = m_resultsModel->pathAt(m_results->selectionModel()->currentIndex().row());
+        path = pane->model->pathAt(pane->results->selectionModel()->currentIndex().row());
     } else {
-        path = m_chain->selectedPath();
+        path = pane->chain->selectedPath();
     }
     if (path.isEmpty()) {
         setStatus(QStringLiteral("select a row first"));
@@ -468,13 +524,15 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
     const bool back = event->key() == Qt::Key_Backspace
                       || (event->key() == Qt::Key_Left
                           && event->modifiers().testFlag(Qt::AltModifier));
-    if (back && m_chain != nullptr && !m_chain->isEmpty()) {
-        const QString path = m_chain->goBack();
+    Pane *pane = active();
+    if (back && pane != nullptr && pane->chain != nullptr && !pane->chain->isEmpty()) {
+        const QString path = pane->chain->goBack();
         refreshScopeAvailability();
         if (path.isEmpty()) {
             setStatus(QStringLiteral("no folder open"));
         } else {
-            setStatus(folderStatus(path, m_chain->deepestHead(), QStringLiteral("went up one")));
+            setStatus(
+                folderStatus(path, pane->chain->deepestHead(), QStringLiteral("went up one")));
         }
         return;
     }
@@ -491,7 +549,7 @@ void MainWindow::scrollForSelfCheck() {
     if (!m_healthy) {
         return;
     }
-    QListView *view = m_chain == nullptr ? nullptr : m_chain->deepestView();
+    QListView *view = active()->chain == nullptr ? nullptr : active()->chain->deepestView();
     if (view == nullptr || view->verticalScrollBar() == nullptr) {
         return;
     }
@@ -519,7 +577,7 @@ void MainWindow::createSelfCheckProbe() {
         qWarning("self-check mutation asked for without a working core");
         return;
     }
-    const QString folder = m_chain->deepestPath();
+    const QString folder = active()->chain->deepestPath();
     if (folder.isEmpty()) {
         qWarning("self-check mutation asked for without a watched folder");
         return;
@@ -562,16 +620,16 @@ void MainWindow::descendForSelfCheck() {
     /* Depth before and after, rather than a yes/no: past the cap the chain stops growing on
      * purpose, and "did it grow" is the only question that distinguishes that from "the selection
      * handler stopped working". */
-    const int before = m_chain->depth();
-    m_chain->selectFirstFolder();
-    qInfo("self-check descended: depth %d -> %d", before, m_chain->depth());
+    const int before = active()->chain->depth();
+    active()->chain->selectFirstFolder();
+    qInfo("self-check descended: depth %d -> %d", before, active()->chain->depth());
 }
 
 void MainWindow::sortDeepestForSelfCheck() {
     if (!m_healthy) {
         return;
     }
-    const QString applied = m_chain->sortDeepest();
+    const QString applied = active()->chain->sortDeepest();
     qInfo("self-check sorted the deepest column by %s", qUtf8Printable(applied));
 }
 
@@ -579,9 +637,9 @@ void MainWindow::clickHeaderForSelfCheck() {
     if (!m_healthy) {
         return;
     }
-    const bool clicked = m_chain->clickDeepestHeader();
+    const bool clicked = active()->chain->clickDeepestHeader();
     qInfo("self-check clicked the deepest column's header: %s, chain depth %d",
-          clicked ? "yes" : "no", m_chain->depth());
+          clicked ? "yes" : "no", active()->chain->depth());
 }
 
 void MainWindow::pickFirstDriveForSelfCheck() {
@@ -589,15 +647,48 @@ void MainWindow::pickFirstDriveForSelfCheck() {
         return;
     }
     const QString root = m_drives->selectFirst();
-    qInfo("self-check picked drive %s, chain depth %d", qUtf8Printable(root), m_chain->depth());
+    qInfo("self-check picked drive %s, chain depth %d", qUtf8Printable(root), active()->chain->depth());
 }
 
 void MainWindow::goUpForSelfCheck() {
     if (!m_healthy) {
         return;
     }
-    const QString remained = m_chain->goBack();
+    const QString remained = active()->chain->goBack();
     refreshScopeAvailability();
     qInfo("self-check went up to %s, chain depth %d",
-          qUtf8Printable(QDir::toNativeSeparators(remained)), m_chain->depth());
+          qUtf8Printable(QDir::toNativeSeparators(remained)), active()->chain->depth());
+}
+
+/* Opens the second pane and puts the watched folder in it. The point is the two numbers at the end:
+ * with one chain the left pane could only ever mirror the right, and a gate that never opens the
+ * second pane would ship it untested. */
+void MainWindow::toggleSplitForSelfCheck(bool on)
+{
+    if (!m_healthy)
+    {
+        return;
+    }
+    if (m_split->isChecked() != on)
+    {
+        m_split->click();
+    }
+    if (!on)
+    {
+        qInfo("self-check collapsed the split: left visible=%d active=%s", m_left->isVisible() ? 1 : 0,
+              m_active == m_left ? "left" : "right");
+        return;
+    }
+    const int rightBefore = m_right->chain->depth();
+    QString error;
+    if (!m_watch.isEmpty())
+    {
+        openFolderIn(m_left, m_watch, &error);
+    }
+    /* The right pane keeps whatever the drive pick left it on: same depth, same folder. If opening
+     * the left one moved the right, they are not two panes - they are one chain wearing two frames. */
+    qInfo("self-check opened the split: left visible=%d left-depth=%d right-depth=%d (was %d) "
+          "active=%s",
+          m_left->isVisible() ? 1 : 0, m_left->chain->depth(), m_right->chain->depth(), rightBefore,
+          m_active == m_left ? "left" : "right");
 }

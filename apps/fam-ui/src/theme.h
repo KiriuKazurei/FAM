@@ -191,6 +191,9 @@ public:
     static const char *searchName() { return "searchInput"; }
     static const char *primaryButtonName() { return "primaryButton"; }
     static const char *iconButtonName() { return "iconButton"; }
+    /* A button that stays down - the split toggle. It needs its own rule because a control whose
+     * state you cannot see is a control that appears not to work. */
+    static const char *toggleButtonName() { return "toggleButton"; }
     static const char *sidebarName() { return "sidebar"; }
     static const char *columnFrameName() { return "column"; }
     static const char *columnHeaderName() { return "columnHeader"; }

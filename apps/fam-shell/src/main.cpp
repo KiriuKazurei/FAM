@@ -156,6 +156,16 @@ int main(int argc, char *argv[]) {
             /* Last, because it replaces the chain: a drive pick is the sidebar doing its only job,
              * and the frame after it shows what the reader would see. */
             QTimer::singleShot(6100, [&window]() { window.pickFirstDriveForSelfCheck(); });
+            /* Then the split, because the frame it produces is the one worth looking at: two panes,
+             * each on its own folder, each with its own chain. Collapsing it again is the same button
+             * doing the other half of its job, and the collapsed frame is the one a person who never
+             * wanted a second column gets. */
+            QTimer::singleShot(6600, [&window]() { window.toggleSplitForSelfCheck(true); });
+            QTimer::singleShot(7100, [&window]() { window.toggleSplitForSelfCheck(false); });
+            /* And open it once more before the frame is taken: the collapse is the half of the
+             * button the log proves, the expanded frame is the half a person will actually look at,
+             * and one timeline can carry both without inventing a second screenshot path. */
+            QTimer::singleShot(7500, [&window]() { window.toggleSplitForSelfCheck(true); });
         }
         /* The depth cap is only crossed by going deep, and crossing it is what drops a column from
          * the front of the chain - the one structural change that makes every captured position
@@ -169,7 +179,8 @@ int main(int argc, char *argv[]) {
             QTimer::singleShot(2000 + deep * 300,
                                [&window]() { window.clickHeaderForSelfCheck(); });
         }
-        const int grabAt = std::max({2500, mutate ? 7200 : 0, deep > 0 ? 2800 + deep * 300 : 0});
+        const int grabAt =
+            std::max({2500, mutate ? 8200 : 0, deep > 0 ? 2800 + deep * 300 : 0});
         QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so
@@ -199,6 +210,9 @@ int main(int argc, char *argv[]) {
     if (parser.isSet(watchOption)) {
         qInfo("about to open %lldms after process entry", boot.elapsed());
         QString error;
+        /* Remembered before the open, so the timeline can put this same folder in the other pane
+         * later - a drive pick along the way must not move what "the watched folder" means. */
+        window.noteWatchedFolder(parser.value(watchOption));
         if (!window.openFolder(parser.value(watchOption), &error)) {
             qWarning("could not open %s: %s", qUtf8Printable(parser.value(watchOption)),
                      qUtf8Printable(error));

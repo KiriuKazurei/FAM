@@ -16,9 +16,12 @@
 
 namespace {
 
-/* How wide a column wants to be. Narrow enough that four fit the default 960px window, wide enough
- * that a name plus a size is not cut off mid-digit. */
-constexpr int kColumnIdealWidth = 230;
+/* The narrowest a column may be squeezed. Wide enough that a name plus a size is not cut off
+ * mid-digit; below it the reader is looking at a scrollbar instead of a filename.
+ *
+ * There is deliberately no widest. The old 460px cap is what left a strip of empty window beside a
+ * single open column, and the size a column can reach is bounded from the other end anyway: five
+ * columns at 150px is 750px, which is what fits a default window. */
 constexpr int kColumnMinWidth = 150;
 
 /* Depth is bounded by the window, not by the filesystem: past a handful of columns the reader is
@@ -117,7 +120,11 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     box->addWidget(header);
     box->addWidget(column->view, 1);
     column->frame->setMinimumWidth(kColumnMinWidth);
-    column->frame->setMaximumWidth(kColumnIdealWidth * 2);
+    /* No maximum. A pane with one column open should show one column that fills the pane - capping
+     * it left a strip of empty window to the right, which reads as a broken layout rather than as a
+     * narrow column. How wide the columns get is bounded from the other side instead: the depth cap
+     * limits how many can be open at once, and `kColumnMinWidth` keeps each of them readable, so the
+     * worst case is `kMaxDepth` columns at 150px and nothing below that. */
     column->frame->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     const quint64 held = token;

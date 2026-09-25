@@ -189,6 +189,19 @@ QPushButton:disabled {
     border-color: {{borderSecondary}};
     background: {{fillAlter}};
 }
+
+/* A checkable button has to say it is checked. Ant Design's own answer is the selected chip: the
+ * brand tint as a ground, the brand colour as the border and as the text. Without this the split
+ * toggle looks identical pressed and unpressed, and a button whose state cannot be read is a button
+ * that gets pressed twice. */
+QPushButton#toggleButton { color: {{textSecondary}}; }
+QPushButton#toggleButton:checked {
+    color: {{accentText}};
+    background: {{primaryBg}};
+    border-color: {{primary}};
+}
+QPushButton#toggleButton:checked:hover { border-color: {{primaryHover}}; }
+QPushButton#toggleButton:checked:pressed { border-color: {{primaryActive}}; }
 QPushButton#primaryButton {
     background: {{primarySolid}};
     border-color: {{primarySolid}};

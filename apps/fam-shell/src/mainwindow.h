@@ -7,16 +7,14 @@
 #include <memory>
 
 #include "bridge.h"
-#include "columnchain.h"
-#include "famlistmodel.h"
+#include "pane.h"
 
 class DriveList;
 class IconCache;
 class QComboBox;
 class QLabel;
 class QLineEdit;
-class QListView;
-class QStackedWidget;
+class QPushButton;
 class QTimer;
 
 class MainWindow final : public QWidget {
@@ -32,6 +30,11 @@ public:
     /* Shows one directory and keeps it current: the core watches what a view is open on, so opening
      * is the whole of the subscription. Returns false with `error` set on failure. */
     bool openFolder(const QString &dir, QString *error);
+
+    /* Tells the window which folder `--watch` asked for. A drive pick or an "Open folder…" dialog
+     * changes what is on screen without changing that, so the headless timeline can still put the
+     * watched tree in the other pane later in the run. */
+    void noteWatchedFolder(const QString &dir) { m_watch = dir; }
 
     IconCache *icons() const { return m_icons; }
 
@@ -71,6 +74,11 @@ public:
     /* Picks the first reachable drive in the sidebar. */
     void pickFirstDriveForSelfCheck();
 
+    /* Opens the second pane and puts a folder in it. Without this step the left pane is a widget that
+     * was constructed and never shown, and the headless gate would be certifying one pane while
+     * shipping two. */
+    void toggleSplitForSelfCheck(bool on);
+
     /* Drops the deepest column, as Backspace would. */
     void goUpForSelfCheck();
 
@@ -99,25 +107,34 @@ private:
     QString searchBackendNote();
     /* One poll of a search that is still running: its row count grows, and when it stops growing the
      * rows are re-sorted, which is the last thing the model has to hear about. */
-    void pollSearch();
-    void showResults();
+    void pollSearch(Pane *pane);
     void refreshScopeAvailability();
-    QString deepestFolder() const { return m_chain->deepestPath(); }
+    /* The pane the toolbar and the keyboard act on. With two of them on screen, "open this folder"
+     * and "run this search" each need one, and the only answer that is not a guess is the one the
+     * person clicked last. */
+    Pane *active() const { return m_active; }
+    void setActivePane(Pane *pane);
+    /* The same call with the pane named. `openFolder` opens in whichever pane is active, which is
+     * right for a person and wrong for a gate that wants two folders side by side on purpose. */
+    bool openFolderIn(Pane *pane, const QString &dir, QString *error);
+    /* Shows or hides the left pane. Collapsed, the window is one browsing surface - the shape a
+     * person who never asked for a second column has been getting all along. */
+    void toggleSplit();
+    QString deepestFolder() const { return m_active->chain->deepestPath(); }
 
     std::unique_ptr<FamBridge> m_bridge;
     /* False only when the core handle could not be created, which is the one case where the UI was
      * never built. `m_bridge` itself is never null after the constructor's first line, so testing it
      * is testing the wrong thing - and the destructor found out by dereferencing a null `m_chain`. */
     bool m_healthy = false;
-    /* The volumes this machine has. Choosing one starts a chain from its root. */
+    /* The volumes this machine has. Choosing one starts a chain from its root, in the active pane. */
     DriveList *m_drives = nullptr;
-    /* The Miller columns. Owns one v2 token and one model per directory it shows. */
-    ColumnChain *m_chain = nullptr;
-    /* Search results get their own list and model rather than borrowing a column's: the columns stay
-     * open and polled behind them, which is what makes returning a page flip instead of a re-read. */
-    QListView *m_results = nullptr;
-    FamListModel *m_resultsModel = nullptr;
-    QStackedWidget *m_pages = nullptr;
+    /* The two panes. `m_left` is hidden until the split button asks for it; `m_right` always exists,
+     * which is why the collapsed window is the same window it was before. */
+    Pane *m_left = nullptr;
+    Pane *m_right = nullptr;
+    Pane *m_active = nullptr;
+    QPushButton *m_split = nullptr;
     IconCache *m_icons = nullptr;
     QLineEdit *m_search = nullptr;
     QComboBox *m_kind = nullptr;
@@ -128,10 +145,11 @@ private:
     QLabel *m_status = nullptr;
     QTimer *m_timer = nullptr;
     QStringList m_kinds;
-    quint64 m_searchToken = 0;
-    bool m_searchRunning = false;
     /* Set while the opt-in self-check mutation is in the watched folder, so it can be undone. */
     QString m_probe;
+    /* The folder `--watch` asked for, remembered so the headless timeline can put it in the *other*
+     * pane and so prove the two are independent rather than two views of one chain. */
+    QString m_watch;
     /* Everything the shell does after this point is measured against it, so the headless log can say
      * how long a folder took to show rather than leaving that to be guessed from a screenshot. */
     QElapsedTimer m_clock;
