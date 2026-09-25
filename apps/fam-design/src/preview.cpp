@@ -235,7 +235,11 @@ QWidget *PreviewWindow::buildColumn(int index) {
     auto *view = new QListView(card);
     view->setObjectName(Theme::listName());
     view->setModel(model);
-    view->setItemDelegate(new RowDelegate(&Theme::instance(), view));
+    view->setItemDelegate(new RowDelegate(&Theme::instance(),
+                                               {PreviewModel::NameRole, PreviewModel::KindRole,
+                                                PreviewModel::SizeRole, PreviewModel::DirectoryRole,
+                                                &preview::formatSize},
+                                               view));
     /* Hover is a row state the delegate reads, and a view only tracks it when asked. */
     view->setMouseTracking(true);
     view->setFrameShape(QFrame::NoFrame);

@@ -25,6 +25,11 @@ set_target_properties(famcore PROPERTIES
     IMPORTED_IMPLIB "${FAMCORE_IMPLIB}"
     IMPORTED_LOCATION "${FAMCORE_DLL}")
 
+# The design system, compiled once and shared with the design sample. The binary dir is given
+# explicitly because this project is configured on its own (`cmake -S apps/fam-shell`), so the
+# subdirectory's outputs have no default home inside this build tree.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../fam-ui ${CMAKE_BINARY_DIR}/fam-ui)
+
 add_executable(fam-shell WIN32
     src/main.cpp
     src/mainwindow.cpp
@@ -36,7 +41,7 @@ add_executable(fam-shell WIN32
 target_include_directories(fam-shell PRIVATE include src)
 # The icon layer talks to the shell's image lists directly: shell32 for SHGetFileInfoW and
 # SHGetImageList, comctl32 for the IImageList vtable, ole32 for the STA the worker lives in.
-target_link_libraries(fam-shell PRIVATE Qt6::Widgets famcore shell32 comctl32 ole32)
+target_link_libraries(fam-shell PRIVATE Qt6::Widgets famcore fam-ui shell32 comctl32 ole32)
 
 # Console target so the ABI can be verified without a display server.
 add_executable(abi-smoke

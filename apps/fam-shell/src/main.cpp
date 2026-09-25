@@ -10,6 +10,7 @@
 #include "famcore.h"
 #include "iconcache.h"
 #include "mainwindow.h"
+#include "theme.h"
 
 #include <algorithm>
 
@@ -62,12 +63,16 @@ int main(int argc, char *argv[]) {
         QStringLiteral("With --watch and --self-check: descend <count> folders, then click a column "
                        "header. Past the chain's depth cap this is what drops the oldest column."),
         QStringLiteral("count"));
+    const QCommandLineOption themeOption(
+        QStringLiteral("theme"),
+        QStringLiteral("light, dark or system (the default)."), QStringLiteral("scheme"));
     parser.addOption(configOption);
     parser.addOption(queryOption);
     parser.addOption(watchOption);
     parser.addOption(grabOption);
     parser.addOption(mutateOption);
     parser.addOption(deepOption);
+    parser.addOption(themeOption);
     parser.process(app);
 
     /* A windowed executable has no console, so the headless gate would otherwise prove nothing but
@@ -89,6 +94,36 @@ int main(int argc, char *argv[]) {
     }
 
     qInfo("qt is up %lldms after process entry", boot.elapsed());
+
+    /* The design system goes on the application, not on the window: a style sheet applied after the
+     * first widget exists leaves every size hint computed against whatever was there before, and the
+     * row delegate reads its colours at paint time from the same singleton, so "before the window" is
+     * what keeps the sheet and the hand-painted row agreeing.
+     *
+     * Fusion rather than the native Windows style, for the same reason the design sample gives: this
+     * look is entirely the sheet's, and a style that draws its own gradients and focus glows wherever
+     * the sheet is silent will disagree with the token set. It is a real change of rendering path for
+     * the shell, which is why the headless gates run again after it. */
+    QApplication::setStyle(QStringLiteral("Fusion"));
+    Scheme scheme = Theme::systemScheme();
+    const QString requested = parser.value(themeOption).toLower();
+    if (requested == QLatin1String("light")) {
+        scheme = Scheme::Light;
+    } else if (requested == QLatin1String("dark")) {
+        scheme = Scheme::Dark;
+    } else if (!requested.isEmpty() && requested != QLatin1String("system")) {
+        qWarning("unknown --theme \"%s\"; using the desktop's, which is %s",
+                 qUtf8Printable(requested), scheme == Scheme::Dark ? "dark" : "light");
+    }
+    Theme::instance().setScheme(scheme);
+    app.setFont(Theme::instance().applicationFont());
+    app.setStyleSheet(Theme::instance().styleSheet());
+    /* The readability claim belongs in the log, not only in a note: `contrastReport()` recomputes the
+     * WCAG ratios of the pairs this theme actually paints, so a run records the numbers rather than
+     * repeating them. */
+    qInfo("theme: %s\n%s", qUtf8Printable(Theme::instance().name()),
+          qUtf8Printable(Theme::instance().contrastReport()));
+
     MainWindow window(parser.value(configOption), parser.value(queryOption));
     window.setWindowTitle(QStringLiteral("FAM — resource manager"));
     window.resize(960, 620);

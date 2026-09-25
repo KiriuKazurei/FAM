@@ -6,7 +6,6 @@
 #include <QPainterPath>
 #include <QPen>
 
-#include "previewmodel.h"
 
 namespace {
 
@@ -21,8 +20,11 @@ constexpr int kTagPadding = 7;
 constexpr int kTagHeight = 20;
 constexpr int kRightGap = 8;
 
-/* Two line glyphs, drawn at the metadata colour, for the case where nothing supplied an icon: this app
- * has no shell32 in it, and an empty 16px slot on every row reads as a bug rather than as a design. */
+/* Two line glyphs, for the row that has no icon yet. In the product shell that is a real state rather
+ * than a missing library: shell glyphs are resolved on a worker thread and answered later, so every
+ * row starts out here, and a 16px slot that paints nothing on those rows reads as a bug rather than
+ * as a wait. It is also the whole answer when no icon cache is wired at all - the model then hands
+ * back an empty DecorationRole, which is what the design sample does on purpose. */
 void drawGlyph(QPainter *painter, const QRectF &slot, bool directory, const QColor &ink) {
     QPen pen(ink);
     pen.setWidthF(1.3);
@@ -61,8 +63,8 @@ void drawGlyph(QPainter *painter, const QRectF &slot, bool directory, const QCol
 
 } /* namespace */
 
-RowDelegate::RowDelegate(const Theme *theme, QObject *parent)
-    : QStyledItemDelegate(parent), m_theme(theme) {}
+RowDelegate::RowDelegate(const Theme *theme, const RowRoles &roles, QObject *parent)
+    : QStyledItemDelegate(parent), m_theme(theme), m_roles(roles) {}
 
 QSize RowDelegate::sizeHint(const QStyleOptionViewItem &, const QModelIndex &) const {
     return QSize(0, m_theme->tokens().rowHeight);
@@ -95,7 +97,7 @@ void RowDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
     const Tokens &t = m_theme->tokens();
     const bool selected = option.state & QStyle::State_Selected;
     const bool hovered = option.state & QStyle::State_MouseOver;
-    const bool directory = index.data(PreviewModel::DirectoryRole).toBool();
+    const bool directory = index.data(m_roles.directory).toBool();
 
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing, true);
@@ -111,9 +113,9 @@ void RowDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         painter->drawRoundedRect(ground, t.radius, t.radius);
     }
 
-    const QString name = index.data(PreviewModel::NameRole).toString();
-    const QString kind = directory ? QString() : index.data(PreviewModel::KindRole).toString();
-    const qint64 bytes = index.data(PreviewModel::SizeRole).toLongLong();
+    const QString name = index.data(m_roles.name).toString();
+    const QString kind = directory ? QString() : index.data(m_roles.kind).toString();
+    const qint64 bytes = index.data(m_roles.size).toLongLong();
 
     const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
     const QRect slot(cursorRect(ground));
@@ -134,7 +136,7 @@ void RowDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
     if (!directory && bytes >= 0) {
         painter->setFont(m_theme->fontAt(t.fontBase));
         QFontMetrics metrics(painter->font());
-        const QString size = preview::formatSize(static_cast<quint64>(bytes));
+        const QString size = m_roles.formatSize(static_cast<quint64>(bytes));
         const int sizeWidth = metrics.horizontalAdvance(size);
         const QRect sizeRect(boundary - sizeWidth, ground.top(), sizeWidth, ground.height());
         painter->setPen(t.textTertiary);

@@ -7,6 +7,7 @@
 #include <functional>
 
 #include "bridge.h"
+#include "rowdelegate.h"
 
 class IconCache;
 
@@ -118,5 +119,13 @@ private:
 };
 
 QString formatSize(quint64 bytes);
+
+/* This model's roles, in the shape the shared row delegate reads. One definition rather than two
+ * call sites inventing their own: the columns and the search results paint through the same
+ * delegate, and a role list that disagrees between them is a row that shows a size in one place and
+ * a kind in the other. */
+inline const RowRoles kFamRowRoles{FamListModel::NameRole, FamListModel::KindRole,
+                                   FamListModel::SizeRole, FamListModel::DirectoryRole,
+                                   &formatSize};
 
 #endif /* FAMLISTMODEL_H */

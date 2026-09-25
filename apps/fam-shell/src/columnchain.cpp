@@ -4,12 +4,15 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
+#include <QLabel>
 #include <QListView>
 #include <QPushButton>
 #include <QVBoxLayout>
 
 #include "famlistmodel.h"
 #include "iconcache.h"
+#include "rowdelegate.h"
+#include "theme.h"
 
 namespace {
 
@@ -60,11 +63,18 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     column->token = token;
     column->path = path;
     column->frame = new QWidget(this);
+    column->frame->setObjectName(QString::fromLatin1(Theme::columnFrameName()));
 
     column->model = new FamListModel(column->frame);
     column->model->setIconCache(m_icons);
     column->view = new QListView(column->frame);
+    column->view->setObjectName(QString::fromLatin1(Theme::listName()));
     column->view->setModel(column->model);
+    column->view->setItemDelegate(new RowDelegate(&Theme::instance(), kFamRowRoles, column->view));
+    /* Hover is a row state the delegate reads, and a view only tracks it when asked. */
+    column->view->setMouseTracking(true);
+    column->view->viewport()->setAttribute(Qt::WA_Hover, true);
+    column->view->setFrameShape(QFrame::NoFrame);
     column->view->setUniformItemSizes(true);
     column->view->setSelectionBehavior(QAbstractItemView::SelectRows);
     column->view->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -74,12 +84,27 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     /* A button rather than a QHeaderView: the plan wanted the sort indicator on each column's
      * QHeaderView, but a header view needs a model that answers headerData for the horizontal
      * orientation, and a list model answers for one vertical column. A flat button says the same
-     * thing to the reader without a proxy model in front of it. */
-    auto *button = new QPushButton(sortLabel(column->sort) + arrowFor(column->order),
-                                   column->frame);
-    button->setObjectName(QStringLiteral("sortHeader"));
+     * thing to the reader without a proxy model in front of it.
+     *
+     * The path label beside it is what makes the row of columns readable: with three of them open,
+     * "Name ▲" on its own says which column is being sorted but not what is in it. */
+    auto *header = new QWidget(column->frame);
+    header->setObjectName(QString::fromLatin1(Theme::columnHeaderName()));
+    auto *title = new QLabel(header);
+    title->setObjectName(QString::fromLatin1(Theme::pathName()));
+    title->setText(QDir::toNativeSeparators(column->path));
+    /* A QLabel clips rather than elides, so the full path goes where hovering reaches it: a column
+     * that is 230px wide cannot show `D:\Datas\...\深入一层` in any spelling. */
+    title->setToolTip(column->path);
+    auto *button = new QPushButton(sortLabel(column->sort) + arrowFor(column->order), header);
+    button->setObjectName(QString::fromLatin1(Theme::sortHeaderName()));
     button->setFlat(true);
     button->setCursor(Qt::PointingHandCursor);
+    auto *strip = new QHBoxLayout(header);
+    strip->setContentsMargins(Theme::instance().tokens().sm, 0, Theme::instance().tokens().xs, 0);
+    strip->setSpacing(0);
+    strip->addWidget(title, 1);
+    strip->addWidget(button, 0, Qt::AlignVCenter);
     QObject::connect(button, &QPushButton::clicked, this, [this, token] {
         if (Column *column = find(token)) {
             onHeaderClicked(*column);
@@ -89,7 +114,7 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     auto *box = new QVBoxLayout(column->frame);
     box->setContentsMargins(0, 0, 0, 0);
     box->setSpacing(0);
-    box->addWidget(button);
+    box->addWidget(header);
     box->addWidget(column->view, 1);
     column->frame->setMinimumWidth(kColumnMinWidth);
     column->frame->setMaximumWidth(kColumnIdealWidth * 2);

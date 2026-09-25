@@ -22,6 +22,8 @@
 
 #include "drivelist.h"
 #include "iconcache.h"
+#include "rowdelegate.h"
+#include "theme.h"
 
 MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, QWidget *parent)
     : QWidget(parent) {
@@ -50,7 +52,14 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
      * extension table, one cache. */
     m_icons = new IconCache(this);
 
+    /* The page surface. `WA_StyledBackground` is deliberately not set: measured on the design
+     * sample's own screenshot, `QWidget#page` paints (245,245,245) at a point outside every child
+     * widget without it, because neither window overrides `paintEvent` and the style sheet style
+     * therefore owns the background. */
+    setObjectName(QString::fromLatin1(Theme::pageName()));
+
     m_search = new QLineEdit(this);
+    m_search->setObjectName(QString::fromLatin1(Theme::searchName()));
     m_search->setPlaceholderText(QStringLiteral("name terms — every word must appear"));
     m_search->setClearButtonEnabled(true);
 
@@ -67,10 +76,17 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     m_scope->setEnabled(false);
 
     auto *searchButton = new QPushButton(QStringLiteral("Search"), this);
+    searchButton->setObjectName(QString::fromLatin1(Theme::primaryButtonName()));
     auto *openButton = new QPushButton(QStringLiteral("Open folder…"), this);
     auto *tagButton = new QPushButton(QStringLiteral("Tag selected"), this);
 
-    auto *controls = new QHBoxLayout;
+    /* A container rather than a bare layout, because `QWidget#toolbar` needs something to match: the
+     * strip's own background and its bottom split are what separates the controls from the columns. */
+    auto *toolbar = new QWidget(this);
+    toolbar->setObjectName(QString::fromLatin1(Theme::toolbarName()));
+    auto *controls = new QHBoxLayout(toolbar);
+    const int gutter = Theme::instance().tokens().md;
+    controls->setContentsMargins(gutter, gutter, gutter, gutter);
     controls->addWidget(m_search, 1);
     controls->addWidget(m_kind);
     controls->addWidget(m_scope);
@@ -83,10 +99,17 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     m_resultsModel = new FamListModel(this);
     m_resultsModel->setIconCache(m_icons);
     m_results = new QListView(this);
+    m_results->setObjectName(QString::fromLatin1(Theme::listName()));
     m_results->setModel(m_resultsModel);
     m_results->setUniformItemSizes(true);
     m_results->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_results->setResizeMode(QListView::Adjust);
+    /* The delegate paints its own ground, so hover only arrives if the view is told to track it -
+     * and a row that cannot show its hover state is a row whose selected state is the only feedback a
+     * person gets about where the cursor is. */
+    m_results->setItemDelegate(new RowDelegate(&Theme::instance(), kFamRowRoles, m_results));
+    m_results->setMouseTracking(true);
+    m_results->viewport()->setAttribute(Qt::WA_Hover, true);
 
     /* Two pages, not one model wearing two hats: the columns stay live behind the results, so coming
      * back from a search is a page flip rather than a re-read of every folder in the chain. */
@@ -95,6 +118,7 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     m_pages->addWidget(m_results);
 
     m_status = new QLabel(this);
+    m_status->setObjectName(QString::fromLatin1(Theme::statusName()));
     m_status->setWordWrap(true);
 
     m_drives = new DriveList(this);
@@ -111,7 +135,9 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     body->addWidget(m_pages, 1);
 
     auto *layout = new QVBoxLayout(this);
-    layout->addLayout(controls);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    layout->addWidget(toolbar);
     layout->addLayout(body, 1);
     layout->addWidget(m_status);
 

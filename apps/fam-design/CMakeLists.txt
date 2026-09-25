@@ -13,11 +13,13 @@ set(CMAKE_AUTOMOC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
 
+# The same design system the product shell compiles - one copy of the tokens, the style sheet and the
+# row, so the reference and the product cannot disagree about what the design is.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../fam-ui ${CMAKE_BINARY_DIR}/fam-ui)
+
 add_executable(fam-design WIN32
     src/main.cpp
     src/preview.cpp
-    src/previewmodel.cpp
-    src/rowdelegate.cpp
-    src/theme.cpp)
+    src/previewmodel.cpp)
 target_include_directories(fam-design PRIVATE src)
-target_link_libraries(fam-design PRIVATE Qt6::Widgets)
+target_link_libraries(fam-design PRIVATE Qt6::Widgets fam-ui)

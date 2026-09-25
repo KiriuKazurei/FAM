@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "famlistmodel.h"
+#include "theme.h"
 
 namespace {
 
@@ -86,6 +87,7 @@ void DriveWorker::run() {
 DriveList::DriveList(QWidget *parent) : QWidget(parent) {
     qRegisterMetaType<QVector<DriveInfo>>();
     m_list = new QListWidget(this);
+    m_list->setObjectName(QString::fromLatin1(Theme::sidebarName()));
     m_list->setUniformItemSizes(true);
     m_list->setSelectionMode(QAbstractItemView::SingleSelection);
     m_list->setMaximumWidth(220);
