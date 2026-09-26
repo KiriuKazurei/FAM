@@ -45,6 +45,16 @@ pub enum Op {
     TagList,
     TagRemove,
     TagFind,
+    /// The tags of a window of a listing, asked for by path. `tag.list` is one file's tags because
+    /// someone asked about that file; this is the same question asked for a hundred and twenty-eight
+    /// files because a screen is showing them, and it happens on the shell's poll beat. It is a
+    /// heartbeat for the same reason `dir.poll` is one: a line per beat per column would date nothing
+    /// and would bury the acts that do.
+    TagFetch,
+    /// Every tag name in the store with how many files carry it. This one is not a heartbeat - it is a
+    /// read of the whole tag table, which is the largest thing on this surface that is not scoped to a
+    /// directory, so it is a `Read` and the `record_reads` knob decides whether it leaves a line.
+    TagVocabulary,
     DirOpen,
     DirState,
     DirPoll,
@@ -107,6 +117,8 @@ impl Op {
             Self::TagList => "tag.list",
             Self::TagRemove => "tag.remove",
             Self::TagFind => "tag.find",
+            Self::TagFetch => "tag.fetch",
+            Self::TagVocabulary => "tag.vocabulary",
             Self::DirOpen => "dir.open",
             Self::DirState => "dir.state",
             Self::DirPoll => "dir.poll",
@@ -151,8 +163,12 @@ impl Op {
     /// shell's polling-heavy reads, not to make an agent's file reads invisible.
     pub fn weight(self) -> Weight {
         match self {
-            Self::DirFetch | Self::SearchPage | Self::McpFsList | Self::McpFsRead => Weight::Read,
-            Self::DirState | Self::DirPoll => Weight::Poll,
+            Self::DirFetch
+            | Self::SearchPage
+            | Self::TagVocabulary
+            | Self::McpFsList
+            | Self::McpFsRead => Weight::Read,
+            Self::DirState | Self::DirPoll | Self::TagFetch => Weight::Poll,
             _ => Weight::Ask,
         }
     }
@@ -273,6 +289,21 @@ mod tests {
         assert_eq!(Op::TagAdd.weight(), Weight::Ask);
         assert_eq!(Op::DirClose.weight(), Weight::Ask);
         assert_eq!(Op::SessionClose.weight(), Weight::Ask);
+    }
+
+    /// The two tag reads the shell's listing needs. Which one is a heartbeat is the whole point of the
+    /// test: `tag.fetch` runs once per column per poll beat for as long as a folder is on screen, so a
+    /// line for it would be thousands per session and would say nothing anyone wanted dated.
+    /// `tag.vocabulary` is the opposite shape - a read of the entire tag table, asked rarely - and it
+    /// is the case `record_reads` exists to cover.
+    #[test]
+    fn the_tag_reads_are_split_by_how_often_they_happen() {
+        assert_eq!(Op::TagFetch.name(), "tag.fetch");
+        assert_eq!(Op::TagFetch.weight(), Weight::Poll);
+        assert_eq!(Op::TagVocabulary.name(), "tag.vocabulary");
+        assert_eq!(Op::TagVocabulary.weight(), Weight::Read);
+        // And the one-file question a person asked is still always recorded.
+        assert_eq!(Op::TagList.weight(), Weight::Ask);
     }
 
     /// The tools an agent calls are named in the trail by the same string the client sent, and the

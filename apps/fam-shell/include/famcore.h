@@ -166,6 +166,28 @@ int fam_tag_remove(FamCore *core, const char *path, const char *tags_json, const
 int fam_find(FamCore *core, const char *tags_json, int match_all, const char *within,
              const char *source, uint32_t limit, char **out, char **err);
 
+/* The tags of many files at once: `paths_json` is a JSON array of paths, the answer a JSON object
+ * keyed by those same strings, holding only the files that carry a tag - an absent key means "no
+ * tags", so a caller never has to tell "untagged" apart from "not asked about".
+ *
+ * This is here instead of a `fam_tag_list` per row because a screen is a hundred and twenty-eight
+ * rows, and that was measured: 7.5ms of store time per window against 1.2ms for this one call. The
+ * keys come back as the caller spelled them, deliberately - `path_norm` is this library's folding of
+ * a path into an identity, and a caller that had to reproduce it to join the answer would be doing
+ * identity work on the wrong side of the wire.
+ *
+ * It is a heartbeat, not an act: `tag.fetch` never reaches the audit trail, because it runs on the
+ * shell's poll beat for as long as a folder is on screen. */
+int fam_tags_for_paths(FamCore *core, const char *paths_json, char **out, char **err);
+
+/* Every tag name in the store with how many files carry it, most used first:
+ * `[{"tag":"contract","files":2}, ...]`. A name on one file under both sources counts as one file,
+ * because the number is a promise about what selecting that tag will show.
+ *
+ * Not scoped to a directory, which makes it the largest read on this surface - so ask it once and
+ * again when something you did changed the answer, rather than on every beat. */
+int fam_tag_vocabulary(FamCore *core, char **out, char **err);
+
 /* --- moving a file -------------------------------------------------------------------------------
  *
  * The first entry point on this surface that changes what is on disk. Everything above it reads.

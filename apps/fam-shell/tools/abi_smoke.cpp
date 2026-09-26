@@ -9,7 +9,9 @@
  * code before that fix, this program waits ten seconds and returns 1, because the new file never
  * arrives while the folder is open.
  *
- * Exits 0 only when the new row was seen AND its removal came back as a cut.
+ * Exits 0 only when all eight claims hold: the new row was seen, its removal came back as a cut, the
+ * three transfer rules behaved through the real DLL, and the two tag reads answer in the shape the
+ * shell joins on.
  */
 #include <QCoreApplication>
 #include <QDir>
@@ -266,6 +268,74 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    /* --- the two reads a listing needs in order to show tags ------------------------------------
+     *
+     * The claim worth crossing the boundary for is the one a filter bar makes out loud: its number
+     * counts **files**, not rows. One name sitting on one file under both sources is two rows and one
+     * file, so a bar that said "3" over two files would be promising a result set it cannot deliver.
+     * The rest pins the shape of the batch answer, because the shell joins on it. */
+
+    bool vocabularyCountsFiles = false;
+    bool batchKeysByCaller = false;
+    bool emptyWindowIsAnAnswer = false;
+    {
+        const QString firstTagged = tree + QStringLiteral("/fam-abi-tag-a.txt");
+        const QString secondTagged = tree + QStringLiteral("/fam-abi-tag-b.txt");
+        const QString untagged = tree + QStringLiteral("/fam-abi-tag-c.txt");
+        const bool seeded = seed(firstTagged) && seed(secondTagged) && seed(untagged);
+        if (!seeded) {
+            fprintf(stderr, "the tag reads could not be run: no files to tag\n");
+        }
+        static const char *kTag = "fam-abi-tag";
+        QJsonValue answer;
+        bridge.tagAdd(firstTagged, {QString::fromLatin1(kTag)}, QStringLiteral("manual"), 0, &answer,
+                      &error);
+        /* The same name from the other source, on the same file: this is the row that must not make
+         * the count go to three. */
+        bridge.tagAdd(firstTagged, {QString::fromLatin1(kTag)}, QStringLiteral("auto"), 1, &answer,
+                      &error);
+        bridge.tagAdd(secondTagged, {QString::fromLatin1(kTag)}, QStringLiteral("manual"), 0, &answer,
+                      &error);
+
+        QVector<TagFacet> facets;
+        if (seeded && bridge.tagVocabulary(&facets, &error)) {
+            for (const TagFacet &facet : facets) {
+                if (facet.tag == QLatin1String(kTag)) {
+                    vocabularyCountsFiles = facet.files == 2;
+                    printf("vocabulary: %s on %d file(s)\n", qUtf8Printable(facet.tag), facet.files);
+                }
+            }
+        } else if (seeded) {
+            fprintf(stderr, "the vocabulary read failed: %s\n", qUtf8Printable(error));
+        }
+
+        QHash<QString, QStringList> tags;
+        if (seeded
+            && bridge.tagsForPaths(QStringList{firstTagged, secondTagged, untagged}, &tags, &error)) {
+            /* Two claims in one: the file with no tag is **absent** rather than present with an empty
+             * list, and the keys are the strings this caller sent - not the library's folded form of a
+             * path, which is a caller with no business reproducing it. */
+            batchKeysByCaller = tags.size() == 2 && !tags.contains(untagged)
+                && tags.value(firstTagged) == QStringList{QString::fromLatin1(kTag)}
+                && tags.value(secondTagged) == QStringList{QString::fromLatin1(kTag)};
+        } else if (seeded) {
+            fprintf(stderr, "the batch tag read failed: %s\n", qUtf8Printable(error));
+        }
+
+        /* An empty window is a normal question, from a shell that opened an empty folder. */
+        emptyWindowIsAnAnswer = bridge.tagsForPaths(QStringList{}, &tags, &error) && tags.isEmpty();
+
+        /* One call per file with no source: removing by name takes both rows, which is the same
+         * semantics the shell's tag dialog had to draw around. */
+        bridge.tagRemove(firstTagged, {QString::fromLatin1(kTag)}, &answer, &error);
+        bridge.tagRemove(secondTagged, {QString::fromLatin1(kTag)}, &answer, &error);
+        QFile::remove(firstTagged);
+        QFile::remove(secondTagged);
+        QFile::remove(untagged);
+    }
+    printf("vocabulary-files-not-rows=%d batch-keyed-by-caller=%d empty-window-answers=%d\n",
+           vocabularyCountsFiles ? 1 : 0, batchKeysByCaller ? 1 : 0, emptyWindowIsAnAnswer ? 1 : 0);
+
     QFile::remove(moved);
     QFile::remove(kept);
     QFile::remove(twin);
@@ -274,9 +344,12 @@ int main(int argc, char *argv[]) {
            overwriteRefused ? 1 : 0);
 
     bridge.closeDir(dir);
-    const bool passed = sawInsert && sawCut && movedOk && copiedOk && overwriteRefused;
-    printf("insert=%d cut=%d move=%d copy=%d refuse-overwrite=%d -> %s\n", sawInsert ? 1 : 0,
-           sawCut ? 1 : 0, movedOk ? 1 : 0, copiedOk ? 1 : 0, overwriteRefused ? 1 : 0,
-           passed ? "ok" : "FAILED");
+    const bool passed = sawInsert && sawCut && movedOk && copiedOk && overwriteRefused
+        && vocabularyCountsFiles && batchKeysByCaller && emptyWindowIsAnAnswer;
+    printf("insert=%d cut=%d move=%d copy=%d refuse-overwrite=%d vocabulary=%d batch=%d empty=%d"
+           " -> %s\n",
+           sawInsert ? 1 : 0, sawCut ? 1 : 0, movedOk ? 1 : 0, copiedOk ? 1 : 0,
+           overwriteRefused ? 1 : 0, vocabularyCountsFiles ? 1 : 0, batchKeysByCaller ? 1 : 0,
+           emptyWindowIsAnAnswer ? 1 : 0, passed ? "ok" : "FAILED");
     return passed ? 0 : 1;
 }

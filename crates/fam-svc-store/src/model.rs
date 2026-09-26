@@ -160,6 +160,18 @@ impl FileTags {
     }
 }
 
+/// One tag name and how many files carry it - the shape a filter bar is drawn from.
+///
+/// Deliberately no `source` in here: the bar's job is "which labels exist and how much is under
+/// each", and splitting a name's count by source would show `contract (2)` and `contract (1)` as two
+/// things to click when removing one removes both (`remove_tags` deletes by name across sources,
+/// which is the same fact the shell's tag dialog had to draw around).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagFacet {
+    pub tag: String,
+    pub files: usize,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchRequest {
     pub tags: Vec<String>,

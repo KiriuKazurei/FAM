@@ -9,7 +9,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, ToS
 
 use crate::error::StoreError;
 use crate::model::{
-    descendant_range, validate_tag, FileTags, NewTag, SearchRequest, Source, TagRecord,
+    descendant_range, validate_tag, FileTags, NewTag, SearchRequest, Source, TagFacet, TagRecord,
 };
 
 /// The schema this build writes and expects. Public because a caller that reports store health
@@ -366,6 +366,28 @@ impl TagStore {
             }
         }
         Ok(grouped)
+    }
+
+    /// Every tag name in the store with the number of files carrying it, most used first.
+    ///
+    /// `COUNT(DISTINCT path_norm)` and not `COUNT(*)` because the same name can sit on one file twice
+    /// - once `manual`, once `auto` - and a bar that said "3" for two files would be describing rows,
+    /// not the thing a person is about to filter.
+    ///
+    /// Unbounded by design: a vocabulary is small, and a cap here would silently hide a tag the
+    /// person can see on a row, which is worse than a long list.
+    pub fn vocabulary(&self) -> Result<Vec<TagFacet>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tag, COUNT(DISTINCT path_norm) FROM tags GROUP BY tag \
+             ORDER BY COUNT(DISTINCT path_norm) DESC, tag COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TagFacet {
+                tag: row.get(0)?,
+                files: row.get::<_, i64>(1)? as usize,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn record_file(&self, path: &Path) -> Result<(), StoreError> {

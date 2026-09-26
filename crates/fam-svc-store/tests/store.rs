@@ -399,6 +399,56 @@ fn tag_names_for_returns_display_order_per_file() {
     assert!(store.tag_names_for(&[]).unwrap().is_empty());
 }
 
+/// The shape a filter bar is drawn from: one entry per tag name, with how many files carry it.
+///
+/// Two things a bar gets visibly wrong, and this pins both. A name sitting on one file under both
+/// sources counts as **one** file - the bar's number is a promise about what clicking it shows, and
+/// `COUNT(*)` would promise two. And the order is by that count rather than by name, because the bar
+/// has finite width and the tags nobody uses do not belong at its left end.
+#[test]
+fn vocabulary_counts_files_not_rows_and_orders_by_use() {
+    let store = store();
+    let both = Path::new("D:/docs/both.pdf");
+    let one = Path::new("D:/docs/one.pdf");
+    store
+        .add_tags(
+            both,
+            &[NewTag::manual("contract"), NewTag::auto("contract")],
+        )
+        .unwrap();
+    store
+        .add_tags(one, &[NewTag::manual("contract"), NewTag::manual("rare")])
+        .unwrap();
+
+    let facets = store.vocabulary().unwrap();
+    assert_eq!(
+        facets
+            .iter()
+            .map(|facet| (facet.tag.as_str(), facet.files))
+            .collect::<Vec<_>>(),
+        vec![("contract", 2), ("rare", 1)],
+        "a name on one file twice is still one file wearing one label"
+    );
+
+    // Removing the name from every file drops it from the vocabulary entirely - and note this call
+    // takes no source, so it is the same across-the-board removal the shell's dialog warns about.
+    store
+        .remove_tags(both, &[String::from("contract")], None)
+        .unwrap();
+    store
+        .remove_tags(one, &[String::from("contract")], None)
+        .unwrap();
+    let after = store.vocabulary().unwrap();
+    let left: Vec<&str> = after.iter().map(|facet| facet.tag.as_str()).collect();
+    assert_eq!(left, vec!["rare"]);
+    // A store nobody has tagged answers with nothing, not with an error.
+    assert!(TagStore::in_memory()
+        .expect("in-memory store")
+        .vocabulary()
+        .unwrap()
+        .is_empty());
+}
+
 /// The migration path a fresh in-memory database never takes: a v1 file on disk, with rows in it,
 /// opened by a build that expects v2.
 ///

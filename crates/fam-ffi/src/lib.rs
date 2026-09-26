@@ -149,6 +149,12 @@ struct FileTagsOut {
 }
 
 #[derive(Serialize)]
+struct VocabularyOut {
+    tag: String,
+    files: usize,
+}
+
+#[derive(Serialize)]
 struct StatsOut {
     database: String,
     roots: Vec<String>,
@@ -434,6 +440,61 @@ impl FamCore {
             })
             .collect();
         serde_json::to_string(&tags).map_err(|error| error.to_string())
+    }
+
+    /// The tags of many files at once, keyed by the path the caller asked with.
+    ///
+    /// Re-keying on the way out is the point. `path_norm` is this library's folding of a path into an
+    /// identity, and making the caller fold its own paths the same way to join the answer would move
+    /// identity rules across the wire - the class of bug that turned up as a search hit whose path had
+    /// been folded twice. So the caller gets a map whose keys are the strings it sent, and only for
+    /// the files that actually carry a tag: an absent key means "no tags", which is what a listing
+    /// needs to hear rather than an empty array per row.
+    fn tags_for_paths(&self, paths_json: &str) -> Result<String, String> {
+        let paths = parse_paths(paths_json)?;
+        let store = self.store();
+        let keys: Vec<String> = paths
+            .iter()
+            .map(|path| fam_core::path_key(Path::new(path)))
+            .collect();
+        let grouped = store
+            .tag_names_for(&keys)
+            .map_err(|error| error.to_string())?;
+        let mut answered: HashMap<String, Vec<String>> = HashMap::new();
+        for (path, key) in paths.into_iter().zip(keys) {
+            if let Some(rows) = grouped.get(&key) {
+                /* One chip per label, not one per row. `tag_names_for` answers with the rows in
+                 * display order, and a file carrying the same name under both sources has two of
+                 * them - right for the store, where the sources differ and only `tag.list` can say
+                 * which is which, and wrong for a listing, where the same word twice in a row of
+                 * chips reads as two facts. The vocabulary counts files for the same reason; these
+                 * two reads have to agree about what "a tag on a file" means. */
+                let mut names: Vec<String> = Vec::with_capacity(rows.len());
+                for name in rows {
+                    if !names.contains(name) {
+                        names.push(name.clone());
+                    }
+                }
+                answered.insert(path, names);
+            }
+        }
+        serde_json::to_string(&answered).map_err(|error| error.to_string())
+    }
+
+    /// Every tag name in the store and how many files carry it, most used first.
+    fn tag_vocabulary(&self) -> Result<String, String> {
+        let facets = self
+            .store()
+            .vocabulary()
+            .map_err(|error| error.to_string())?;
+        let out: Vec<VocabularyOut> = facets
+            .into_iter()
+            .map(|facet| VocabularyOut {
+                tag: facet.tag,
+                files: facet.files,
+            })
+            .collect();
+        serde_json::to_string(&out).map_err(|error| error.to_string())
     }
 
     fn tag_remove(
@@ -812,6 +873,15 @@ fn parse_tags(json: &str) -> Result<Vec<String>, String> {
         return Err("no tags given".into());
     }
     Ok(tags)
+}
+
+/// A JSON array of paths. Unlike `parse_tags`, an empty array is an answer and not a mistake: a
+/// window of a listing with nothing in it is a normal thing for the shell to ask about, and making it
+/// an error would push a special case into every caller of a read that costs nothing anyway.
+fn parse_paths(json: &str) -> Result<Vec<String>, String> {
+    let paths: Vec<String> = serde_json::from_str(json)
+        .map_err(|error| format!("expected a JSON array of paths: {error}"))?;
+    Ok(paths)
 }
 
 fn parse_sort(value: &str) -> Result<SortKey, String> {
@@ -1197,6 +1267,56 @@ pub unsafe extern "C" fn fam_tag_list(
         call.names(path);
         borrow.tag_list(Path::new(path))
     })
+}
+
+/// The tags of a window of a listing, in one call.
+///
+/// `paths_json` is a JSON array of paths as the caller spells them; the answer is a JSON object
+/// keyed by those same strings, holding only the files that carry a tag. An empty array is a legal
+/// question with an empty answer.
+///
+/// This exists because the alternative is one `fam_tag_list` per row, and a screenful is a hundred
+/// and twenty-eight of them - measured at 7.5ms of store time per window against 1.2ms for this call.
+/// The number is not the reason it is a heartbeat, though: the reason is that it happens on the
+/// shell's poll beat for as long as a folder is on screen, so a line each would be thousands per
+/// session and would date nothing. `Op::TagFetch` is `Weight::Poll` for exactly that, and
+/// `writer.rs` drops a Poll before it reaches a file - which is also why this call carries no `args`
+/// summary: there is no line for it to appear on.
+#[no_mangle]
+pub unsafe extern "C" fn fam_tags_for_paths(
+    core: *mut FamCore,
+    paths_json: *const c_char,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, Call::new(Op::TagFetch), out, err, |borrow, _| {
+        let paths_json = required_str(paths_json, "paths")?;
+        borrow.tags_for_paths(paths_json)
+    })
+}
+
+/// Every tag name in the store with how many files carry it, most used first - the vocabulary a
+/// filter bar is drawn from.
+///
+/// Not scoped to a directory, which is what makes it the largest read on this surface, and why it is
+/// a `Read` rather than a heartbeat: `record_reads` decides whether it leaves a line, and the shell
+/// asks it once at start-up and again whenever it changes a tag itself.
+#[no_mangle]
+pub unsafe extern "C" fn fam_tag_vocabulary(
+    core: *mut FamCore,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(
+        core,
+        Call::new(Op::TagVocabulary),
+        out,
+        err,
+        |borrow, call| {
+            call.says("whole table");
+            borrow.tag_vocabulary()
+        },
+    )
 }
 
 #[no_mangle]

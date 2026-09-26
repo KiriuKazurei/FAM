@@ -75,10 +75,13 @@ bool FamBridge::invoke(int code, char *out, char *err, QJsonValue *result, QStri
     return true;
 }
 
-static QByteArray tagsToJson(const QStringList &tags) {
+/* A JSON array of strings - the shape every tag and path list crosses the wire in.
+ * Named for what it builds rather than for the first thing that needed it, because paths go
+ * through the same encoder. */
+static QByteArray stringArrayJson(const QStringList &values) {
     QJsonArray array;
-    for (const QString &tag : tags) {
-        array.append(tag);
+    for (const QString &value : values) {
+        array.append(value);
     }
     return QJsonDocument(array).toJson(QJsonDocument::Compact);
 }
@@ -93,7 +96,7 @@ bool FamBridge::stats(QJsonValue *result, QString *error) {
 bool FamBridge::tagAdd(const QString &path, const QStringList &tags, const QString &source,
                        int priority, QJsonValue *result, QString *error) {
     const QByteArray utf8Path = path.toUtf8();
-    const QByteArray utf8Tags = tagsToJson(tags);
+    const QByteArray utf8Tags = stringArrayJson(tags);
     const QByteArray utf8Source = source.toUtf8();
     char *out = nullptr;
     char *err = nullptr;
@@ -114,7 +117,7 @@ bool FamBridge::tagList(const QString &path, QJsonValue *result, QString *error)
 bool FamBridge::tagRemove(const QString &path, const QStringList &tags, QJsonValue *result,
                           QString *error) {
     const QByteArray utf8Path = path.toUtf8();
-    const QByteArray utf8Tags = tags.isEmpty() ? QByteArray("[]") : tagsToJson(tags);
+    const QByteArray utf8Tags = tags.isEmpty() ? QByteArray("[]") : stringArrayJson(tags);
     char *out = nullptr;
     char *err = nullptr;
     const int code =
@@ -124,7 +127,7 @@ bool FamBridge::tagRemove(const QString &path, const QStringList &tags, QJsonVal
 
 bool FamBridge::find(const QStringList &tags, bool matchAll, const QString &within,
                      QJsonValue *result, QString *error) {
-    const QByteArray utf8Tags = tagsToJson(tags);
+    const QByteArray utf8Tags = stringArrayJson(tags);
     const QByteArray utf8Within = within.toUtf8();
     char *out = nullptr;
     char *err = nullptr;
@@ -132,6 +135,50 @@ bool FamBridge::find(const QStringList &tags, bool matchAll, const QString &with
                               within.isEmpty() ? nullptr : utf8Within.constData(), nullptr, 0, &out,
                               &err);
     return invoke(code, out, err, result, error);
+}
+
+bool FamBridge::tagsForPaths(const QStringList &paths, QHash<QString, QStringList> *tags,
+                             QString *error) {
+    tags->clear();
+    if (paths.isEmpty()) {
+        /* A window with nothing in it is a normal question with an empty answer, and it is not worth
+         * crossing the wire to ask. */
+        return true;
+    }
+    const QByteArray utf8Paths = stringArrayJson(paths);
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_tags_for_paths(m_core, utf8Paths.constData(), &out, &err);
+    QJsonValue result;
+    if (!invoke(code, out, err, &result, error)) {
+        return false;
+    }
+    const QJsonObject object = result.toObject();
+    for (auto entry = object.constBegin(); entry != object.constEnd(); ++entry) {
+        QStringList found;
+        for (const QJsonValue &tag : entry.value().toArray()) {
+            found.append(tag.toString());
+        }
+        tags->insert(entry.key(), found);
+    }
+    return true;
+}
+
+bool FamBridge::tagVocabulary(QVector<TagFacet> *facets, QString *error) {
+    facets->clear();
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_tag_vocabulary(m_core, &out, &err);
+    QJsonValue result;
+    if (!invoke(code, out, err, &result, error)) {
+        return false;
+    }
+    for (const QJsonValue &value : result.toArray()) {
+        const QJsonObject object = value.toObject();
+        facets->append({object.value(QStringLiteral("tag")).toString(),
+                        object.value(QStringLiteral("files")).toInt()});
+    }
+    return true;
 }
 
 bool FamBridge::pathOp(const QString &from, const QString &to, bool copy, QJsonValue *result,

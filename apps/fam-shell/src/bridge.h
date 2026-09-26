@@ -5,6 +5,7 @@
 #include <QJsonValue>
 #include <QString>
 #include <QStringList>
+#include <QHash>
 #include <QVector>
 #include <functional>
 
@@ -60,6 +61,14 @@ struct FamIpcCount {
     int polls = 0;   /* fam_dir_poll */
     int retries = 0; /* extra attempts spent on a buffer that came back truncated */
     int total() const { return headers + pages + polls + retries; }
+};
+
+/* One tag name and how many files carry it, as the vocabulary read reports them - most used first.
+ * The count is files, not rows: a name sitting on one file under both sources is one file wearing one
+ * label, which is what a filter bar's number has to promise. */
+struct TagFacet {
+    QString tag;
+    int files = 0;
 };
 
 /* Owns a FamCore handle and turns the C ABI into Qt types.
@@ -121,6 +130,19 @@ public:
     bool tagRemove(const QString &path, const QStringList &tags, QJsonValue *result, QString *error);
     bool find(const QStringList &tags, bool matchAll, const QString &within, QJsonValue *result,
               QString *error);
+
+    /* --- the two reads a listing needs to show tags ------------------------------------------
+     *
+     * Both are answers about the library's state rather than acts, and neither is on the beat that
+     * costs the most: `tagsForPaths` is what a column refreshes on its poll tick, and the core
+     * treats it as a heartbeat, so it never reaches the audit trail. */
+
+    /* The tags of the named paths, keyed by the caller's own spelling of each. A path that carries no
+     * tag is absent from the result rather than present with an empty list, so "untagged" and "not
+     * asked about" stay the same answer here as they are on the wire. */
+    bool tagsForPaths(const QStringList &paths, QHash<QString, QStringList> *tags, QString *error);
+    /* Every tag name in the store, most used first. */
+    bool tagVocabulary(QVector<TagFacet> *facets, QString *error);
 
     /* Move `from` onto `to` - a full destination path, name included - or copy it when `copy` is
      * set. This is the first call on the bridge that changes what is on disk, so the rules that
