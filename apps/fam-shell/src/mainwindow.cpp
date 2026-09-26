@@ -10,7 +10,6 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
-#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QKeyEvent>
@@ -28,6 +27,7 @@
 #include "drivelist.h"
 #include "iconcache.h"
 #include "rowdelegate.h"
+#include "tagdialog.h"
 #include "theme.h"
 
 namespace {
@@ -96,7 +96,9 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     auto *searchButton = new QPushButton(QStringLiteral("Search"), this);
     searchButton->setObjectName(QString::fromLatin1(Theme::primaryButtonName()));
     auto *openButton = new QPushButton(QStringLiteral("Open folder…"), this);
-    auto *tagButton = new QPushButton(QStringLiteral("Tag selected"), this);
+    auto *tagButton = new QPushButton(QStringLiteral("Tags…"), this);
+    tagButton->setToolTip(
+        QStringLiteral("Show, add and remove the tags on the selected row or folder"));
     /* The split is a display choice, so it is a button rather than a mode the window can be stuck in:
      * collapsed, this is one browsing surface - what a person who never wanted a second column has
      * always been looking at. */
@@ -518,28 +520,21 @@ void MainWindow::tagSelectedFile() {
         return;
     }
 
-    bool accepted = false;
-    const QString tag = QInputDialog::getText(this, QStringLiteral("Add tag"),
-                                              QStringLiteral("tag for %1").arg(path),
-                                              QLineEdit::Normal, QString(), &accepted);
-    if (!accepted || tag.trimmed().isEmpty()) {
-        return;
-    }
-
-    QJsonValue result;
-    QString error;
-    if (!m_bridge->tagAdd(path, QStringList{tag.trimmed()}, QStringLiteral("manual"), 0, &result,
-                          &error)) {
-        setStatus(error);
-        return;
-    }
+    /* The manager rather than a one-word prompt: the file's existing tags used to be invisible here,
+     * and a tag could not be taken back off at all. */
+    TagDialog dialog(m_bridge.get(), path, this);
+    dialog.exec();
     /* A tag changes what the row displays, and a folder view learns that on its own; a search result
      * has to be re-run to keep its rows in step. */
+    if (!dialog.changed()) {
+        return;
+    }
     if (showingResults) {
         runSearch();
-    } else {
-        setStatus(QStringLiteral("tagged %1").arg(QFileInfo(path).fileName()));
     }
+    setStatus(QStringLiteral("%1 tag(s) on %2")
+                  .arg(dialog.tagNames().size())
+                  .arg(QFileInfo(path).fileName()));
 }
 
 /* A drop is the one way a pointer can ask this window to change what is on disk, so this is where its
@@ -696,6 +691,66 @@ void MainWindow::removeSelfCheckProbe() {
               qUtf8Printable(verdict));
         path->clear();
     }
+}
+
+/* The tag round trip, driven through the dialog's own operations because a modal dialog is the one
+ * thing a run with no hands cannot drive. Every line is a claim about the wire, not about widgets:
+ * the file's tags can be read, one can be added and read back, the store's own text rules reach the
+ * interface, and a remove with nothing picked refuses *without* deleting what is already there. */
+void MainWindow::tagsForSelfCheck() {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check tag step asked for without a file to tag");
+        return;
+    }
+    TagDialog dialog(m_bridge.get(), m_probe, this);
+    const QStringList started = dialog.tagNames();
+    QString error;
+    const bool added = dialog.addTag(QStringLiteral("self-check"), &error);
+    dialog.reload();
+    const QStringList afterAdd = dialog.tagNames();
+    /* Over 64 characters: the store's rule, not the dialog's, and the sentence a person sees should
+     * be the one the agent gets for the same attempt. */
+    const bool blankRefused = !dialog.addTag(QString(65, u'x'), &error);
+    const QString blankSentence = error;
+    /* The footgun. An empty tag list on the wire deletes every tag the file carries, so this call
+     * must refuse *and* leave `self-check` in place - the second half is the only proof it refused
+     * before sending rather than after. */
+    const bool emptied = dialog.removeTag(QString(), &error);
+    const QStringList afterEmptyAttempt = dialog.tagNames();
+    const bool removed = dialog.removeTag(QStringLiteral("self-check"), &error);
+    dialog.reload();
+    qInfo("self-check tags on %s: started=[%s] add=%d listed=[%s] remove-nothing=%d still=[%s]",
+          qUtf8Printable(QFileInfo(m_probe).fileName()), qUtf8Printable(started.join(u',')),
+          added ? 1 : 0, qUtf8Printable(afterAdd.join(u',')), emptied ? 1 : 0,
+          qUtf8Printable(afterEmptyAttempt.join(u',')));
+    qInfo("self-check tags: over-long tag refused=%d (\"%s\") remove=%d final=[%s]",
+          blankRefused ? 1 : 0, qUtf8Printable(blankSentence), removed ? 1 : 0,
+          qUtf8Printable(dialog.tagNames().join(u',')));
+}
+
+/* The dialog as a picture, because everything above asserts about the wire and nothing about whether
+ * a person can read the result. Shown rather than constructed so the layout runs: a dialog that was
+ * never laid out grabs as a stack of widgets at their preferred sizes, which would have proved the
+ * opposite of what it looks like it proves. */
+bool MainWindow::grabTagDialogForSelfCheck(const QString &imagePath) {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check dialog shot asked for without a file to tag");
+        return false;
+    }
+    auto *dialog = new TagDialog(m_bridge.get(), m_probe, this);
+    QString error;
+    const bool seeded = dialog->addTag(QStringLiteral("self-check-shot"), &error);
+    dialog->reload();
+    dialog->show();
+    QCoreApplication::processEvents();
+    const bool saved = dialog->grab().save(imagePath);
+    qInfo("self-check wrote the tag dialog to %s: seeded=%d listed=%d %s",
+          qUtf8Printable(QDir::toNativeSeparators(imagePath)), seeded ? 1 : 0,
+          dialog->tagNames().size(), saved ? "saved" : "FAILED to save");
+    /* Back to however many tags the file started with, so the shot does not leave a mark. */
+    dialog->removeTag(QStringLiteral("self-check-shot"), &error);
+    delete dialog;
+    return saved;
 }
 
 void MainWindow::runSelfCheckSearch(const QString &terms) {

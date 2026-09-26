@@ -92,6 +92,18 @@ public:
      * turn into an error and the core must not be asked about at all. */
     void dropInPlaceForSelfCheck();
 
+    /* The tag round trip on a file the run created: read what it carries, add one, read it back,
+     * take it off again. Plus the two refusals that are the point of the dialog - a tag the store
+     * rejects, and a remove with nothing picked, which on the wire means "delete every tag this file
+     * has" and so must never be forwarded. Driven through the dialog's own operations, which is why
+     * they are callable without showing it. */
+    void tagsForSelfCheck();
+
+    /* The dialog itself, as an image. The step above proves the wire; only a picture says whether a
+     * person can read what it lists, and a dialog is not part of the window the main grab takes.
+     * Puts one tag on the probe file first so the list is not empty, and takes it off again after. */
+    bool grabTagDialogForSelfCheck(const QString &imagePath);
+
     /* Drops the deepest column, as Backspace would. */
     void goUpForSelfCheck();
 

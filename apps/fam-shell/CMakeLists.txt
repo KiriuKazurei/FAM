@@ -38,6 +38,7 @@ add_executable(fam-shell WIN32
     src/columnchain.cpp
     src/fileview.cpp
     src/pane.cpp
+    src/tagdialog.cpp
     src/drivelist.cpp
     src/iconcache.cpp)
 target_include_directories(fam-shell PRIVATE include src)

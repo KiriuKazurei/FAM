@@ -2,6 +2,7 @@
 #include <QCommandLineParser>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QTextStream>
 #include <QDir>
 #include <QPixmap>
@@ -153,6 +154,17 @@ int main(int argc, char *argv[]) {
             QTimer::singleShot(4300, [&window]() { window.clearSelfCheckSearch(); });
             QTimer::singleShot(4700, [&window]() { window.sortDeepestForSelfCheck(); });
             QTimer::singleShot(5000, [&window]() { window.goUpForSelfCheck(); });
+            /* The tags, on the file this run already owns: reading them, adding one, taking one off,
+             * and trying to take off nothing. Before this step the shell could only ever add, so
+             * nothing here would have had a way to fail. */
+            QTimer::singleShot(5200, [&window]() { window.tagsForSelfCheck(); });
+            QTimer::singleShot(5300, [&window, target]() {
+                /* A sibling of the main shot rather than a suffix on it: `x.png.tags.png` is the
+                 * kind of name that makes someone delete the file unread. */
+                const QFileInfo shot(target);
+                window.grabTagDialogForSelfCheck(shot.dir().filePath(
+                    shot.completeBaseName() + QStringLiteral(".tags.png")));
+            });
             QTimer::singleShot(5500, [&window]() { window.removeSelfCheckProbe(); });
             /* Last, because it replaces the chain: a drive pick is the sidebar doing its only job,
              * and the frame after it shows what the reader would see. */

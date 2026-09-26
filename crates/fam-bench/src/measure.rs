@@ -38,6 +38,12 @@ pub enum Mode {
     /// One line appended to the audit log. Priced on its own because the aspect runs on the thread
     /// that answered the request, so this number is what a scroll costs on top of the scroll.
     AuditAppend,
+    /// A window of a listing, each row's tags fetched by its own query. This is what a shell would
+    /// pay if the ABI had no batch entry - the row is already on screen, so the tags look like one
+    /// call away - and it is priced here to find out whether that reading is affordable.
+    TagsPerRow,
+    /// The same window's tags fetched by one query over all its paths.
+    TagsBatch,
 }
 
 pub struct Case {
@@ -185,6 +191,30 @@ impl Case {
                 note:
                     "one audit record: build the summary, serialise it, hash-chain it, WriteFile it",
             },
+            Case {
+                id: "tags_per_row",
+                env_var: "",
+                default_corpus: "",
+                // One round is one window of a listing, each row's tags asked for on their own -
+                // which is the shape a listing takes when the wire has no batch entry. 128 is the
+                // shell's window (`FamListModel::m_viewport`), not this harness's `VIEWPORT` of 60:
+                // the question is what the shell pays, so the row count has to be the shell's.
+                iterations: 400,
+                entry_cap: 128,
+                window: 0,
+                mode: Mode::TagsPerRow,
+                note: "a 128-row window's tags, fetched one file at a time",
+            },
+            Case {
+                id: "tags_batch",
+                env_var: "",
+                default_corpus: "",
+                iterations: 400,
+                entry_cap: 128,
+                window: 0,
+                mode: Mode::TagsBatch,
+                note: "the same 128-row window's tags, fetched by one query over the paths",
+            },
         ]
     }
 
@@ -223,7 +253,11 @@ impl Case {
     pub fn measure(&self, iterations: Option<usize>) -> Result<CaseResult, PathBuf> {
         let synthetic = matches!(
             self.mode,
-            Mode::PatchWindow | Mode::RebuildView | Mode::AuditAppend
+            Mode::PatchWindow
+                | Mode::RebuildView
+                | Mode::AuditAppend
+                | Mode::TagsPerRow
+                | Mode::TagsBatch
         );
         let corpus = self.corpus();
         if !synthetic && !corpus.is_dir() {
@@ -239,6 +273,8 @@ impl Case {
             Mode::PatchWindow => measure_patch(self.entry_cap, self.window, rounds),
             Mode::RebuildView => measure_rebuild(self.entry_cap, rounds),
             Mode::AuditAppend => measure_audit_append(rounds),
+            Mode::TagsPerRow => measure_tags(rounds, self.entry_cap, true),
+            Mode::TagsBatch => measure_tags(rounds, self.entry_cap, false),
         };
         samples.durations.sort_unstable();
 
@@ -249,6 +285,9 @@ impl Case {
             corpus: if synthetic {
                 match self.mode {
                     Mode::AuditAppend => "synthetic: one log left open".to_string(),
+                    Mode::TagsPerRow | Mode::TagsBatch => {
+                        format!("synthetic: {} tagged files", self.entry_cap)
+                    }
                     _ => format!("synthetic: {} rows", self.entry_cap),
                 }
             } else {
@@ -518,6 +557,64 @@ fn measure_audit_append(rounds: usize) -> Samples {
         samples.total += elapsed;
         samples.entries = 1;
         samples.dirs = 1;
+    }
+    samples
+}
+
+/// A store with `rows` files, each carrying two tags - the pessimistic shape for a listing that
+/// wants to paint tags, because every row answers rather than most answering nothing.
+fn tagged_store(rows: usize) -> (tempfile::TempDir, fam_svc_store::TagStore, Vec<PathBuf>) {
+    use fam_svc_store::{NewTag, TagStore};
+
+    let scratch = tempfile::tempdir().expect("store scratch");
+    let store = TagStore::open(&scratch.path().join("tags.db")).expect("an empty store opens");
+    let mut paths = Vec::with_capacity(rows);
+    for index in 0..rows {
+        let path = scratch.path().join(format!("file-{index:04}.txt"));
+        store
+            .add_tags(&path, &[NewTag::manual("contract"), NewTag::manual("2024")])
+            .expect("a tag is accepted");
+        paths.push(path);
+    }
+    (scratch, store, paths)
+}
+
+/// One window of a listing, its tags fetched either row by row or in one query.
+///
+/// Both shapes run against the same store contents on purpose: the number that matters is the
+/// ratio, and two cases built differently would not measure that. `errors` is not an error count
+/// here but a self-check - it is set when the store did not hand back the tags it was loaded with,
+/// because a measurement of "nothing happened" would otherwise look like a very fast result.
+fn measure_tags(rounds: usize, rows: usize, per_row: bool) -> Samples {
+    use fam_core::path_key;
+
+    let (_scratch, store, paths) = tagged_store(rows);
+    let keys: Vec<String> = paths.iter().map(|path| path_key(path)).collect();
+    let mut samples = new_samples(rounds);
+    for _ in 0..rounds {
+        let started = Instant::now();
+        let found = if per_row {
+            paths
+                .iter()
+                .map(|path| {
+                    store
+                        .tags_of(path, None)
+                        .map(|tags| tags.len())
+                        .unwrap_or(0)
+                })
+                .sum::<usize>()
+        } else {
+            store
+                .tag_names_for(&keys)
+                .map(|grouped| grouped.values().map(Vec::len).sum::<usize>())
+                .unwrap_or(0)
+        };
+        let elapsed = started.elapsed();
+        samples.durations.push(elapsed.as_micros() as u64);
+        samples.total += elapsed;
+        samples.entries = rows as u64;
+        samples.dirs = 1;
+        samples.errors = u64::from(found != rows * 2);
     }
     samples
 }

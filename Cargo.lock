@@ -266,6 +266,7 @@ dependencies = [
  "fam-svc-audit",
  "fam-svc-enumerate",
  "fam-svc-index",
+ "fam-svc-store",
  "fam-svc-walk",
  "serde",
  "serde_json",

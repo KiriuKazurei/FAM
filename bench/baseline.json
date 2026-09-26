@@ -99,6 +99,34 @@
       "errors": 0,
       "entries_per_s": 2374107
     },
+    "tags_batch": {
+      "id": "tags_batch",
+      "corpus": "synthetic: 128 tagged files",
+      "note": "the same 128-row window's tags, fetched by one query over the paths",
+      "samples": 400,
+      "p50_us": 1437,
+      "p95_us": 2582,
+      "min_us": 1194,
+      "max_us": 13153,
+      "entries": 128,
+      "dirs": 1,
+      "errors": 0,
+      "entries_per_s": 74037
+    },
+    "tags_per_row": {
+      "id": "tags_per_row",
+      "corpus": "synthetic: 128 tagged files",
+      "note": "a 128-row window's tags, fetched one file at a time",
+      "samples": 400,
+      "p50_us": 10150,
+      "p95_us": 14437,
+      "min_us": 7510,
+      "max_us": 22933,
+      "entries": 128,
+      "dirs": 1,
+      "errors": 0,
+      "entries_per_s": 12215
+    },
     "viewport_from_cache": {
       "id": "viewport_from_cache",
       "corpus": "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",
