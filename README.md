@@ -105,13 +105,38 @@ cmake -S apps/fam-shell -B apps/fam-shell/build -G Ninja \
 cmake --build apps/fam-shell/build
 ```
 
-跑起来需要三份运行时同时在 PATH 上：Qt 的、MinGW 的、以及放着 `famcore.dll` 的 GNU 产物目录。
-**目前既没有 `install()` 目标也没有 windeployqt 步骤**，这是把原型交给别人试之前还差的一件事：
+在**自己的开发机**上跑，需要三份运行时同时在 PATH 上：Qt 的、MinGW 的、以及放着 `famcore.dll` 的
+GNU 产物目录。
 
 ```bash
 PATH="<Qt>/6.11.2/mingw_64/bin:<Qt>/Tools/mingw1310_64/bin:target/x86_64-pc-windows-gnu/debug" \
   apps/fam-shell/build/fam-shell.exe --watch <目录> --self-check <截图.png> --self-check-mutate
 ```
+
+**交给别人试用是另一件事，走 `cmake --install`**：它把可执行文件、它链接的那份 `famcore.dll`、
+以及 `windeployqt` 判定的 Qt 运行库（平台插件、样式、MinGW 运行时）放进同一个文件夹，
+不依赖上面那三行 PATH。
+
+```bash
+cmake --install apps/fam-shell/build --prefix dist/fam-shell
+cmake --install apps/fam-design/build --prefix dist/fam-design
+```
+
+装完的文件夹里只有 Windows 系统目录在 PATH 上也能起——这正是这条命令要买的东西，
+所以它也是这条命令的验收方式：
+
+```cmd
+set PATH=C:\Windows\system32;C:\Windows
+dist\fam-shell\fam-shell.exe --config <配置.toml> --watch <目录> --self-check 截图.png
+```
+
+两个 Qt 面共用同一条规则（`apps/fam-ui/cmake/FamDeployQt.cmake`），因为复制两遍的打包规则会漂移，
+而漂移是在别人机器上而不是在这台开发机上暴露的。`fam-ui` 自己是静态库，没有安装规则：
+它的目标文件已经在可执行文件里——所以树里有三个 CMake 工程，要发的程序仍然只有两个。
+两个控制台目标（`abi-smoke`、`model-smoke`）**不安装**：它们是读这份源码的闸门，不是产品。
+
+Debug 产物的体积记在账里：壳 125MB / 23 个文件，其中 `famcore.dll` 51.2MB、
+`opengl32sw.dll` 19.7MB（后者是唯一一处"知道能省但不敢在这台机器上验"的裁剪，理由见那篇账）。
 
 `--self-check` 是无头闸门：渲染窗口、写截图与同名 `.log` 然后退出。加上
 `--self-check-mutate` 会**在 `--watch` 那棵树里写两个文件再删掉**：

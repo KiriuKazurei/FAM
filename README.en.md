@@ -110,14 +110,41 @@ cargo +stable-x86_64-pc-windows-gnu build -p fam-ffi --target x86_64-pc-windows-
 For UI screenshots use the native `windows` platform plugin: `QT_QPA_PLATFORM=offscreen` has no
 font database, so every glyph including ASCII renders as a tofu box.
 
-Running the shell needs three runtimes on PATH at once - Qt's, MinGW's, and the GNU target directory
-holding `famcore.dll`. There is **no `install()` target and no windeployqt step yet**, which is the
-main thing still between this build and handing a prototype to somebody else:
+Running the shell **on this development machine** needs three runtimes on PATH at once - Qt's,
+MinGW's, and the GNU target directory holding `famcore.dll`:
 
 ```bash
 PATH="<Qt>/6.11.2/mingw_64/bin:<Qt>/Tools/mingw1310_64/bin:target/x86_64-pc-windows-gnu/debug" \
   apps/fam-shell/build/fam-shell.exe --watch <dir> --self-check <shot.png> --self-check-mutate
 ```
+
+Handing it to somebody else is a different thing, and it goes through `cmake --install`: the
+executable, the `famcore.dll` it is linked against, and whatever `windeployqt` decides that binary
+needs from Qt (the platform plugin, the styles, the MinGW runtime) all land in one folder that does
+not care about those three PATH entries.
+
+```bash
+cmake --install apps/fam-shell/build --prefix dist/fam-shell
+cmake --install apps/fam-design/build --prefix dist/fam-design
+```
+
+What that buys is exactly what it has to be checked against - the folder starts with nothing but the
+Windows system directories on PATH:
+
+```cmd
+set PATH=C:\Windows\system32;C:\Windows
+dist\fam-shell\fam-shell.exe --config <config.toml> --watch <dir> --self-check shot.png
+```
+
+Both Qt faces share one rule (`apps/fam-ui/cmake/FamDeployQt.cmake`), because two copies of a
+packaging rule drift and the drift shows up on someone else's machine rather than in this repo.
+`fam-ui` itself is a static library and has no install rule - its objects are already inside the
+executable - which is why the tree holds three CMake projects and still ships two programs. The two
+console targets (`abi-smoke`, `model-smoke`) are deliberately **not** installed: they are gates that
+read this source tree, not products. Sizes from a Debug build, recorded in the notes: 125 MB and 23
+files for the shell, of which `famcore.dll` is 51.2 MB and `opengl32sw.dll` 19.7 MB - the last one is
+the only cut known to be available and deliberately not taken, because the condition it protects
+against cannot be produced on this machine.
 
 `--self-check` is the headless gate: it renders the window, writes a screenshot and a `.log` beside
 it, and exits. `--self-check-mutate` additionally **writes two files into the watched tree and
