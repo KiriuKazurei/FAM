@@ -46,6 +46,11 @@ kept, and a name that already exists there is refused rather than replaced. The 
 private type (`application/x-fam-paths`), so dragging to or from Windows Explorer does not work -
 deliberately, because a second route to the same files would bypass `fam_path_op`, bypass
 "never overwrite", and leave nothing in the audit trail.
+Tags are now visible and removable on the human side too: `Tags…` opens a dialog listing the tags on
+that path, with add and remove. It shows **one row per tag name** with its sources spelled out
+(`contract (manual, auto)`) because that is what the wire does - `fam_tag_remove` deletes by name
+across sources, and with an empty name list its SQL drops the `tag IN (...)` clause and deletes every
+tag the file has. So "nothing selected" is refused at the operation layer rather than sent.
 The shell renders through Fusion rather than the native Windows style, because wherever the style
 sheet is silent the native style draws its own gradients and focus glows and disagrees with the token
 set; `--theme light|dark|system` picks the scheme at start-up. File rows are painted by a delegate -
@@ -153,7 +158,10 @@ removes them again**: one runs the "new file -> reconciled re-read -> windowed d
 two panes at two folders inside that tree, then drop with no modifier = move, with Ctrl = copy, and
 back onto the folder already holding it = no call at all). The log says which path exists on disk
 after each one, because whether the source is still there is the only observation that tells a move
-apart from a copy. Finally the log carries the icon extract/destroy counts and the IPC call counts -
+apart from a copy. The same run also does a **tag round trip** (read back, add, read back, try to
+remove nothing, remove) and grabs the dialog on its own as `<shot>.tags.png` - every assertion about
+the wire came back green while the first picture of that dialog showed it had not picked up the theme.
+Finally the log carries the icon extract/destroy counts and the IPC call counts -
 those numbers are what "no HICON leak" and "a poll is cheap" mean in practice. **If the process is
 killed mid-run those two files stay in the tree you pointed it at**; both are named
 `fam-self-check-*.txt`.
