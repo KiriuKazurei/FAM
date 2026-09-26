@@ -23,3 +23,8 @@ add_executable(fam-design WIN32
     src/previewmodel.cpp)
 target_include_directories(fam-design PRIVATE src)
 target_link_libraries(fam-design PRIVATE Qt6::Widgets fam-ui)
+
+# The same packaging rule the product shell uses, from the same file: this face has no `famcore` to
+# carry, and that difference belongs to the target, not to the deployment step.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../fam-ui/cmake/FamDeployQt.cmake)
+fam_deploy_qt(TARGET fam-design)

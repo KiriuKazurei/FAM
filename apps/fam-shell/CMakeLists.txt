@@ -66,3 +66,17 @@ target_include_directories(model-smoke PRIVATE include src)
 # the view is in the test. `fam-ui` because the model names the shared row delegate's role seam, and
 # the icon libraries because `FamListModel` names the icon layer's symbols.
 target_link_libraries(model-smoke PRIVATE Qt6::Widgets fam-ui shell32 comctl32 ole32)
+
+# --- packaging -------------------------------------------------------------------------
+#
+# `cmake --install <build>` puts a runnable folder under `<build>/install`: the executable, the core's
+# DLL it is linked against, and whatever Qt that executable needs - platform plugin, styles, and the
+# MinGW runtime - placed by `windeployqt`. The two console targets above are deliberately not
+# installed: they are gates that read this repo's source, not products, and `abi-smoke` in particular
+# is useless without a config file and a tree to point it at.
+#
+# The rule is shared with the design sample through `apps/fam-ui/cmake` - see the note beside it for
+# why a third CMake project still ships two programs, and what has to be true for the output to be
+# worth calling a package.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../fam-ui/cmake/FamDeployQt.cmake)
+fam_deploy_qt(TARGET fam-shell DLL famcore)
