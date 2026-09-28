@@ -60,7 +60,12 @@ struct FamIpcCount {
     int pages = 0;   /* row-carrying calls that came back usable */
     int polls = 0;   /* fam_dir_poll */
     int retries = 0; /* extra attempts spent on a buffer that came back truncated */
-    int total() const { return headers + pages + polls + retries; }
+    /* Crossings for the tags of a materialised window - the read the shell added because a row now
+     * paints tags, and the one call on this surface whose cost is paid per beat rather than per
+     * action. Counted separately because `total()` mixing it in would make a folder that grew by one
+     * row look like it grew by a store read. */
+    int tagReads = 0;
+    int total() const { return headers + pages + polls + retries + tagReads; }
 };
 
 /* One tag name and how many files carry it, as the vocabulary read reports them - most used first.

@@ -235,10 +235,13 @@ QWidget *PreviewWindow::buildColumn(int index) {
     auto *view = new QListView(card);
     view->setObjectName(Theme::listName());
     view->setModel(model);
+    /* `Qt::UserRole` for the tags: this model has no tag store and answers nothing for that role, so
+     * the row draws no chips. That is the seam doing its job - the sample and the product paint one
+     * row painter over models that carry different fields. */
     view->setItemDelegate(new RowDelegate(&Theme::instance(),
                                                {PreviewModel::NameRole, PreviewModel::KindRole,
                                                 PreviewModel::SizeRole, PreviewModel::DirectoryRole,
-                                                &preview::formatSize},
+                                                Qt::UserRole, &preview::formatSize},
                                                view));
     /* Hover is a row state the delegate reads, and a view only tracks it when asked. */
     view->setMouseTracking(true);

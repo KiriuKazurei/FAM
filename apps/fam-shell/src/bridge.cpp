@@ -149,6 +149,7 @@ bool FamBridge::tagsForPaths(const QStringList &paths, QHash<QString, QStringLis
     char *out = nullptr;
     char *err = nullptr;
     const int code = fam_tags_for_paths(m_core, utf8Paths.constData(), &out, &err);
+    ++m_ipc.tagReads;
     QJsonValue result;
     if (!invoke(code, out, err, &result, error)) {
         return false;

@@ -39,11 +39,20 @@ public:
         ModifiedRole,
         PathRole,
         DirectoryRole,
+        /* A `QStringList` of the tags this row's path carries, empty when it carries none. Appended
+         * last because the numbers already on the wire are what a delegate is built against. */
+        TagsRole,
     };
 
     /* Fills `window` with rows [first, first + count) of the bound directory. Returns false when the
      * core could not answer; the model then paints nothing for that row rather than lying. */
     using Fetcher = std::function<bool(quint32 first, quint32 count, FamWindow *window)>;
+
+    /* The tags of the named paths, keyed by the caller's own spelling of each - the bridge's
+     * `tagsForPaths`, bound by whoever owns the ABI. A path with no tag is absent from `tags`. */
+    using TagFetcher =
+        std::function<bool(const QStringList &paths, QHash<QString, QStringList> *tags,
+                           QString *error)>;
 
     explicit FamListModel(QObject *parent = nullptr);
 
@@ -95,6 +104,30 @@ public:
     /* Where icons come from. Without one, DecorationRole answers empty and rows paint text-only. */
     void setIconCache(IconCache *cache);
 
+    /* --- tags on the row ---------------------------------------------------------------------
+     *
+     * A row's tags are not a field of the row: they live in the store, and the listing protocol says
+     * nothing about them. They arrive through this second seam, which only the poll beat drives -
+     * `increment 7`'s rule that a paint must never ask a question of the filesystem or the store is
+     * the reason there are two seams rather than one, and the reason `data()` reads a cache. */
+
+    void setTagFetcher(TagFetcher fetch);
+
+    /* Reads the tags of the window currently materialised and repaints the rows whose answer moved.
+     * Cheap when nothing moved: the read is skipped outright when the window holds the same paths as
+     * the last read, nothing is overdue, and nobody marked the cache dirty. Called from the beat, and
+     * it bounds its own cost by answering at most once every `kTagRefreshBeats` beats unless one of
+     * those three says otherwise - so an agent tagging files over MCP still reaches the screen, within
+     * a second, without the shell paying a store read per column per 250ms for files nobody changed. */
+    void refreshTags();
+
+    /* Drops the skip: the next `refreshTags` reads even if the window is the same one. A tag edit
+     * through this process's own dialog is the case - it changes no row, so nothing else would notice.
+     * The cache is kept rather than cleared, so the chips on screen stay where they are for the one
+     * beat it takes to get the true answer instead of flashing empty - which is the same lie for
+     * 250ms either way, and the one that does not look like a broken row. */
+    void invalidateTags();
+
     quint32 totalRows() const { return m_total; }
     QString pathAt(int index) const;
     int count() const { return int(m_total); }
@@ -130,6 +163,19 @@ private:
     quint64 m_token = 0;
     Fetcher m_fetch;
     IconCache *m_icons = nullptr;
+    TagFetcher m_tagFetch;
+    /* The answer for the window that was materialised when it was read, keyed by the path spelling
+     * this model handed to the seam. Replaced wholesale by each read, so it holds one window's worth
+     * of tags and not one per row of a 78k-row folder. */
+    QHash<QString, QStringList> m_tags;
+    /* The paths the current `m_tags` was read for. Equal to the window's paths means the cache still
+     * describes what is on screen; a cut, a scroll or a re-read that moved the window makes it differ,
+     * which is the cheapest possible sign that the tags have to be asked about again. */
+    QStringList m_taggedPaths;
+    /* Counts down to the next scheduled read, and the flag that says somebody changed an answer behind
+     * the cache's back. Both exist so a beat that changes nothing costs nothing. */
+    int m_tagDue = 0;
+    bool m_tagDirty = true;
 
     /* Painting is what triggers a fetch, so the window it fills is mutable state - rows the core
      * already served, never guesses about rows it did not. */
@@ -151,8 +197,8 @@ QString formatSize(quint64 bytes);
  * call sites inventing their own: the columns and the search results paint through the same
  * delegate, and a role list that disagrees between them is a row that shows a size in one place and
  * a kind in the other. */
-inline const RowRoles kFamRowRoles{FamListModel::NameRole, FamListModel::KindRole,
-                                   FamListModel::SizeRole, FamListModel::DirectoryRole,
-                                   &formatSize};
+inline const RowRoles kFamRowRoles{FamListModel::NameRole,    FamListModel::KindRole,
+                                   FamListModel::SizeRole,    FamListModel::DirectoryRole,
+                                   FamListModel::TagsRole,    &formatSize};
 
 #endif /* FAMLISTMODEL_H */

@@ -59,6 +59,13 @@ struct Tokens {
     QColor primarySolidActive;
     QColor accentText;
     QColor onPrimary;
+    /* The hairline of a tag chip in a row. The chip's ground is `primaryBg` and its text is
+     * `accentText`, both of which exist already; the border is the one thing a preset Tag has that
+     * this theme did not, and it is not optional here: `bgSelected` *is* `primaryBg`, so on a
+     * selected row the chip's ground equals the row's and the outline is all that still says "this
+     * was a tag". Ant Design's own Table does exactly that, and the light value is its published
+     * `colorPrimaryBorder` (blue 3). */
+    QColor tagBorder;
     /* The inverse of the spotlight: Ant Design's dark tooltip is a *light* bubble, so the text on it
      * is dark, and hard-coding white here is how a tooltip becomes unreadable in exactly the scheme
      * where nobody thought to look. */

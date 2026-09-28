@@ -17,6 +17,13 @@ Pane::Pane(FamBridge *bridge, IconCache *icons, const QStringList &kinds, QWidge
      * behind them stay open and keep their watch. */
     model = new FamListModel(this);
     model->setIconCache(icons);
+    /* The same second seam the columns get: a search's rows are files, and a person filtering or
+     * glancing at hits wants to know which of them are already tagged. Its paths come from the rows
+     * themselves rather than from one directory's prefix, which is the only difference. */
+    model->setTagFetcher([bridge](const QStringList &paths,
+                                  QHash<QString, QStringList> *tags, QString *error) {
+        return bridge->tagsForPaths(paths, tags, error);
+    });
 
     results = new FileView(this);
     results->setObjectName(QString::fromLatin1(Theme::listName()));

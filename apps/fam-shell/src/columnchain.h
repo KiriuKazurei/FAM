@@ -55,6 +55,11 @@ public:
      * did - the caller owns the status bar, the chain owns the row arithmetic. */
     QString poll();
 
+    /* Tells every column's model that a tag answer moved, so the next beat re-reads it even though no
+     * row changed. A tag edit through this process is exactly that case: the file is still in the same
+     * place with the same size, and only the store knows anything happened. */
+    void invalidateTags();
+
     QString deepestPath() const {
         return m_columns.isEmpty() ? QString() : m_columns.last()->path;
     }
@@ -72,6 +77,13 @@ public:
     /* The view a scroll, a keyboard shortcut or a headless drop should act on. */
     FileView *deepestView() const {
         return m_columns.isEmpty() ? nullptr : m_columns.last()->view;
+    }
+
+    /* The deepest column's model, for a caller that reads rows rather than paints them - the headless
+     * gate's `TagsRole` claim, which is about what the beat put in the cache and cannot be made from a
+     * screenshot. */
+    FamListModel *deepestModel() const {
+        return m_columns.isEmpty() ? nullptr : m_columns.last()->model;
     }
 
     /* Picks the first folder in the deepest column, which is what makes the next column appear. The

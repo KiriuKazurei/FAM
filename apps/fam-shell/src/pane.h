@@ -48,6 +48,13 @@ public:
     void showResults();
     void showFolder();
 
+    /* Both halves of the pane: the columns and the results list keep their own tag caches, and a tag
+     * edit from either one is invisible to the other. */
+    void invalidateTags() {
+        chain->invalidateTags();
+        model->invalidateTags();
+    }
+
 signals:
     /* Emitted when the pointer lands anywhere inside this pane. The window keeps one "active" pane
      * because the search box, the scope selector and the Tag button each act on exactly one of them,

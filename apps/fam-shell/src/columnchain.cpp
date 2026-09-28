@@ -144,6 +144,13 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
                         [bridge, held](quint32 first, quint32 count, FamWindow *window) {
                             return bridge->dirFetch(held, first, count, window, nullptr);
                         });
+    /* The second seam, for the one field of a row the listing protocol does not carry. Bound to the
+     * same token's directory: the paths this asks about are the ones `pathAt` composes, so the answer
+     * comes back keyed by exactly the strings the model will read it by. */
+    column->model->setTagFetcher([bridge](const QStringList &paths,
+                                          QHash<QString, QStringList> *tags, QString *error) {
+        return bridge->tagsForPaths(paths, tags, error);
+    });
 
     QObject::connect(column->view->selectionModel(), &QItemSelectionModel::currentChanged, this,
                      [this, token](const QModelIndex &, const QModelIndex &previous) {
@@ -299,6 +306,10 @@ QString ColumnChain::poll() {
             }
         }
         column->head = polled;
+        /* Tags ride this same beat, because they are the one field of a row that changes without an
+         * event reaching the folder: a tag an agent writes over MCP moves no byte here, so nothing
+         * else on this path would ever notice. The model decides whether the read is worth it. */
+        column->model->refreshTags();
         if (polled.totalRows != before) {
             /* Logged as well as returned: "the rows arrived" was a gate line when one column existed,
              * and a sentence in the status bar is not something the headless run can assert on. */
@@ -314,6 +325,12 @@ QString ColumnChain::poll() {
         }
     }
     return changed.trimmed();
+}
+
+void ColumnChain::invalidateTags() {
+    for (Column *column : m_columns) {
+        column->model->invalidateTags();
+    }
 }
 
 QString ColumnChain::sortDeepest() {

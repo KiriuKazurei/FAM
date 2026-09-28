@@ -326,6 +326,11 @@ Theme::Theme(Scheme scheme) {
         t.primarySolidHover = blue7.darker(110);
         t.primarySolidActive = blue7.darker(130);
         t.accentText = blue7;
+        /* Ant Design's `colorPrimaryBorder`, which in its own tag component is blue 3 over blue 0. The
+         * row's tag chips need it because `bgSelected` is `primaryBg` in this scheme: on a selected
+         * row a chip's ground and its row are the same colour, and the hairline is the only thing
+         * left saying where the chip ends. */
+        t.tagBorder = QColor(QStringLiteral("#91caff"));
         t.onPrimary = QColor(QStringLiteral("#ffffff"));
         t.onSpotlight = QColor(QStringLiteral("#ffffff"));
 
@@ -367,6 +372,11 @@ Theme::Theme(Scheme scheme) {
         t.primarySolidHover = blue4;
         t.primarySolidActive = blue6;
         t.accentText = blue5;
+        /* The dark mirror of the light hairline. Ant Design's own dark `colorPrimaryBorder` is a
+         * desaturated dark blue that disappears on this scheme's `primaryBg` (a 15% brand fill over
+         * near-black), so the hairline takes blue 4 at an alpha that puts it about two to one against
+         * the chip's own ground - present, and not the loudest thing in the row. */
+        t.tagBorder = alpha(blue4, 0.45);
         t.onPrimary = alpha(QColor(Qt::black), 0.88);
         t.onSpotlight = alpha(QColor(Qt::black), 0.88);
 
@@ -491,6 +501,12 @@ QVector<Theme::ContrastPair> Theme::contrastPairs() const {
         {"按钮文字 / 悬停底", t.onPrimary, t.primarySolidHover, 4.5, false},
         {"按钮文字 / 按下底", t.onPrimary, t.primarySolidActive, 4.5, false},
         {"强调文字 / 容器", t.accentText, t.bgContainer, 4.5, false},
+        /* The tag chip a file row paints. The pair is the text against the chip's own flattened
+         * ground rather than against the row, because the chip fills its ground opaquely - which is
+         * also why the ratio holds on a selected row, where the chip's ground and the row's are the
+         * same colour and only the hairline still says where the chip ends. */
+        {"标签文字 / 标签底", t.accentText, flattenOnto(t.primaryBg, t.bgContainer), 4.5, false},
+        {"标签描边 / 标签底", t.tagBorder, flattenOnto(t.primaryBg, t.bgContainer), 3.0, true},
         {"选中行文字 / 选中底", t.text, flattenOnto(t.bgSelected, t.bgContainer), 4.5, false},
         {"悬停行文字 / 悬停底", t.text, flattenOnto(t.bgHover, t.bgContainer), 4.5, false},
         {"提示文字 / 气泡", t.onSpotlight,
@@ -518,7 +534,7 @@ QString Theme::contrastReport() const {
         }
         /* Fixed columns rather than tabs, because CJK labels are double-width where this gets read
          * and a tab stop lands wherever the previous line happened to end. */
-        const QString name = pair.label + QString(qMax(1, 24 - pair.label.length() * 2), QChar(u' '));
+        const QString name = pair.label + QString(qMax(1, 28 - pair.label.length() * 2), QChar(u' '));
         report += QStringLiteral("  %1 %2%3:1  %4\n")
                       .arg(name)
                       .arg(pair.exempt ? QStringLiteral("免除 ") : QString(7, QChar(u' ')))

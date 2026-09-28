@@ -10,6 +10,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
+#include <QItemSelectionModel>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QKeyEvent>
@@ -398,6 +399,12 @@ void MainWindow::pollChanges() {
         if (pane->searchToken != 0 && pane->searchRunning) {
             pollSearch(pane);
         }
+        /* The results list is a model of its own, and the columns' beat does not reach it. Rows arrive
+         * through the paging channel while the search runs, so the read is asked when the page is the
+         * one on screen - which is also the only time a person could tell whether it happened. */
+        if (pane->showingResults()) {
+            pane->model->refreshTags();
+        }
     }
 }
 
@@ -528,6 +535,13 @@ void MainWindow::tagSelectedFile() {
      * has to be re-run to keep its rows in step. */
     if (!dialog.changed()) {
         return;
+    }
+    /* The row's tags are a cache the beat fills, and nothing about this edit changed a row: same name,
+     * same size, same place. Marking both panes is what says the answers moved, and the next beat reads
+     * them - the same path an agent's write over MCP takes, which is why the flag is the mechanism here
+     * rather than a direct re-read of the one file. */
+    for (Pane *pane : {m_left, m_right}) {
+        pane->invalidateTags();
     }
     if (showingResults) {
         runSearch();
@@ -728,6 +742,64 @@ void MainWindow::tagsForSelfCheck() {
           qUtf8Printable(dialog.tagNames().join(u',')));
 }
 
+/* The same fact the dialog listed, read the way a row reads it: out of the model's `TagsRole`, filled
+ * by the beat. Two claims here are unreachable from any other step - that the read lands in the role
+ * the delegate paints from, and that the read is *bounded*, which is the whole reason the beat owns it
+ * rather than the paint: a window nobody scrolled through and nobody dirtied must not cross the wire
+ * twice in a row. */
+void MainWindow::rowTagsForSelfCheck() {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check row-tag step asked for without a file to tag");
+        return;
+    }
+    FamListModel *model = active()->chain->deepestModel();
+    if (model == nullptr) {
+        qWarning("self-check row tags: no column to read");
+        return;
+    }
+    int row = -1;
+    for (int index = 0; index < model->rowCount(); ++index) {
+        if (model->pathAt(index) == m_probe) {
+            row = index;
+            break;
+        }
+    }
+    if (row < 0) {
+        qWarning("self-check row tags: %s is not in the deepest column",
+                 qUtf8Printable(QFileInfo(m_probe).fileName()));
+        return;
+    }
+    const QModelIndex at = model->index(row);
+    const QStringList before = model->data(at, FamListModel::TagsRole).toStringList();
+    QJsonValue ignored;
+    QString error;
+    const bool seeded = m_bridge->tagAdd(m_probe, {QStringLiteral("row-chip")},
+                                         QStringLiteral("manual"), 0, &ignored, &error);
+    /* Marked, not re-read: this is the path a tag edit through the dialog takes, and the beat is what
+     * turns the mark into chips on the row. */
+    for (Pane *pane : {m_left, m_right}) {
+        pane->invalidateTags();
+    }
+    const int readsBefore = ipcCount().tagReads;
+    pollChanges();
+    const int readsAfterSeed = ipcCount().tagReads;
+    const QStringList listed = model->data(at, FamListModel::TagsRole).toStringList();
+    /* The same window, untouched between the two calls. */
+    pollChanges();
+    const int idleSpend = ipcCount().tagReads - readsAfterSeed;
+    m_bridge->tagRemove(m_probe, {QStringLiteral("row-chip")}, &ignored, &error);
+    for (Pane *pane : {m_left, m_right}) {
+        pane->invalidateTags();
+    }
+    pollChanges();
+    const QStringList gone = model->data(at, FamListModel::TagsRole).toStringList();
+    qInfo("self-check row tags on %s: before=[%s] seed=%d listed=[%s] reads=%d->%d idle=+%d "
+          "after-remove=[%s]",
+          qUtf8Printable(QFileInfo(m_probe).fileName()), qUtf8Printable(before.join(u',')),
+          seeded ? 1 : 0, qUtf8Printable(listed.join(u',')), readsBefore, readsAfterSeed, idleSpend,
+          qUtf8Printable(gone.join(u',')));
+}
+
 /* The dialog as a picture, because everything above asserts about the wire and nothing about whether
  * a person can read the result. Shown rather than constructed so the layout runs: a dialog that was
  * never laid out grabs as a stack of widgets at their preferred sizes, which would have proved the
@@ -751,6 +823,129 @@ bool MainWindow::grabTagDialogForSelfCheck(const QString &imagePath) {
     dialog->removeTag(QStringLiteral("self-check-shot"), &error);
     delete dialog;
     return saved;
+}
+
+/* The row as a person sees it, with chips on it. Everything the step above asserts is about the model,
+ * and a model that fills a role correctly is still compatible with a delegate that paints it in a place
+ * nobody can read - which is the error increment 16 caught only by looking at a picture.
+ *
+ * Six tags on one file, and the window resized narrow for the frame, because a row with room for
+ * everything proves nothing about the row without it: the shot is the evidence that the band counts its
+ * overflow into a `+N` chip instead of eating the name, and that the kind chip yields to the tags rather
+ * than the name. Only the file this run created is tagged, and the tags come back off before the
+ * function returns. */
+bool MainWindow::grabRowTagsForSelfCheck(const QString &imagePath) {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check row-tag shot asked for without a file to tag");
+        return false;
+    }
+    FamListModel *model = active()->chain->deepestModel();
+    if (model == nullptr) {
+        qWarning("self-check row-tag shot: no column to paint");
+        return false;
+    }
+    /* Bound once, at the top. `processEvents()` below can fire the timer that removes the probe file,
+     * and that step clears `m_probe` when it succeeds - so a cleanup that reads the member afterwards
+     * would be asking to remove tags from no path at all, and would leave its own six tags on the
+     * library. This is the one reason the function cannot just use `m_probe` twice. */
+    const QString probe = m_probe;
+    const QStringList seeded {QStringLiteral("row-chip"), QStringLiteral("自检查"),
+                              QStringLiteral("合同"), QStringLiteral("2024-归档"),
+                              QStringLiteral("季度汇总-2024Q1"), QStringLiteral("需要复核")};
+    QJsonValue ignored;
+    QString error;
+    if (!m_bridge->tagAdd(probe, seeded, QStringLiteral("manual"), 0, &ignored, &error)) {
+        qWarning("self-check row-tag shot could not tag the probe: %s", qUtf8Printable(error));
+        return false;
+    }
+    for (Pane *pane : {m_left, m_right}) {
+        pane->invalidateTags();
+    }
+    pollChanges();
+    /* Counted before the column is narrowed, on the model this file's row belongs to. */
+    int painted = 0;
+    for (int index = 0; index < model->rowCount(); ++index) {
+        if (!model->data(model->index(index), FamListModel::TagsRole).toStringList().isEmpty()) {
+            ++painted;
+        }
+    }
+    /* The probe's own row picked, before the column is narrowed. Picking a file row is what puts the
+     * chips on the selected ground, and in the light scheme that ground is the very colour the chip is
+     * filled with - so this is the frame that says whether the hairline alone still draws a chip there.
+     * It has to be picked first: picking a file row is also what drops every column deeper than this
+     * one, which is the second column this function is about to open. */
+    FileView *view = active()->chain->deepestView();
+    int probeRow = -1;
+    for (int index = 0; index < model->rowCount(); ++index) {
+        if (model->pathAt(index) == probe) {
+            probeRow = index;
+            break;
+        }
+    }
+    if (probeRow >= 0 && view != nullptr && view->selectionModel() != nullptr) {
+        view->selectionModel()->setCurrentIndex(model->index(probeRow),
+                                                QItemSelectionModel::ClearAndSelect
+                                                    | QItemSelectionModel::Rows);
+    }
+    /* A second column beside it, opened through the same call a click on a folder makes. One column
+     * fills the pane, and a row that wide has room for anything, so it proves nothing; two of them
+     * halves the first one's row, which is the width a chain is actually read at. */
+    QString child;
+    for (int index = 0; index < model->rowCount(); ++index) {
+        if (model->data(model->index(index), FamListModel::DirectoryRole).toBool()) {
+            child = model->pathAt(index);
+            break;
+        }
+    }
+    const bool narrowed = !child.isEmpty() && active()->chain->open(child);
+    /* The repaint `dataChanged` queued has to have happened, or the image is the row from before the
+     * chips arrived. */
+    QCoreApplication::processEvents();
+    const bool saved = grab().save(imagePath);
+    qInfo("self-check wrote the row-tag shot to %s: seeded=%d rows-with-tags=%d narrowed=%d depth=%d %s",
+          qUtf8Printable(QDir::toNativeSeparators(imagePath)), seeded.size(), painted,
+          narrowed ? 1 : 0, active()->chain->depth(), saved ? "saved" : "FAILED to save");
+    /* The other half of the row's overflow rule, in the same narrow column: three tags that fit only
+     * once the kind chip gives up its slot. Six chips do not fit either way, so the frame above proves
+     * the counter and this one proves the yield - and the untagged row beside it keeps its `document`
+     * chip, which is the control that says the chip was dropped rather than never drawn. */
+    const QStringList trio {QStringLiteral("合同"), QStringLiteral("自检查"),
+                            QStringLiteral("2024-归档")};
+    m_bridge->tagRemove(probe, seeded, &ignored, &error);
+    m_bridge->tagAdd(probe, trio, QStringLiteral("manual"), 0, &ignored, &error);
+    for (Pane *pane : {m_left, m_right}) {
+        pane->invalidateTags();
+    }
+    pollChanges();
+    QCoreApplication::processEvents();
+    const QFileInfo second(imagePath);
+    const QString yieldPath =
+        second.dir().filePath(second.completeBaseName() + QStringLiteral(".yield.png"));
+    const bool yielded = grab().save(yieldPath);
+    qInfo("self-check wrote the kind-yield shot to %s: seeded=%d %s",
+          qUtf8Printable(QDir::toNativeSeparators(yieldPath)), trio.size(),
+          yielded ? "saved" : "FAILED to save");
+
+    if (narrowed) {
+        active()->chain->goBack();
+    }
+    m_bridge->tagRemove(probe, trio, &ignored, &error);
+    /* Read back rather than trusting the call: the shot is the only step in this run that writes
+     * anything the *library* keeps, and the file it wrote them on gets deleted later in the run, which
+     * leaves the tags behind as rows pointing at nothing. A leaked six is a mark on the user's store
+     * that no later step will clear. */
+    QJsonValue left;
+    m_bridge->tagList(probe, &left, &error);
+    QStringList remaining;
+    for (const QJsonValue &entry : left.toArray()) {
+        remaining.append(entry.toObject().value(QStringLiteral("tag")).toString());
+    }
+    for (Pane *pane : {m_left, m_right}) {
+        pane->invalidateTags();
+    }
+    pollChanges();
+    qInfo("self-check row-tag shot cleaned up: left=[%s]", qUtf8Printable(remaining.join(u',')));
+    return saved && yielded;
 }
 
 void MainWindow::runSelfCheckSearch(const QString &terms) {

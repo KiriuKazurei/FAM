@@ -45,6 +45,68 @@ void FamListModel::iconsResolved() {
     }
 }
 
+namespace {
+
+/* How many beats one window's tag answer is trusted for before it is asked again. Four beats at the
+ * shell's 250ms is a second, which is how long a person waits to see a tag an agent put on a file
+ * they are already looking at; the read it holds back is the batch one, measured at 1194µs for a
+ * 128-row window, and every open column would pay it per beat without this. */
+constexpr int kTagRefreshBeats = 4;
+
+} /* namespace */
+
+void FamListModel::setTagFetcher(TagFetcher fetch) {
+    m_tagFetch = std::move(fetch);
+    m_tagDirty = true;
+}
+
+void FamListModel::invalidateTags() {
+    m_tagDirty = true;
+}
+
+void FamListModel::refreshTags() {
+    if (m_tagFetch == nullptr || m_first < 0 || m_rows.isEmpty() || m_total == 0) {
+        return;
+    }
+    /* The window as the paint left it, in row order - `data()` reads the answer back by path, so the
+     * order here only matters for the comparison that decides whether to ask at all. */
+    QStringList paths;
+    paths.reserve(m_rows.size());
+    for (int row = m_first; row < m_first + int(m_rows.size()); ++row) {
+        paths.append(pathAt(row));
+    }
+    /* Three reasons to read now: the window is not the one the cache describes (a scroll, a cut, a
+     * re-read), somebody said an answer moved behind the cache's back, or the cache is old enough to
+     * be worth re-checking. Anything else costs a comparison of two lists of a hundred and twenty-eight
+     * shared strings. */
+    const bool moved = paths != m_taggedPaths;
+    if (!moved && !m_tagDirty) {
+        if (m_tagDue > 0) {
+            --m_tagDue;
+            return;
+        }
+    }
+    QHash<QString, QStringList> answer;
+    QString error;
+    /* A failed read keeps the chips that are on screen. "The store did not answer" is not evidence
+     * that these files have no tags, and a row that loses its tags because a call went bad is a row
+     * that changed its story. */
+    if (!m_tagFetch(paths, &answer, &error)) {
+        return;
+    }
+    m_taggedPaths = std::move(paths);
+    m_tagDirty = false;
+    m_tagDue = kTagRefreshBeats;
+    if (answer == m_tags) {
+        return;
+    }
+    m_tags = std::move(answer);
+    const int last = qMin(m_first + int(m_taggedPaths.size()) - 1, int(m_total) - 1);
+    /* Named so a delegate that paints from the text roles alone can skip the signal; the row delegate
+     * does read this one, which is the whole point. */
+    emit dataChanged(index(m_first), index(last), {TagsRole});
+}
+
 int FamListModel::rowCount(const QModelIndex &parent) const {
     return parent.isValid() ? 0 : int(m_total);
 }
@@ -181,6 +243,11 @@ QVariant FamListModel::data(const QModelIndex &index, int role) const {
                    : QString();
     case DirectoryRole:
         return row->directory;
+    case TagsRole:
+        /* A cache read, never a query: this runs from a paint, and a paint that reached the store
+         * would reach it once per row per frame. Rows the beat has not read yet answer empty, which
+         * is why the delegate reserves no room for tags it does not have. */
+        return m_tags.value(pathAt(index.row()));
     default:
         return {};
     }
@@ -194,6 +261,7 @@ QHash<int, QByteArray> FamListModel::roleNames() const {
         {ModifiedRole, "modified"},
         {PathRole, "path"},
         {DirectoryRole, "directory"},
+        {TagsRole, "tags"},
     };
 }
 

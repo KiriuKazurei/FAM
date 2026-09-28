@@ -165,7 +165,22 @@ int main(int argc, char *argv[]) {
                 window.grabTagDialogForSelfCheck(shot.dir().filePath(
                     shot.completeBaseName() + QStringLiteral(".tags.png")));
             });
-            QTimer::singleShot(5500, [&window]() { window.removeSelfCheckProbe(); });
+            /* The row's own half of the same tags: the beat reads them into the role a delegate paints
+             * from, and the second beat on an untouched window must not ask again. A claim no other
+             * step can make, because every other step reads the model rather than the beat.
+             * Before the probe is removed, and after the go-up at 5000 put the file's own folder back
+             * on screen as the deepest column. */
+            QTimer::singleShot(5350, [&window]() { window.rowTagsForSelfCheck(); });
+            QTimer::singleShot(5420, [&window, target]() {
+                const QFileInfo shot(target);
+                window.grabRowTagsForSelfCheck(shot.dir().filePath(
+                    shot.completeBaseName() + QStringLiteral(".rowtags.png")));
+            });
+            /* The probe file used to be removed here, 80ms after the row-tag shot started pumping the
+             * event loop - and a shot that pumps the loop can let a later timer run before it finishes,
+             * which took the row out from under the frame it was supposed to be proving. The removal at
+             * the end of the run is the one that clears every file this run wrote, so the file lives
+             * until then and the shot has room to breathe. */
             /* Last, because it replaces the chain: a drive pick is the sidebar doing its only job,
              * and the frame after it shows what the reader would see. */
             QTimer::singleShot(6100, [&window]() { window.pickFirstDriveForSelfCheck(); });
@@ -220,8 +235,8 @@ int main(int argc, char *argv[]) {
              * poll plus the headers the paint needed; a `retries` above zero means buffers came back
              * truncated and the shell paid twice for an answer it already had. */
             const FamIpcCount ipc = window.ipcCount();
-            qInfo("ipc: headers=%d pages=%d polls=%d retries=%d total=%d", ipc.headers, ipc.pages,
-                  ipc.polls, ipc.retries, ipc.total());
+            qInfo("ipc: headers=%d pages=%d polls=%d retries=%d tags=%d total=%d", ipc.headers,
+                  ipc.pages, ipc.polls, ipc.retries, ipc.tagReads, ipc.total());
             if (window.grab().save(target)) {
                 qInfo("self-check wrote %s at %lldms",
                       qUtf8Printable(QDir::toNativeSeparators(target)), boot.elapsed());

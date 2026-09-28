@@ -99,6 +99,17 @@ public:
      * they are callable without showing it. */
     void tagsForSelfCheck();
 
+    /* The same tags, read the way a row reads them: through the model's `TagsRole`, filled by the beat
+     * rather than by the paint. Three claims, none of which the dialog step can make -
+     * that the answer reaches the row at all, that a window nobody moved does not cost a second
+     * crossing of the wire, and that taking the tag off takes the chip off. */
+    void rowTagsForSelfCheck();
+
+    /* The same rows as a picture, with six tags on the one file this run owns and a second column
+     * opened beside it - narrower than six chips can fit, so the shot is the evidence that the band
+     * counts its overflow instead of eating the name. The tags come back off before it returns. */
+    bool grabRowTagsForSelfCheck(const QString &imagePath);
+
     /* The dialog itself, as an image. The step above proves the wire; only a picture says whether a
      * person can read what it lists, and a dialog is not part of the window the main grab takes.
      * Puts one tag on the probe file first so the list is not empty, and takes it off again after. */
