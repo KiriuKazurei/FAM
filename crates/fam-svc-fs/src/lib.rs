@@ -118,6 +118,11 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+    #[error(
+        "the transfer to {} was cancelled; the partial copy was removed",
+        path.display()
+    )]
+    Cancelled { path: PathBuf },
 }
 
 /// What a removal took off the disk, in the words a caller reports.
@@ -182,7 +187,36 @@ pub fn remove_path(path: &Path) -> Result<Removed, Error> {
 /// Move or copy `from` onto `to`, where `to` is a full destination path (folder plus name), not a
 /// folder to drop into. Composing the name is the caller's job, because only the caller knows whether
 /// the person meant "into this folder" or "rename it to this".
+/// How far one transfer has got. `bytes` counts destination bytes written; `total` is the source's
+/// length as the filesystem reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferProgress {
+    pub bytes: u64,
+    pub total: u64,
+}
+
+/// One chunk, because `fs::copy` is a single call and a single call has no middle: no progress to
+/// show, nothing to cancel. The chunk is also the granularity of the cancel check, so a copy is
+/// never more than one chunk past the moment the person said stop.
+pub const CHUNK: u64 = 1024 * 1024;
+
+/// Asks whether the transfer may go on. Called once before the first chunk (so a cancel that
+/// arrives before any byte moves is honoured before any byte moves) and once after every chunk;
+/// returning `false` stops the copy and removes the partial destination.
+pub type Progress<'a> = &'a mut dyn FnMut(TransferProgress) -> bool;
+
 pub fn transfer(from: &Path, to: &Path, action: Action) -> Result<Transferred, Error> {
+    transfer_with(from, to, action, &mut |_| true)
+}
+
+/// [`transfer`] with a person on the other end of the progress callback - the shape the shell's
+/// asynchronous transfers run, where the callback reads a cancel flag and reports a beat.
+pub fn transfer_with(
+    from: &Path,
+    to: &Path,
+    action: Action,
+    progress: Progress,
+) -> Result<Transferred, Error> {
     let meta = match fs::symlink_metadata(from) {
         Ok(meta) => meta,
         Err(_) => {
@@ -219,7 +253,8 @@ pub fn transfer(from: &Path, to: &Path, action: Action) -> Result<Transferred, E
                 path: from.to_path_buf(),
             });
         }
-        fs::copy(from, to).map_err(|source| io_error(action, from, to, parent, source))?;
+        copy_chunked(from, to, progress)
+            .map_err(|error| error.into_io(action, from, to, parent))?;
         return Ok(done(By::Copied));
     }
 
@@ -239,7 +274,7 @@ pub fn transfer(from: &Path, to: &Path, action: Action) -> Result<Transferred, E
         }
     }
 
-    fs::copy(from, to).map_err(|source| io_error(action, from, to, parent, source))?;
+    copy_chunked(from, to, progress).map_err(|error| error.into_io(action, from, to, parent))?;
     // Reaching here means the bytes are at the destination. If the delete then fails, the answer is
     // not "failed" - it is "copied, and the source is still there", which is a state a person can act
     // on. Reporting it as a failure would invite a retry that hits `Exists` and looks like nothing
@@ -248,6 +283,86 @@ pub fn transfer(from: &Path, to: &Path, action: Action) -> Result<Transferred, E
         return Ok(done(By::Copied));
     }
     Ok(done(By::CopiedThenRemoved))
+}
+
+/// One cancelled or failed copy may leave a partial destination behind; this is the sweep that
+/// makes "cancelled" mean "nothing arrived".
+fn discard_partial(to: &Path) {
+    let _ = fs::remove_file(to);
+}
+
+/// The file copy, one chunk at a time, with the person's hand on the callback. Carries the same
+/// bytes and the same permissions `fs::copy` would carry, and adds the two things a single call
+/// could not: a middle to report, and a stop that cleans up after itself.
+fn copy_chunked(from: &Path, to: &Path, progress: Progress) -> Result<(), CopyError> {
+    use std::io::{Read, Write};
+
+    let total = fs::metadata(from).map(|meta| meta.len()).unwrap_or(0);
+    if !progress(TransferProgress { bytes: 0, total }) {
+        return Err(CopyError::Cancelled {
+            path: to.to_path_buf(),
+        });
+    }
+    let mut copy = || -> Result<(), CopyStop> {
+        let mut source = fs::File::open(from).map_err(CopyStop::Io)?;
+        let mut destination = fs::File::create(to).map_err(CopyStop::Io)?;
+        let mut buffer = vec![0u8; CHUNK as usize];
+        let mut copied = 0u64;
+        loop {
+            let read = source.read(&mut buffer).map_err(CopyStop::Io)?;
+            if read == 0 {
+                break;
+            }
+            destination
+                .write_all(&buffer[..read])
+                .map_err(CopyStop::Io)?;
+            copied += read as u64;
+            if !progress(TransferProgress {
+                bytes: copied,
+                total,
+            }) {
+                return Err(CopyStop::Cancelled);
+            }
+        }
+        let permissions = source.metadata().map_err(CopyStop::Io)?.permissions();
+        destination
+            .set_permissions(permissions)
+            .map_err(CopyStop::Io)?;
+        destination.flush().map_err(CopyStop::Io)?;
+        Ok(())
+    };
+    match copy() {
+        Ok(()) => Ok(()),
+        Err(CopyStop::Cancelled) => {
+            discard_partial(to);
+            Err(CopyError::Cancelled {
+                path: to.to_path_buf(),
+            })
+        }
+        Err(CopyStop::Io(source)) => Err(CopyError::Io { source }),
+    }
+}
+
+/// A copy's two ways of stopping, kept distinguishable: a read or write failure must not be
+/// mistaken for a stop, and a stop must not be reported as one.
+enum CopyStop {
+    Cancelled,
+    Io(io::Error),
+}
+
+/// A copy's failure, before the caller folds it into the transfer error vocabulary.
+enum CopyError {
+    Cancelled { path: PathBuf },
+    Io { source: io::Error },
+}
+
+impl CopyError {
+    fn into_io(self, action: Action, from: &Path, to: &Path, parent: &Path) -> Error {
+        match self {
+            CopyError::Cancelled { path } => Error::Cancelled { path },
+            CopyError::Io { source } => io_error(action, from, to, parent, source),
+        }
+    }
 }
 
 /// The OS codes that mean "these two paths are not on one volume": `ERROR_NOT_SAME_DEVICE` on
@@ -446,5 +561,90 @@ mod removal_tests {
         let removed = remove_path(&empty).expect("an empty directory goes");
         assert_eq!(removed.kind, "dir");
         assert!(!empty.exists());
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn a_copy_reports_progress_and_the_sum_of_the_reports_is_the_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let from = temp.path().join("big.bin");
+        let body = vec![7u8; 3 * CHUNK as usize + 17];
+        fs::write(&from, &body).expect("source");
+        let to = temp.path().join("out.bin");
+
+        let mut reports: Vec<TransferProgress> = Vec::new();
+        transfer_with(&from, &to, Action::Copy, &mut |report| {
+            reports.push(report);
+            true
+        })
+        .expect("the copy runs");
+
+        assert_eq!(fs::read(&to).expect("read back"), body, "the bytes arrive");
+        let first = *reports.first().expect("at least one report");
+        assert_eq!((first.bytes, first.total), (0, 3 * CHUNK + 17));
+        let last = *reports.last().expect("at least one report");
+        assert_eq!(
+            (last.bytes, last.total),
+            (body.len() as u64, body.len() as u64)
+        );
+        // Monotone, and every total is the source's length.
+        for pair in reports.windows(2) {
+            assert!(pair[0].bytes < pair[1].bytes, "{pair:?}");
+            assert_eq!(pair[0].total, body.len() as u64);
+        }
+    }
+
+    #[test]
+    fn a_cancel_before_the_first_chunk_writes_nothing_and_leaves_no_partial() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let from = temp.path().join("big.bin");
+        fs::write(&from, vec![7u8; 2 * CHUNK as usize]).expect("source");
+        let to = temp.path().join("out.bin");
+
+        let error = transfer_with(&from, &to, Action::Copy, &mut |_| false)
+            .expect_err("the person said stop");
+        assert!(matches!(error, Error::Cancelled { .. }), "{error:?}");
+        assert!(!to.exists(), "no partial destination is left behind");
+        assert!(from.exists(), "and the source is untouched");
+    }
+
+    #[test]
+    fn a_cancel_mid_copy_removes_the_partial_and_keeps_the_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let from = temp.path().join("big.bin");
+        fs::write(&from, vec![7u8; 4 * CHUNK as usize]).expect("source");
+        let to = temp.path().join("out.bin");
+
+        let mut calls = 0u32;
+        let error = transfer_with(&from, &to, Action::Copy, &mut |_| {
+            calls += 1;
+            calls <= 2
+        })
+        .expect_err("stopped after two chunks");
+        assert!(matches!(error, Error::Cancelled { .. }), "{error:?}");
+        assert!(!to.exists(), "the partial copy was swept");
+        assert!(from.exists());
+        // Two chunks made it before the stop: the callback runs before the first write too.
+        assert!(calls >= 3, "{calls}");
+    }
+
+    #[test]
+    fn a_move_reports_no_progress_because_a_rename_has_no_middle() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let from = temp.path().join("a.txt");
+        fs::write(&from, "x\n").expect("source");
+        let to = temp.path().join("b.txt");
+        let mut calls = 0u32;
+        transfer_with(&from, &to, Action::Move, &mut |_| {
+            calls += 1;
+            true
+        })
+        .expect("renamed");
+        assert_eq!(calls, 0, "a same-volume move is one rename, not a copy");
+        assert!(!from.exists() && to.exists());
     }
 }

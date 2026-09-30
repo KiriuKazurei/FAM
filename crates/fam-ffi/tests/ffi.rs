@@ -5,7 +5,8 @@ use std::path::Path;
 use famcore::{
     fam_abi_version, fam_core_free, fam_core_new, fam_dir_close, fam_free_string, fam_note_clear,
     fam_note_get, fam_note_set, fam_notes_for_paths, fam_path_delete, fam_stats, fam_tag_add,
-    fam_tag_list, fam_tag_merge, fam_tag_remove, fam_tag_rename, FamCore,
+    fam_tag_list, fam_tag_merge, fam_tag_remove, fam_tag_rename, fam_transfer_begin,
+    fam_transfer_cancel, fam_transfer_poll, FamCore,
 };
 use serde_json::Value;
 
@@ -613,6 +614,174 @@ fn a_delete_removes_a_file_refuses_a_full_directory_and_says_what_a_missing_one_
         refused.message()
     );
     assert!(full.exists());
+}
+
+/// The asynchronous transfer, at the far side of the wire: begin answers before a byte moves, the
+/// poll runs from `running` to a terminal state that is answered exactly once, and a copy's
+/// terminal state carries the count of the bytes that arrived. The cancel leg uses a file big
+/// enough that the ask usually lands mid-copy; whichever terminal state wins, the source must be
+/// intact and a cancelled job must have swept its partial.
+#[test]
+fn a_transfer_job_runs_to_done_and_a_cancelled_one_sweeps_up_after_itself() {
+    let h = harness();
+    let body = vec![9u8; 3 * 1024 * 1024];
+    let from_path = h.tree.join("transfer-src.bin");
+    std::fs::write(&from_path, &body).expect("the source exists");
+    let to_path = h.tree.join("transfer-dst.bin");
+    let from = text(&toml_path(&from_path));
+    let to = text(&toml_path(&to_path));
+
+    let mut begun = Out::new();
+    let code = unsafe {
+        fam_transfer_begin(
+            h.core.handle(),
+            from.as_ptr(),
+            to.as_ptr(),
+            1, /* FAM_PATH_COPY */
+            &mut begun.value,
+            &mut begun.error,
+        )
+    };
+    assert_eq!(code, 0, "{}", begun.message());
+    let job = begun.ok()["job"].as_u64().expect("a job id");
+
+    // Poll until terminal. A copy of three megabytes is a handful of chunks; the loop bounds the
+    // wait instead of pretending to know the machine's speed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (final_state, answer) = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the job never settled"
+        );
+        let mut polled = Out::new();
+        let poll_code = unsafe {
+            fam_transfer_poll(h.core.handle(), job, &mut polled.value, &mut polled.error)
+        };
+        assert_eq!(poll_code, 0, "{}", polled.message());
+        let answer = polled.ok();
+        let state = answer["state"].as_str().expect("a state").to_string();
+        if state != "running" {
+            break (state, answer);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(final_state, "done", "{answer}");
+    assert_eq!(answer["total"], body.len() as u64, "{answer}");
+    assert_eq!(answer["by"], "copied");
+    assert_eq!(std::fs::read(&to_path).expect("read back"), body);
+    assert!(from_path.exists(), "a copy leaves the source");
+
+    // The terminal state was retired by the poll that answered it - a second ask says so.
+    let mut retired = Out::new();
+    let code =
+        unsafe { fam_transfer_poll(h.core.handle(), job, &mut retired.value, &mut retired.error) };
+    assert_ne!(code, 0, "{}", retired.message());
+    assert!(
+        retired.message().contains("unknown transfer job"),
+        "{}",
+        retired.message()
+    );
+
+    // The move: same volume, so the terminal state is a rename, answered once.
+    let moved_to = h.tree.join("transfer-moved.bin");
+    let mut move_job = Out::new();
+    let code = unsafe {
+        fam_transfer_begin(
+            h.core.handle(),
+            from.as_ptr(),
+            text(&toml_path(&moved_to)).as_ptr(),
+            0,
+            &mut move_job.value,
+            &mut move_job.error,
+        )
+    };
+    assert_eq!(code, 0, "{}", move_job.message());
+    let job = move_job.ok()["job"].as_u64().expect("a job id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the move never settled"
+        );
+        let mut polled = Out::new();
+        let poll_code = unsafe {
+            fam_transfer_poll(h.core.handle(), job, &mut polled.value, &mut polled.error)
+        };
+        assert_eq!(poll_code, 0, "{}", polled.message());
+        let answer = polled.ok();
+        if answer["state"] == "done" {
+            assert_eq!(answer["by"], "renamed", "{answer}");
+            assert!(!from_path.exists(), "the source moved");
+            assert!(moved_to.exists());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    // The cancel: a big copy, an ask made immediately, and both terminal states are honest as long
+    // as the disk tells the same story as the state - a cancelled job swept its partial.
+    let big = vec![5u8; 48 * 1024 * 1024];
+    let big_from = h.tree.join("transfer-big.bin");
+    std::fs::write(&big_from, &big).expect("the big source exists");
+    let big_to = h.tree.join("transfer-big-out.bin");
+    let mut big_job = Out::new();
+    let code = unsafe {
+        fam_transfer_begin(
+            h.core.handle(),
+            text(&toml_path(&big_from)).as_ptr(),
+            text(&toml_path(&big_to)).as_ptr(),
+            1,
+            &mut big_job.value,
+            &mut big_job.error,
+        )
+    };
+    assert_eq!(code, 0, "{}", big_job.message());
+    let job = big_job.ok()["job"].as_u64().expect("a job id");
+    let mut cancelled = Out::new();
+    let code = unsafe {
+        fam_transfer_cancel(
+            h.core.handle(),
+            job,
+            &mut cancelled.value,
+            &mut cancelled.error,
+        )
+    };
+    assert_eq!(code, 0, "{}", cancelled.message());
+    assert_eq!(cancelled.ok()["cancelling"], Value::Bool(true));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cancel never settled"
+        );
+        let mut polled = Out::new();
+        let poll_code = unsafe {
+            fam_transfer_poll(h.core.handle(), job, &mut polled.value, &mut polled.error)
+        };
+        assert_eq!(poll_code, 0, "{}", polled.message());
+        let answer = polled.ok();
+        let state = answer["state"].as_str().expect("a state").to_string();
+        if state == "running" {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            continue;
+        }
+        assert!(
+            from_path.exists() || big_from.exists(),
+            "sources are never touched"
+        );
+        assert!(big_from.exists(), "the cancelled copy leaves the source");
+        if state == "cancelled" {
+            assert!(
+                !big_to.exists(),
+                "a cancelled job leaves no partial behind: {answer}"
+            );
+        } else {
+            assert_eq!(state, "done", "{answer}");
+        }
+        break;
+    }
+    std::fs::remove_file(&big_from).ok();
+    std::fs::remove_file(&big_to).ok();
 }
 
 #[test]

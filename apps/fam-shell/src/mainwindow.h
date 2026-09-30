@@ -217,6 +217,9 @@ private:
      * than driving a drag: the drag is a mouse gesture no headless run can perform, and everything
      * worth certifying - which folder, which name, copy or move, what refused - is decided here. */
     bool postDrop(FileView *view, const QString &source, bool copy, QString *outcome);
+    /* The transfer steps' disk assertions are about a transfer that finished; with jobs the drop
+     * only queues, so the headless steps wait here. */
+    void waitForTransfersForSelfCheck();
     /* Says whether the target view lets a foreign payload past its border. Two claims, both about the
      * decision not to have a second write path: ours is accepted, a standard `text/uri-list` is not. */
     void checkBorderForSelfCheck(FileView *view, const QString &source);
@@ -279,13 +282,37 @@ private:
     QElapsedTimer m_clock;
     /* The transfers this window made, most recent last - the session's own acts only, because a
      * log-replay undo of anything else is the layer increment 14 priced and declined. A move is
-     * undone by moving back, a copy by removing the duplicate (`copy` says which). */
+     * undone by moving back, a copy by removing the duplicate (`copy` says which). Entries arrive
+     * when a job finishes, not when the drop is queued: an undo of something still running would
+     * be an undo of a partial. */
     struct TransferUndo {
         QString from;
         QString to;
         bool copy;
     };
     QVector<TransferUndo> m_undoable;
+    /* The jobs this window queued and has not seen settle. One entry per dropped file; the beat
+     * polls each, reports progress, and turns a terminal state into either an undo entry (done) or
+     * a sentence (cancelled, failed). */
+    struct PendingTransfer {
+        quint64 job;
+        QString from;
+        QString to;
+        bool copy;
+        /* The drag's own folder and verb, for the completion sentence to share with the queue one. */
+        QString folder;
+    };
+    QVector<PendingTransfer> m_pending;
+    /* Drains the pending jobs once: polls each, retires the terminal ones (undo entry for `done`,
+     * sentence for the rest), and answers with what settled - the count the status line reads. */
+    struct Settled {
+        int done = 0;
+        int cancelled = 0;
+        int failed = 0;
+        QStringList errors;
+        bool anyTerminal() const { return done + cancelled + failed > 0; }
+    };
+    Settled pollTransfers();
 };
 
 #endif /* MAINWINDOW_H */

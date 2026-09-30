@@ -281,6 +281,7 @@ int main(int argc, char *argv[]) {
     bool mergedMoved = false;
     bool markerRead = false;
     bool deleteRound = false;
+    bool jobRound = false;
     {
         const QString firstTagged = tree + QStringLiteral("/fam-abi-tag-a.txt");
         const QString secondTagged = tree + QStringLiteral("/fam-abi-tag-b.txt");
@@ -409,6 +410,50 @@ int main(int argc, char *argv[]) {
         }
         markerRead = notedBatchByCaller;
 
+        /* The job: begin answers before a byte moves, the poll runs to a terminal state answered
+         * exactly once, and a copy's terminal state counts the bytes that arrived. A second poll
+         * past the terminal state is refused - the job was retired by the poll that answered it. */
+        const QString jobSrc = tree + QStringLiteral("/fam-abi-job-src.bin");
+        const QString jobDst = tree + QStringLiteral("/fam-abi-job-dst.bin");
+        {
+            QFile body(jobSrc);
+            body.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            body.write(QByteArray(2 * 1024 * 1024, 'j'));
+        }
+        QJsonValue begun;
+        const bool began = bridge.transferBegin(jobSrc, jobDst, true, &begun, &error);
+        const quint64 job = begun.toObject().value(QStringLiteral("job")).toVariant().toULongLong();
+        quint64 total = 0;
+        bool settled = false;
+        bool retired = false;
+        if (began && job != 0) {
+            const QDeadlineTimer deadline(10'000);
+            while (!deadline.hasExpired()) {
+                QJsonValue polled;
+                if (!bridge.transferPoll(job, &polled, &error)) {
+                    break;
+                }
+                const QString state =
+                    polled.toObject().value(QStringLiteral("state")).toString();
+                if (state == QStringLiteral("running")) {
+                    QCoreApplication::processEvents();
+                    continue;
+                }
+                total = polled.toObject().value(QStringLiteral("total")).toVariant().toULongLong();
+                settled = state == QStringLiteral("done")
+                    && QFile::exists(jobDst)
+                    && QFileInfo(jobSrc).size() == qint64(total);
+                QJsonValue again;
+                retired = !bridge.transferPoll(job, &again, &error);
+                break;
+            }
+        }
+        jobRound = began && settled && retired;
+        printf("job: begun=%d settled=%d retired=%d total=%llu\n", began ? 1 : 0,
+               settled ? 1 : 0, retired ? 1 : 0, static_cast<unsigned long long>(total));
+        QFile::remove(jobSrc);
+        QFile::remove(jobDst);
+
         /* Off the shelf, every name this block touched - on both files. The store keeps a file's
          * tags after the file is gone (that is the debt the prune command exists for), so a smoke
          * run that left rows behind would poison the next run's batch read with names the seed
@@ -466,12 +511,12 @@ int main(int argc, char *argv[]) {
     bridge.closeDir(dir);
     const bool passed = sawInsert && sawCut && movedOk && copiedOk && overwriteRefused
         && vocabularyCountsFiles && batchKeysByCaller && emptyWindowIsAnAnswer && mergedMoved
-        && markerRead && deleteRound;
+        && markerRead && deleteRound && jobRound;
     printf("insert=%d cut=%d move=%d copy=%d refuse-overwrite=%d vocabulary=%d batch=%d empty=%d"
-           " merge=%d marker=%d delete=%d -> %s\n",
+           " merge=%d marker=%d delete=%d job=%d -> %s\n",
            sawInsert ? 1 : 0, sawCut ? 1 : 0, movedOk ? 1 : 0, copiedOk ? 1 : 0,
            overwriteRefused ? 1 : 0, vocabularyCountsFiles ? 1 : 0, batchKeysByCaller ? 1 : 0,
            emptyWindowIsAnAnswer ? 1 : 0, mergedMoved ? 1 : 0, markerRead ? 1 : 0,
-           deleteRound ? 1 : 0, passed ? "ok" : "FAILED");
+           deleteRound ? 1 : 0, jobRound ? 1 : 0, passed ? "ok" : "FAILED");
     return passed ? 0 : 1;
 }

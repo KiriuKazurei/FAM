@@ -395,6 +395,70 @@ void MainWindow::noteSelectedFile() {
     }
 }
 
+/* One pass over the queued transfers. Running jobs cost one poll each and show up in the status
+ * line as bytes; a terminal state is answered exactly once by the core, and this is where it
+ * becomes something on this side of the wire - an undo entry for `done`, a sentence for anything
+ * else. The sentence keeps the drop's shape (which folder, which verb) so a completion reads where
+ * it is going, not just that it stopped. */
+MainWindow::Settled MainWindow::pollTransfers() {
+    Settled settled;
+    quint64 bytes = 0;
+    quint64 total = 0;
+    int running = 0;
+    for (int index = m_pending.size() - 1; index >= 0; --index) {
+        PendingTransfer pending = m_pending.at(index);
+        QJsonValue result;
+        QString error;
+        if (!m_bridge->transferPoll(pending.job, &result, &error)) {
+            /* An unknown job means the answer was already taken (an extra beat after a terminal
+             * poll); drop the entry either way - a job this core does not know is not running. */
+            m_pending.removeAt(index);
+            ++settled.failed;
+            settled.errors.append(error);
+            continue;
+        }
+        const QJsonObject answer = result.toObject();
+        const QString state = answer.value(QStringLiteral("state")).toString();
+        if (state == QStringLiteral("running")) {
+            ++running;
+            bytes += answer.value(QStringLiteral("bytes")).toVariant().toULongLong();
+            total += answer.value(QStringLiteral("total")).toVariant().toULongLong();
+            continue;
+        }
+        m_pending.removeAt(index);
+        if (state == QStringLiteral("done")) {
+            ++settled.done;
+            /* The undo entry, and only now: an undo of something still running would be an undo
+             * of a partial. */
+            m_undoable.append({pending.from, pending.to, pending.copy});
+            qInfo("transfer %s into %s: done, %s byte(s)",
+                  qUtf8Printable(pending.copy ? QStringLiteral("copy") : QStringLiteral("move")),
+                  qUtf8Printable(QDir::toNativeSeparators(pending.folder)),
+                  qUtf8Printable(QString::number(answer.value(QStringLiteral("total")).toVariant().toULongLong())));
+        } else if (state == QStringLiteral("cancelled")) {
+            ++settled.cancelled;
+            qInfo("transfer into %s: cancelled after %s byte(s)",
+                  qUtf8Printable(QDir::toNativeSeparators(pending.folder)),
+                  qUtf8Printable(QString::number(bytes)));
+        } else {
+            ++settled.failed;
+            const QString why = answer.value(QStringLiteral("error")).toString();
+            settled.errors.append(why);
+            qInfo("transfer into %s: failed: %s",
+                  qUtf8Printable(QDir::toNativeSeparators(pending.folder)), qUtf8Printable(why));
+        }
+    }
+    if (running > 0 && total > 0) {
+        setStatus(QStringLiteral("transferring %1 file(s): %2 of %3 bytes")
+                      .arg(running)
+                      .arg(QString::number(bytes))
+                      .arg(QString::number(total)));
+    } else if (running > 0) {
+        setStatus(QStringLiteral("transferring %1 file(s)").arg(running));
+    }
+    return settled;
+}
+
 /* The inverse of the last thing this window did to the disk. A move is undone by moving back - the
  * original spot is free by definition unless something took it, and the never-overwrites rule says
  * so rather than replacing it. A copy is undone by removing the duplicate, which is exactly the file
@@ -580,6 +644,23 @@ void MainWindow::pollChanges() {
      * while results are on screen, because a view nobody drains queues its cut positions for as long
      * as it lives. A hidden pane still gets polled too - its watch is live, and stopping here is how
      * a collapsed split comes back showing a stale folder. */
+    /* The transfers ride this same beat: one poll per queued job, progress into the status line,
+     * and a terminal state becomes an undo entry or a sentence right here. */
+    if (!m_pending.isEmpty()) {
+        const Settled settled = pollTransfers();
+        if (settled.anyTerminal()) {
+            QStringList clauses;
+            if (settled.done > 0) {
+                clauses.append(QStringLiteral("%1 transfer(s) finished").arg(settled.done));
+            }
+            if (settled.cancelled > 0) {
+                clauses.append(QStringLiteral("%1 cancelled").arg(settled.cancelled));
+            }
+            clauses.append(settled.errors);
+            setStatus(clauses.isEmpty() ? QString() : clauses.join(QStringLiteral("; ")));
+        }
+    }
+
     /* The store changes behind this window's back: an agent tags files from another process, and
      * no signal crosses between processes. One stat per beat is the whole detector; a change buys
      * the strip one vocabulary read, and the row caches are marked so the chips follow within the
@@ -769,8 +850,8 @@ void MainWindow::handleDrop(const QString &folder, const QStringList &paths, boo
     if (!m_healthy) {
         return;
     }
-    const QString verb = copy ? QStringLiteral("copied") : QStringLiteral("moved");
-    int done = 0;
+    const QString verb = copy ? QStringLiteral("copy") : QStringLiteral("move");
+    int queued = 0;
     int already = 0;
     QStringList refused;
     for (const QString &source : paths) {
@@ -791,22 +872,23 @@ void MainWindow::handleDrop(const QString &folder, const QStringList &paths, boo
         }
         QJsonValue result;
         QString error;
-        if (m_bridge->pathOp(source, QDir(folder).filePath(name), copy, &result, &error)) {
-            ++done;
-            /* Remembered in the answer's own words: `from`/`to` as the core performed them, `copy`
-             * as the action - the two facts an inverse needs, and nothing about the drag's shape. */
-            const QJsonObject performed = result.toObject();
-            m_undoable.append({performed.value(QStringLiteral("from")).toString(),
-                               performed.value(QStringLiteral("to")).toString(), copy});
+        /* A transfer is a job, not a call: begin answers before a byte moves, and the beat both
+         * reports its progress and - only when it finishes - writes the undo entry. The refusals
+         * that used to arrive here (never overwrites, parent gone) arrive at the poll with the
+         * sentences they always had, which is why the queue line says "queued" rather than "moved". */
+        if (m_bridge->transferBegin(source, QDir(folder).filePath(name), copy, &result, &error)) {
+            m_pending.append({result.toObject().value(QStringLiteral("job")).toVariant().toULongLong(),
+                              source, QDir(folder).filePath(name), copy, folder});
+            ++queued;
         } else {
             refused.append(error);
         }
     }
     QStringList clauses;
-    if (done > 0) {
-        clauses.append(QStringLiteral("%1 %2 item(s) into %3")
+    if (queued > 0) {
+        clauses.append(QStringLiteral("%1 of %2 item(s) into %3")
                            .arg(verb)
-                           .arg(done)
+                           .arg(queued)
                            .arg(QDir::toNativeSeparators(folder)));
     }
     if (already > 0) {
@@ -814,12 +896,11 @@ void MainWindow::handleDrop(const QString &folder, const QStringList &paths, boo
     }
     clauses.append(refused);
     /* The counts go to the log as well as the sentence to the status line, because the headless gate
-     * reads words and a status bar is not something it can assert on. Both columns learn the new rows
-     * from their own watches on the next beat - which is the whole reason a drop into a folder that is
-     * *not* on screen is fine too: nothing has to be told. */
-    qInfo("drop %s into %s: %d transferred, %d already there, %d refused: %s",
-          qUtf8Printable(verb), qUtf8Printable(QDir::toNativeSeparators(folder)), done, already,
-          refused.size(), qUtf8Printable(clauses.join(QStringLiteral("; "))));
+     * reads words and a status bar is not something it can assert on. The transfers themselves report
+     * from the beat as they settle; both columns learn the new rows from their own watches. */
+    qInfo("drop queued %s into %s: %d job(s), %d already there, %d refused",
+          qUtf8Printable(verb), qUtf8Printable(QDir::toNativeSeparators(folder)), queued,
+          already, refused.size());
     setStatus(clauses.isEmpty() ? QStringLiteral("the drop carried nothing to transfer")
                                 : clauses.join(QStringLiteral("; ")));
 }
@@ -827,6 +908,17 @@ void MainWindow::handleDrop(const QString &folder, const QStringList &paths, boo
 void MainWindow::keyPressEvent(QKeyEvent *event) {
     if (event->matches(QKeySequence::Undo)) {
         undoLastTransfer();
+        return;
+    }
+    if (event->key() == Qt::Key_Escape && !m_pending.isEmpty()) {
+        /* Esc while a transfer runs asks every queued job to stop at its next chunk. The jobs
+         * answer through the beat - "cancelled" here means the ask was made. */
+        for (const PendingTransfer &pending : m_pending) {
+            QJsonValue result;
+            QString error;
+            m_bridge->transferCancel(pending.job, &result, &error);
+        }
+        setStatus(QStringLiteral("cancelling %1 transfer(s)").arg(m_pending.size()));
         return;
     }
     const bool back = event->key() == Qt::Key_Backspace
@@ -1666,6 +1758,21 @@ bool MainWindow::postDrop(FileView *view, const QString &source, bool copy, QStr
     return event.dropAction() == wanted;
 }
 
+/* Waits for the queued transfers to settle - the disk assertions the transfer steps make are about
+ * a transfer that finished, and with jobs the drop only queues. Pumps the loop like every other
+ * wait, and bounds it: a job that has not settled in two seconds is its own headline. */
+void MainWindow::waitForTransfersForSelfCheck() {
+    QElapsedTimer wait;
+    wait.start();
+    while (wait.elapsed() < 2000 && !m_pending.isEmpty()) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+    if (!m_pending.isEmpty()) {
+        qWarning("self-check transfer did not settle in 2s: %d job(s) still queued",
+                 m_pending.size());
+    }
+}
+
 /* The border, from the two sides it has to be refused on. A payload of ours is answered; a standard
  * `text/uri-list` - which is what anything outside this window would carry - is not, so there is no
  * second, unaccounted-for way for a file to be moved by dropping it here. */
@@ -1801,6 +1908,7 @@ void MainWindow::moveAcrossPanesForSelfCheck() {
     if (!dropBetweenPanes(m_left->chain->deepestPath(), m_right->chain->deepestPath(), false)) {
         return;
     }
+    waitForTransfersForSelfCheck();
     /* A move leaves the file at the far end, and the next step's source has to be the file that
      * exists - not the path the last one was written at. */
     if (!QFile::exists(m_draggedFrom) && QFile::exists(m_draggedTo)) {
@@ -1815,6 +1923,7 @@ void MainWindow::copyBackAcrossPanesForSelfCheck() {
     if (!dropBetweenPanes(m_right->chain->deepestPath(), m_left->chain->deepestPath(), true)) {
         return;
     }
+    waitForTransfersForSelfCheck();
     /* A copy leaves a file at both ends, which is the evidence - and the extra one is what the cleanup
      * step is told about so it can remove it. */
 }

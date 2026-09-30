@@ -182,6 +182,31 @@ bool FamBridge::pathDelete(const QString &path, QJsonValue *result, QString *err
     return invoke(code, out, err, result, error);
 }
 
+bool FamBridge::transferBegin(const QString &from, const QString &to, bool copy,
+                              QJsonValue *result, QString *error) {
+    const QByteArray utf8From = from.toUtf8();
+    const QByteArray utf8To = to.toUtf8();
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_transfer_begin(m_core, utf8From.constData(), utf8To.constData(),
+                                        copy ? FAM_PATH_COPY : 0u, &out, &err);
+    return invoke(code, out, err, result, error);
+}
+
+bool FamBridge::transferPoll(quint64 job, QJsonValue *result, QString *error) {
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_transfer_poll(m_core, job, &out, &err);
+    return invoke(code, out, err, result, error);
+}
+
+bool FamBridge::transferCancel(quint64 job, QJsonValue *result, QString *error) {
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_transfer_cancel(m_core, job, &out, &err);
+    return invoke(code, out, err, result, error);
+}
+
 bool FamBridge::noteGet(const QString &path, QJsonValue *result, QString *error) {
     const QByteArray utf8Path = path.toUtf8();
     char *out = nullptr;

@@ -176,6 +176,14 @@ public:
      * through, with the same refusals in the same words. */
     bool pathDelete(const QString &path, QJsonValue *result, QString *error);
 
+    /* The transfer as a job, so a cross-volume copy of a large file does not hold the GUI thread:
+     * begin answers a job id before a byte moves, the poll (driven by the beat) answers state and
+     * progress and the terminal state exactly once, cancel asks for a stop at the next chunk. */
+    bool transferBegin(const QString &from, const QString &to, bool copy, QJsonValue *result,
+                       QString *error);
+    bool transferPoll(quint64 job, QJsonValue *result, QString *error);
+    bool transferCancel(quint64 job, QJsonValue *result, QString *error);
+
 private:
     static QString take(char *raw);
     bool invoke(int code, char *out, char *err, QJsonValue *result, QString *error) const;

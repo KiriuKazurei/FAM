@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_uchar, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use fam_core::{Config, Order, PathKey, SearchRequest as NameRequest, SortKey};
@@ -89,6 +89,51 @@ pub struct FamCore {
     /// Every request this ABI answers leaves a line here. Held by the core rather than by a global
     /// because the session id and the configuration both belong to one handle.
     audit: AuditLog,
+    /// The asynchronous transfers, keyed by the id `fam_transfer_begin` handed out. A transfer runs
+    /// on its own thread - a cross-volume copy of a large file takes minutes, and the GUI thread
+    /// calling `fam_path_op` synchronously is exactly the freeze increment 14 left behind. The
+    /// registry also remembers what each job is, because the poll that first observes a terminal
+    /// state writes the job's closing audit line with it.
+    transfers: Mutex<(u64, HashMap<u64, TransferJob>)>,
+}
+
+/// One asynchronous transfer: the handles the copy thread and the beat share, and enough of the
+/// request for the closing audit line to say what finished.
+struct TransferJob {
+    cancel: Arc<AtomicBool>,
+    state: Arc<Mutex<JobState>>,
+    from: PathBuf,
+    to: PathBuf,
+    copy: bool,
+}
+
+/// What the beat reads. `outcome` is set exactly when `phase` is `Done`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobPhase {
+    Running,
+    Done,
+    Cancelled,
+    Failed,
+}
+
+struct JobState {
+    phase: JobPhase,
+    bytes: u64,
+    total: u64,
+    outcome: Option<fam_svc_fs::Transferred>,
+    error: Option<String>,
+}
+
+impl JobState {
+    fn new() -> Self {
+        Self {
+            phase: JobPhase::Running,
+            bytes: 0,
+            total: 0,
+            outcome: None,
+            error: None,
+        }
+    }
 }
 
 /// One request as the audit log sees it: which entry point, which path it names, and a summary of
@@ -316,6 +361,7 @@ impl FamCore {
             loader,
             watched: Mutex::new(HashMap::new()),
             audit,
+            transfers: Mutex::new((0, HashMap::new())),
         })
     }
 
@@ -560,6 +606,151 @@ impl FamCore {
             }
         }
         serde_json::to_string(&answered).map_err(|error| error.to_string())
+    }
+
+    /// Starts one asynchronous transfer and answers with its id before a byte has moved. The
+    /// validation the synchronous call did on entry (never overwrites, parent exists) now happens
+    /// inside the job, because it touches the filesystem - a refusal a person used to read at drop
+    /// time arrives at the next poll as a `failed` state with the same sentence.
+    fn transfer_begin(&self, from: &Path, to: &Path, copy: bool) -> Result<String, String> {
+        let action = if copy {
+            fam_svc_fs::Action::Copy
+        } else {
+            fam_svc_fs::Action::Move
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(JobState::new()));
+        let thread_state = Arc::clone(&state);
+        let thread_cancel = Arc::clone(&cancel);
+        let thread_from = from.to_path_buf();
+        let thread_to = to.to_path_buf();
+        std::thread::spawn(move || {
+            let result =
+                fam_svc_fs::transfer_with(&thread_from, &thread_to, action, &mut |report| {
+                    if let Ok(mut state) = thread_state.lock() {
+                        state.bytes = report.bytes;
+                        state.total = report.total;
+                    }
+                    !thread_cancel.load(Ordering::Relaxed)
+                });
+            if let Ok(mut state) = thread_state.lock() {
+                match result {
+                    Ok(transferred) => {
+                        state.phase = JobPhase::Done;
+                        state.outcome = Some(transferred);
+                    }
+                    Err(fam_svc_fs::Error::Cancelled { .. }) => {
+                        state.phase = JobPhase::Cancelled;
+                    }
+                    Err(error) => {
+                        state.phase = JobPhase::Failed;
+                        state.error = Some(error.to_string());
+                    }
+                }
+            }
+        });
+        let mut registry = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.0 += 1;
+        let id = registry.0;
+        registry.1.insert(
+            id,
+            TransferJob {
+                cancel,
+                state,
+                from: from.to_path_buf(),
+                to: to.to_path_buf(),
+                copy,
+            },
+        );
+        Ok(format!("{{\"job\":{id}}}"))
+    }
+
+    /// What one transfer is doing now. The first poll to observe a terminal state writes the job's
+    /// closing audit line and takes the entry out - so a terminal state is answered exactly once,
+    /// and a registry that only holds running work is also the answer to "who cleans up".
+    fn transfer_poll(&self, job: u64) -> Result<String, String> {
+        let mut registry = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = registry
+            .1
+            .get(&job)
+            .ok_or_else(|| format!("unknown transfer job {job}"))?;
+        let (phase, bytes, total, outcome, error) = {
+            let state = entry
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                state.phase,
+                state.bytes,
+                state.total,
+                state.outcome.clone(),
+                state.error.clone(),
+            )
+        };
+        if phase == JobPhase::Running {
+            return Ok(format!(
+                "{{\"state\":\"running\",\"bytes\":{bytes},\"total\":{total}}}"
+            ));
+        }
+        let entry = registry.1.remove(&job).expect("checked above");
+        let outcome_sentence = match (&phase, &outcome, &error) {
+            (JobPhase::Done, Some(done), _) => format!("done by={} bytes={total}", done.by.name()),
+            (JobPhase::Cancelled, ..) => format!("cancelled after {bytes} of {total} bytes"),
+            (JobPhase::Failed, _, Some(reason)) => format!("failed: {reason}"),
+            _ => "ended".to_string(),
+        };
+        self.audit.record(
+            fam_svc_audit::Draft::new(fam_svc_audit::Op::PathTransferEnd)
+                .target(&entry.from)
+                .args(format!(
+                    "to={} action={}",
+                    entry.to.display(),
+                    if entry.copy { "copy" } else { "move" }
+                ))
+                .result(outcome_sentence),
+        );
+        let by = outcome
+            .as_ref()
+            .map(|done| format!(",\"by\":\"{}\"", done.by.name()))
+            .unwrap_or_default();
+        let state_name = match phase {
+            JobPhase::Done => "done",
+            JobPhase::Cancelled => "cancelled",
+            JobPhase::Failed => "failed",
+            JobPhase::Running => unreachable!("handled above"),
+        };
+        let error_field = error
+            .map(|reason| {
+                format!(
+                    ",\"error\":{}",
+                    serde_json::to_string(&reason).unwrap_or_default()
+                )
+            })
+            .unwrap_or_default();
+        Ok(format!(
+            "{{\"state\":\"{state_name}\",\"bytes\":{bytes},\"total\":{total}{by}{error_field}}}"
+        ))
+    }
+
+    /// Asks one running transfer to stop. The answer says the ask was made, not that it was
+    /// obeyed - the copy stops at its next chunk, and the poll says when.
+    fn transfer_cancel(&self, job: u64) -> Result<String, String> {
+        let registry = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = registry
+            .1
+            .get(&job)
+            .ok_or_else(|| format!("unknown transfer job {job}"))?;
+        entry.cancel.store(true, Ordering::Relaxed);
+        Ok("{\"cancelling\":true}".to_string())
     }
 
     /// The note on one path, or `{"body": null}` when there is none - the shape a dialog wants,
@@ -1501,6 +1692,72 @@ pub unsafe extern "C" fn fam_path_delete(
         call.names(path);
         borrow.path_delete(Path::new(path))
     })
+}
+
+/// Starts one asynchronous transfer and answers `{"job":N}` before a byte has moved. The flags are
+/// `fam_path_op`'s (`FAM_PATH_COPY`, no other bit defined); the validations that the synchronous
+/// call made on entry now happen inside the job, so a refusal arrives at poll time as
+/// `{"state":"failed","error":...}` with the same sentence it always had. Two audit lines per
+/// transfer: this call writes `path.transfer.begin`, and the poll that first sees the end writes
+/// `path.transfer.end` with the outcome.
+#[no_mangle]
+pub unsafe extern "C" fn fam_transfer_begin(
+    core: *mut FamCore,
+    from: *const c_char,
+    to: *const c_char,
+    flags: u32,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    let copy = flags & FAM_PATH_COPY != 0;
+    with_core(
+        core,
+        Call::new(Op::PathTransferBegin),
+        out,
+        err,
+        move |borrow, call| {
+            let from = required_str(from, "from")?;
+            let to = required_str(to, "to")?;
+            call.names(from).says(format!(
+                "to={to} action={} async",
+                if copy { "copy" } else { "move" }
+            ));
+            borrow.transfer_begin(Path::new(from), Path::new(to), copy)
+        },
+    )
+}
+
+/// What one transfer is doing. The terminal state is answered exactly once - the poll that observes
+/// it writes `path.transfer.end` and retires the job, and a poll past that point says
+/// `unknown transfer job N`. `bytes`/`total` ride every answer while the job is known.
+#[no_mangle]
+pub unsafe extern "C" fn fam_transfer_poll(
+    core: *mut FamCore,
+    job: u64,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, Call::new(Op::DirPoll), out, err, |borrow, _| {
+        borrow.transfer_poll(job)
+    })
+}
+
+/// Asks one transfer to stop at its next chunk. The answer says the ask was made, not that it was
+/// obeyed - the poll says when, with `{"state":"cancelled"}` and the partial removed.
+#[no_mangle]
+pub unsafe extern "C" fn fam_transfer_cancel(
+    core: *mut FamCore,
+    job: u64,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(
+        core,
+        Call::new(Op::PathTransferBegin),
+        out,
+        err,
+        |borrow, _| borrow.transfer_cancel(job),
+    )
 }
 
 /// The free-text note beside one path - or `{"body":null}` when there is none. A note is not a tag

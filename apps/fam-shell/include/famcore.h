@@ -164,6 +164,18 @@ int fam_tag_list(FamCore *core, const char *path, char **out, char **err);
 int fam_tag_remove(FamCore *core, const char *path, const char *tags_json, const char *source,
                    char **out, char **err);
 
+/* The asynchronous transfer: begin answers `{"job":N}` before a byte has moved (flags are
+ * `fam_path_op`'s - `FAM_PATH_COPY`, no other bit); poll answers
+ * `{"state":"running"|"done"|"cancelled"|"failed","bytes":N,"total":N,...}` and the terminal state
+ * exactly once, retiring the job; cancel asks the job to stop at its next chunk. Two audit lines
+ * per transfer - begin at this call, end at the poll that sees it finish. The same never-overwrite
+ * and parent-must-exist rules run inside the job; a refusal arrives at poll time as a `failed`
+ * state with the sentence it always had. */
+int fam_transfer_begin(FamCore *core, const char *from, const char *to, uint32_t flags,
+                       char **out, char **err);
+int fam_transfer_poll(FamCore *core, uint64_t job, char **out, char **err);
+int fam_transfer_cancel(FamCore *core, uint64_t job, char **out, char **err);
+
 /* Removes one path - a file, an empty directory, or a symlink as the link itself. A directory that
  * still has entries is refused by name; the recursive delete is the one irreversible call there is,
  * and this surface does not make it quietly. This is the inverse half of a copied transfer: the
