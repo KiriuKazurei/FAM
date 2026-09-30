@@ -164,6 +164,13 @@ int fam_tag_list(FamCore *core, const char *path, char **out, char **err);
 int fam_tag_remove(FamCore *core, const char *path, const char *tags_json, const char *source,
                    char **out, char **err);
 
+/* Removes one path - a file, an empty directory, or a symlink as the link itself. A directory that
+ * still has entries is refused by name; the recursive delete is the one irreversible call there is,
+ * and this surface does not make it quietly. This is the inverse half of a copied transfer: the
+ * shell's undo runs this entry, audited as `path.delete` like any other act. The answer is
+ * `{"removed":"...","kind":"file"|"dir"}`. */
+int fam_path_delete(FamCore *core, const char *path, char **out, char **err);
+
 /* The free-text note beside one path - `{"body":"...","updated_at":"..."}`, or `{"body":null}`
  * when there is none. A note is deliberately not a tag and never enters the directory index, so
  * this call on the exact path is the only way to read one back. `fam_note_set` replaces whatever

@@ -46,6 +46,7 @@ pub enum Op {
     TagRemove,
     TagMerge,
     TagRename,
+    PathDelete,
     NoteGet,
     NoteSet,
     NoteClear,
@@ -129,6 +130,7 @@ impl Op {
             Self::TagRemove => "tag.remove",
             Self::TagMerge => "tag.merge",
             Self::TagRename => "tag.rename",
+            Self::PathDelete => "path.delete",
             Self::NoteGet => "note.get",
             Self::NoteSet => "note.set",
             Self::NoteClear => "note.clear",
@@ -317,6 +319,7 @@ mod tests {
     fn the_tag_reads_are_split_by_how_often_they_happen() {
         assert_eq!(Op::TagMerge.name(), "tag.merge");
         assert_eq!(Op::TagRename.name(), "tag.rename");
+        assert_eq!(Op::PathDelete.name(), "path.delete");
         assert_eq!(Op::NoteGet.name(), "note.get");
         assert_eq!(Op::NoteSet.name(), "note.set");
         assert_eq!(Op::NoteClear.name(), "note.clear");

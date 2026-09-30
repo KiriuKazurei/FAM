@@ -280,6 +280,7 @@ int main(int argc, char *argv[]) {
     bool emptyWindowIsAnAnswer = false;
     bool mergedMoved = false;
     bool markerRead = false;
+    bool deleteRound = false;
     {
         const QString firstTagged = tree + QStringLiteral("/fam-abi-tag-a.txt");
         const QString secondTagged = tree + QStringLiteral("/fam-abi-tag-b.txt");
@@ -418,6 +419,36 @@ int main(int argc, char *argv[]) {
                               QStringLiteral("fam-abi-final")},
                              &answer, &error);
         }
+        /* The delete the undo of a copy runs: a file goes, a second call says there is nothing,
+         * and a directory with entries in it is refused by name - the recursive delete is the one
+         * irreversible call, and this surface does not make it quietly. */
+        bridge.noteSet(firstTagged, QStringLiteral("about to be deleted"), &answer, &error);
+        QJsonValue deleteAnswer;
+        const bool removed = bridge.pathDelete(firstTagged, &deleteAnswer, &error);
+        const bool fileGone = removed && !QFile::exists(firstTagged)
+            && deleteAnswer.toObject().value(QStringLiteral("kind")).toString()
+                   == QStringLiteral("file");
+        QJsonValue againAnswer;
+        /* `pathDelete` answers true for "removed" - so the second call, with nothing left to
+         * remove, is the one that must come back false, carrying the store of its refusal. */
+        const bool secondSucceeded =
+            bridge.pathDelete(firstTagged, &againAnswer, &error);
+        QString missingSentence = error;
+        QString dirSentence;
+        const QString fullDir = tree + QStringLiteral("/fam-abi-full");
+        QDir().mkpath(fullDir);
+        QFile(fullDir + QStringLiteral("/inner.txt"))
+            .open(QIODevice::WriteOnly | QIODevice::Truncate);
+        const bool dirRefused = !bridge.pathDelete(fullDir, &deleteAnswer, &dirSentence)
+            && dirSentence.contains(QStringLiteral("still has entries in it"))
+            && QDir(fullDir).exists();
+        deleteRound = fileGone && !secondSucceeded
+            && missingSentence.contains(QStringLiteral("cannot open")) && dirRefused;
+        printf("delete: file=%d again-refused=%d dir-refused=%d\n", fileGone ? 1 : 0,
+              !secondSucceeded ? 1 : 0, dirRefused ? 1 : 0);
+        QFile::remove(fullDir + QStringLiteral("/inner.txt"));
+        QDir(tree).rmdir(QStringLiteral("fam-abi-full"));
+
         QFile::remove(firstTagged);
         QFile::remove(secondTagged);
         QFile::remove(untagged);
@@ -435,12 +466,12 @@ int main(int argc, char *argv[]) {
     bridge.closeDir(dir);
     const bool passed = sawInsert && sawCut && movedOk && copiedOk && overwriteRefused
         && vocabularyCountsFiles && batchKeysByCaller && emptyWindowIsAnAnswer && mergedMoved
-        && markerRead;
+        && markerRead && deleteRound;
     printf("insert=%d cut=%d move=%d copy=%d refuse-overwrite=%d vocabulary=%d batch=%d empty=%d"
-           " merge=%d marker=%d -> %s\n",
+           " merge=%d marker=%d delete=%d -> %s\n",
            sawInsert ? 1 : 0, sawCut ? 1 : 0, movedOk ? 1 : 0, copiedOk ? 1 : 0,
            overwriteRefused ? 1 : 0, vocabularyCountsFiles ? 1 : 0, batchKeysByCaller ? 1 : 0,
            emptyWindowIsAnAnswer ? 1 : 0, mergedMoved ? 1 : 0, markerRead ? 1 : 0,
-           passed ? "ok" : "FAILED");
+           deleteRound ? 1 : 0, passed ? "ok" : "FAILED");
     return passed ? 0 : 1;
 }

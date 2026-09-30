@@ -174,6 +174,14 @@ bool FamBridge::notesForPaths(const QStringList &paths, QSet<QString> *noted, QS
     return true;
 }
 
+bool FamBridge::pathDelete(const QString &path, QJsonValue *result, QString *error) {
+    const QByteArray utf8Path = path.toUtf8();
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_path_delete(m_core, utf8Path.constData(), &out, &err);
+    return invoke(code, out, err, result, error);
+}
+
 bool FamBridge::noteGet(const QString &path, QJsonValue *result, QString *error) {
     const QByteArray utf8Path = path.toUtf8();
     char *out = nullptr;

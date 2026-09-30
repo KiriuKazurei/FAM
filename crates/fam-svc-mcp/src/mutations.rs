@@ -115,50 +115,16 @@ impl Server {
         if let Err(why) = self.admit(Verb::FsDelete, path) {
             return ToolAnswer::error(why);
         }
-        let meta = match fs::symlink_metadata(path) {
-            Ok(meta) => meta,
-            Err(source) => {
-                return ToolAnswer::error(format!("cannot open {}: {source}", path.display()))
-            }
-        };
-        if meta.is_dir() {
-            // Refused here rather than left to the operating system. `remove_dir` on a folder that
-            // still has entries fails too, but with a locale-dependent system message handed straight
-            // to the agent - and the obvious "fix" for a caller that wants the folder gone is the
-            // recursive call, which is the one this tool must never make. An entry that fails to
-            // read counts as *not* empty: an error is not evidence of emptiness.
-            let is_empty = match fs::read_dir(path) {
-                Ok(mut entries) => entries.next().is_none(),
-                Err(source) => {
-                    return ToolAnswer::error(format!(
-                        "cannot check whether {} is empty: {source}",
-                        path.display()
-                    ))
-                }
-            };
-            if !is_empty {
-                return ToolAnswer::error(format!(
-                    "{} is a directory that still has entries in it; fs_delete removes files and \
-                     empty directories only",
-                    path.display()
-                ));
-            }
-            return match fs::remove_dir(path) {
-                Ok(()) => {
-                    ToolAnswer::ok(json!({"removed": path.display().to_string(), "kind": "dir"}))
-                }
-                Err(source) => {
-                    ToolAnswer::error(format!("cannot remove {}: {source}", path.display()))
-                }
-            };
-        }
-        // A symlink or junction is removed as the link itself, never as what it points at: the gate
-        // has already refused a link that leaves, and deleting through one would be deleting outside.
-        match fs::remove_file(path) {
-            Ok(()) => {
-                ToolAnswer::ok(json!({"removed": path.display().to_string(), "kind": "file"}))
-            }
-            Err(source) => ToolAnswer::error(format!("cannot remove {}: {source}", path.display())),
+        // The rules - an entry that fails to read is not empty, a symlink dies as the link, a
+        // non-empty directory is refused by name - live in `fam-svc-fs`, where the shell's undo
+        // reaches the same sentences. What this layer adds is the gate above and the JSON shape
+        // below, and nothing else.
+        match fam_svc_fs::remove_path(path) {
+            Ok(removed) => ToolAnswer::ok(json!({
+                "removed": removed.path.display().to_string(),
+                "kind": removed.kind,
+            })),
+            Err(why) => ToolAnswer::error(why.to_string()),
         }
     }
 

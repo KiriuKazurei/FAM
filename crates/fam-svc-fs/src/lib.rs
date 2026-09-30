@@ -95,6 +95,88 @@ pub enum Error {
         to: PathBuf,
         reason: String,
     },
+    #[error("cannot open {}: {source}", path.display())]
+    CantOpen {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "{} is a directory that still has entries in it; fs_delete removes files and          empty directories only",
+        path.display()
+    )]
+    DirectoryNotEmpty { path: PathBuf },
+    #[error("cannot check whether {} is empty: {source}", path.display())]
+    CantCheckEmpty {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot remove {}: {source}", path.display())]
+    CantRemove {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// What a removal took off the disk, in the words a caller reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removed {
+    pub path: PathBuf,
+    /// `"file"` or `"dir"` - the shape the MCP answer has always reported.
+    pub kind: &'static str,
+}
+
+/// Removes one path, with the same refusals-everywhere rules the transfers carry:
+///
+///   * **a directory that still has entries is refused, by name.** The obvious fix for a caller that
+///     wanted it gone is the recursive call, and the recursive delete is the one irreversible call
+///     there is - this crate refuses it rather than making it quiet.
+///   * **a symlink or junction is removed as the link, never as what it points at.**
+///   * an entry that fails to read counts as *not* empty: an error is not evidence of emptiness.
+///
+/// This is the one implementation of "take this file away", shared by the agent's `fs_delete` and
+/// the human's undo; a caller that wants a scope or an audit line around it wraps it.
+pub fn remove_path(path: &Path) -> Result<Removed, Error> {
+    let meta = fs::symlink_metadata(path).map_err(|source| Error::CantOpen {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if meta.is_dir() {
+        let is_empty = match fs::read_dir(path) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(source) => {
+                return Err(Error::CantCheckEmpty {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            }
+        };
+        if !is_empty {
+            return Err(Error::DirectoryNotEmpty {
+                path: path.to_path_buf(),
+            });
+        }
+        return fs::remove_dir(path)
+            .map(|_| Removed {
+                path: path.to_path_buf(),
+                kind: "dir",
+            })
+            .map_err(|source| Error::CantRemove {
+                path: path.to_path_buf(),
+                source,
+            });
+    }
+    fs::remove_file(path)
+        .map(|_| Removed {
+            path: path.to_path_buf(),
+            kind: "file",
+        })
+        .map_err(|source| Error::CantRemove {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 /// Move or copy `from` onto `to`, where `to` is a full destination path (folder plus name), not a
@@ -324,5 +406,45 @@ mod tests {
         assert!(!is_cross_device(&io::Error::from_raw_os_error(5)));
         let cross = if cfg!(windows) { 17 } else { 18 };
         assert!(is_cross_device(&io::Error::from_raw_os_error(cross)));
+    }
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_is_removed_and_a_second_remove_says_it_cannot_open() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("gone.txt");
+        fs::write(&target, "x\n").expect("file");
+
+        let removed = remove_path(&target).expect("the file goes");
+        assert_eq!(removed.kind, "file");
+        assert!(!target.exists());
+
+        let error = remove_path(&target).expect_err("nothing left to remove");
+        assert!(matches!(error, Error::CantOpen { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_directory_with_entries_is_refused_by_name_and_an_empty_one_goes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let full = temp.path().join("full");
+        fs::create_dir_all(full.join("inner")).expect("entries");
+        fs::write(full.join("inner").join("a.txt"), "x\n").expect("file");
+
+        let error = remove_path(&full).expect_err("a non-empty directory is refused");
+        assert!(
+            error.to_string().contains("still has entries in it"),
+            "the sentence the gate test pins: {error}"
+        );
+        assert!(full.exists(), "and the directory is still there");
+
+        let empty = temp.path().join("empty");
+        fs::create_dir(&empty).expect("empty dir");
+        let removed = remove_path(&empty).expect("an empty directory goes");
+        assert_eq!(removed.kind, "dir");
+        assert!(!empty.exists());
     }
 }

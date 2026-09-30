@@ -564,6 +564,20 @@ impl FamCore {
 
     /// The note on one path, or `{"body": null}` when there is none - the shape a dialog wants,
     /// where "empty" and "absent" are the same fact and neither is an error.
+    /// Removes one path - files and empty directories only, a symlink as the link - by the one
+    /// implementation the MCP's `fs_delete` answers through. The undo of a copied transfer is a
+    /// deletion, and a deletion that only the agent's tool could make would be an undo the human
+    /// side cannot run; the refusals are the crate's own sentences, word for word.
+    fn path_delete(&self, path: &Path) -> Result<String, String> {
+        let removed = fam_svc_fs::remove_path(path).map_err(|error| error.to_string())?;
+        Ok(format!(
+            "{{\"removed\":{},\"kind\":\"{}\"}}",
+            serde_json::to_string(&removed.path.display().to_string())
+                .map_err(|error| error.to_string())?,
+            removed.kind
+        ))
+    }
+
     fn note_get(&self, path: &Path) -> Result<String, String> {
         let store = self.store();
         let found = store.note(path).map_err(|error| error.to_string())?;
@@ -1468,6 +1482,24 @@ pub unsafe extern "C" fn fam_notes_for_paths(
     with_core(core, Call::new(Op::NoteFetch), out, err, |borrow, _| {
         let paths_json = required_str(paths_json, "paths")?;
         borrow.notes_for_paths(paths_json)
+    })
+}
+
+/// Removes one path - a file, an empty directory, or a symlink as the link itself. A directory
+/// that still has entries is refused by name; the recursive delete is the one irreversible call
+/// there is, and this surface does not make it quietly. This is the inverse half of a copied
+/// transfer: the undo the shell runs is this entry, audited as `path.delete` like any other act.
+#[no_mangle]
+pub unsafe extern "C" fn fam_path_delete(
+    core: *mut FamCore,
+    path: *const c_char,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, Call::new(Op::PathDelete), out, err, |borrow, call| {
+        let path = required_str(path, "path")?;
+        call.names(path);
+        borrow.path_delete(Path::new(path))
     })
 }
 

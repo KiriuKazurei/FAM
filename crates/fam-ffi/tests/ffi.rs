@@ -4,8 +4,8 @@ use std::path::Path;
 
 use famcore::{
     fam_abi_version, fam_core_free, fam_core_new, fam_dir_close, fam_free_string, fam_note_clear,
-    fam_note_get, fam_note_set, fam_notes_for_paths, fam_stats, fam_tag_add, fam_tag_list,
-    fam_tag_merge, fam_tag_remove, fam_tag_rename, FamCore,
+    fam_note_get, fam_note_set, fam_notes_for_paths, fam_path_delete, fam_stats, fam_tag_add,
+    fam_tag_list, fam_tag_merge, fam_tag_remove, fam_tag_rename, FamCore,
 };
 use serde_json::Value;
 
@@ -551,6 +551,68 @@ fn a_note_round_trips_and_a_blank_write_is_refused_not_read_as_a_clear() {
     };
     assert_eq!(code, 0);
     assert!(empty.ok().as_object().unwrap().is_empty());
+}
+
+#[test]
+fn a_delete_removes_a_file_refuses_a_full_directory_and_says_what_a_missing_one_is() {
+    let h = harness();
+    let file = text(h.tree.join("notes.txt").to_str().unwrap());
+    let mut out = Out::new();
+    let code = unsafe {
+        fam_path_delete(
+            h.core.handle(),
+            file.as_ptr(),
+            &mut out.value,
+            &mut out.error,
+        )
+    };
+    assert_eq!(code, 0, "{}", out.message());
+    assert_eq!(out.ok()["kind"], "file");
+    assert!(!h.tree.join("notes.txt").exists());
+
+    // The second call does not pretend: there is nothing there, and the sentence says so.
+    let mut again = Out::new();
+    let code = unsafe {
+        fam_path_delete(
+            h.core.handle(),
+            file.as_ptr(),
+            &mut again.value,
+            &mut again.error,
+        )
+    };
+    assert_ne!(code, 0);
+    assert!(
+        again.message().contains("cannot open"),
+        "{}",
+        again.message()
+    );
+
+    // The non-empty directory is refused by name - the recursive delete is the call this surface
+    // does not make, and the refusal is worded so the obvious "fix" reads as the escalation it is.
+    let full = h.tree.join("full");
+    std::fs::create_dir_all(full.join("inner")).expect("a directory with an entry");
+    std::fs::write(
+        full.join("inner").join("a.txt"),
+        "x
+",
+    )
+    .expect("the entry");
+    let mut refused = Out::new();
+    let code = unsafe {
+        fam_path_delete(
+            h.core.handle(),
+            text(h.tree.join("full").to_str().unwrap()).as_ptr(),
+            &mut refused.value,
+            &mut refused.error,
+        )
+    };
+    assert_ne!(code, 0);
+    assert!(
+        refused.message().contains("still has entries in it"),
+        "{}",
+        refused.message()
+    );
+    assert!(full.exists());
 }
 
 #[test]

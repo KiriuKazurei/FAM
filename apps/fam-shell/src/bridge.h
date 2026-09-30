@@ -172,6 +172,9 @@ public:
      * are the ones in `famcore.h` beside `fam_path_op`, and `error` carries whichever one said no. */
     bool pathOp(const QString &from, const QString &to, bool copy, QJsonValue *result,
                 QString *error);
+    /* The inverse half of a copied transfer: the same primitive the agent's `fs_delete` answers
+     * through, with the same refusals in the same words. */
+    bool pathDelete(const QString &path, QJsonValue *result, QString *error);
 
 private:
     static QString take(char *raw);

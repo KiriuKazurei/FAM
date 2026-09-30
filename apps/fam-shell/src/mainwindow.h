@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QElapsedTimer>
+#include <QVector>
 #include <QWidget>
 
 #include <memory>
@@ -128,6 +129,10 @@ public:
      * production path - the query written to the box, the search, the tagged file in the results. */
     void rowChipClickForSelfCheck();
 
+    /* The undo of the transfer steps, through real Ctrl+Z keys: the copy's duplicate is removed,
+     * then the move goes back - asserted on the disk, which is the only place "undone" is true. */
+    void undoForSelfCheck();
+
     /* The note round trip on the probe file: none, written, read back, a blank save refused
      * without crossing the wire, cleared - and a second clear reporting there was nothing. Every
      * call goes through the dialog's own operations, which are the same ones a click reaches. */
@@ -182,6 +187,11 @@ private:
      * and "run this search" each need one, and the only answer that is not a guess is the one the
      * person clicked last. */
     Pane *active() const { return m_active; }
+    /* Pops the most recent transfer this window made and inverts it: a move goes back, a copy's
+     * duplicate is removed - each by the same primitives the drop ran, so the refusals are the
+     * ones the drop would have hit. A failed undo stays on the stack, retryable once whatever
+     * blocked it is moved out of the way. */
+    void undoLastTransfer();
     void setActivePane(Pane *pane);
     /* The same call with the pane named. `openFolder` opens in whichever pane is active, which is
      * right for a person and wrong for a gate that wants two folders side by side on purpose. */
@@ -267,6 +277,15 @@ private:
     /* Everything the shell does after this point is measured against it, so the headless log can say
      * how long a folder took to show rather than leaving that to be guessed from a screenshot. */
     QElapsedTimer m_clock;
+    /* The transfers this window made, most recent last - the session's own acts only, because a
+     * log-replay undo of anything else is the layer increment 14 priced and declined. A move is
+     * undone by moving back, a copy by removing the duplicate (`copy` says which). */
+    struct TransferUndo {
+        QString from;
+        QString to;
+        bool copy;
+    };
+    QVector<TransferUndo> m_undoable;
 };
 
 #endif /* MAINWINDOW_H */

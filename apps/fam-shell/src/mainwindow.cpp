@@ -395,6 +395,42 @@ void MainWindow::noteSelectedFile() {
     }
 }
 
+/* The inverse of the last thing this window did to the disk. A move is undone by moving back - the
+ * original spot is free by definition unless something took it, and the never-overwrites rule says
+ * so rather than replacing it. A copy is undone by removing the duplicate, which is exactly the file
+ * this window created and nothing else. A failed undo goes back on the stack: "blocked" and
+ * "forgotten" are different facts, and only the second one loses data. */
+void MainWindow::undoLastTransfer() {
+    if (!m_healthy) {
+        return;
+    }
+    if (m_undoable.isEmpty()) {
+        setStatus(QStringLiteral("nothing to undo"));
+        return;
+    }
+    const TransferUndo last = m_undoable.takeLast();
+    QJsonValue result;
+    QString error;
+    if (last.copy) {
+        if (!m_bridge->pathDelete(last.to, &result, &error)) {
+            m_undoable.append(last);
+            setStatus(error);
+            return;
+        }
+        setStatus(QStringLiteral("undone: removed the copy at %1")
+                      .arg(QDir::toNativeSeparators(last.to)));
+    } else {
+        if (!m_bridge->pathOp(last.to, last.from, false, &result, &error)) {
+            m_undoable.append(last);
+            setStatus(error);
+            return;
+        }
+        setStatus(QStringLiteral("undone: moved %1 back to %2")
+                      .arg(QDir::toNativeSeparators(last.to),
+                           QDir::toNativeSeparators(last.from)));
+    }
+}
+
 void MainWindow::toggleSplit() { m_split->click(); }
 
 /* The strip's half of the one-place rule: the query lives in the box, and a hand on a chip rewrites
@@ -757,6 +793,11 @@ void MainWindow::handleDrop(const QString &folder, const QStringList &paths, boo
         QString error;
         if (m_bridge->pathOp(source, QDir(folder).filePath(name), copy, &result, &error)) {
             ++done;
+            /* Remembered in the answer's own words: `from`/`to` as the core performed them, `copy`
+             * as the action - the two facts an inverse needs, and nothing about the drag's shape. */
+            const QJsonObject performed = result.toObject();
+            m_undoable.append({performed.value(QStringLiteral("from")).toString(),
+                               performed.value(QStringLiteral("to")).toString(), copy});
         } else {
             refused.append(error);
         }
@@ -784,6 +825,10 @@ void MainWindow::handleDrop(const QString &folder, const QStringList &paths, boo
 }
 
 void MainWindow::keyPressEvent(QKeyEvent *event) {
+    if (event->matches(QKeySequence::Undo)) {
+        undoLastTransfer();
+        return;
+    }
     const bool back = event->key() == Qt::Key_Backspace
                       || (event->key() == Qt::Key_Left
                           && event->modifiers().testFlag(Qt::AltModifier));
@@ -1072,6 +1117,32 @@ bool MainWindow::grabNoteDialogForSelfCheck(const QString &imagePath) {
     dialog->clearNote(&error);
     delete dialog;
     return saved;
+}
+
+/* The undo, driven the way a hand drives it: a real Ctrl+Z sent to the window, twice. The stack
+ * after the three drop steps holds the copy first, then the move - so the first key removes the
+ * duplicate, the second moves the file back to where the drag picked it up, and every claim is
+ * about the disk: which of the two ends exists after each key. The drop itself is not re-run here;
+ * the three steps above made it, and the status line's own words ride their log lines. */
+void MainWindow::undoForSelfCheck() {
+    if (!m_healthy) {
+        qWarning("self-check undo step asked for without a working core");
+        return;
+    }
+    const QString origin = QDir(m_watch).filePath(QLatin1String(kDragProbe));
+    const QString copied = QDir(m_watch).filePath(QStringLiteral("2024-合同"));
+    const QString atDest = QDir(copied).filePath(QLatin1String(kDragProbe));
+    auto pressUndo = [this]() {
+        QKeyEvent undo(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+        QCoreApplication::sendEvent(this, &undo);
+        QCoreApplication::processEvents();
+    };
+    pressUndo();
+    const bool copyUndone = QFile::exists(origin) && !QFile::exists(atDest);
+    pressUndo();
+    const bool moveUndone = QFile::exists(atDest) && !QFile::exists(origin);
+    qInfo("self-check undo: copy-undone=%d (origin=1 copy=0) move-undone=%d (origin=0 dest=1)",
+          copyUndone ? 1 : 0, moveUndone ? 1 : 0);
 }
 
 /* The chip on a row is the third way to search a label, and the only one a run with no hands has to
