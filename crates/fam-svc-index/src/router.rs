@@ -114,6 +114,17 @@ impl SearchRouter {
         )
     }
 
+    /// A router built from the product's own list, with one more backend in front of it.
+    ///
+    /// For a caller that holds something no name index holds - the tag store, which answers a field
+    /// rather than a subtree. It goes first because the request that needs it needs nothing else:
+    /// [`handles_tags`](SearchProvider::handles_tags) keeps a tag request away from the name backends,
+    /// and a plain name search walks straight past it because `covers` says no.
+    pub fn with_provider(mut self, provider: Box<dyn SearchProvider>) -> Self {
+        self.providers.insert(0, provider);
+        self
+    }
+
     /// Enumeration and nothing else, for a caller that wants the walk's own answer.
     pub fn walking(config: &fam_core::Config) -> Self {
         Self::scoped(
@@ -183,6 +194,11 @@ impl SearchRouter {
         // caller's own spelling for the sake of anything that restarts the walk.
         let named = request.scope.as_deref().map(PathKey::of);
         for provider in &self.providers {
+            // A request about tags goes only to a backend that has tags. Asked before availability and
+            // before `covers`, so the one wrapper that forces both of those cannot force this one.
+            if request.names_tags() && !provider.handles_tags() {
+                continue;
+            }
             // Available and able to answer the whole request: a backend that covers part of a
             // scope would return a shorter list that reads as exhaustive.
             if !provider.is_available() || !provider.covers(request) {
@@ -301,6 +317,108 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, SearchError::Unavailable { .. }));
+    }
+
+    /// The routing rule the tag store stands on. A name index asked "which files carry the label 合同"
+    /// answers with the files *named* 合同, confidently and completely, and that is a different question
+    /// with the same shape - so it is not asked at all, and the caller hears "nobody here knows tags"
+    /// rather than a list it cannot tell apart from the answer.
+    #[test]
+    fn a_tag_request_is_not_asked_of_a_name_backend() {
+        let router = SearchRouter::new(vec![Box::new(FakeEverything::indexing(&[
+            "D:/index/合同.txt",
+        ]))]);
+        let error = router
+            .search(
+                &fam_core::SearchRequest::new("tag:合同"),
+                &Cancellation::new(),
+                &mut |_| true,
+            )
+            .expect_err("an index of names does not know what anybody labelled");
+        assert!(
+            matches!(&error, SearchError::Unavailable { provider, .. } if *provider == "none"),
+            "got {error:?}"
+        );
+    }
+
+    /// Insisting on a backend makes it *asked*, not able. `Insisted` exists so a caller who named
+    /// Everything hears its own reason for failing, and that reason cannot become an answer about tags
+    /// it does not have.
+    #[test]
+    fn insisting_does_not_give_a_backend_tags_it_lacks() {
+        let router = SearchRouter::new(vec![Box::new(Insisted(Box::new(
+            FakeEverything::indexing(&["D:/index/合同.txt"]),
+        )))]);
+        assert!(router
+            .search(
+                &fam_core::SearchRequest::new("tag:合同"),
+                &Cancellation::new(),
+                &mut |_| true,
+            )
+            .is_err());
+    }
+
+    /// The other side of the same rule, so the refusal above is not simply "tags never work": with a
+    /// backend that handles them in the list, a tag request reaches it and a plain name request still
+    /// reaches the index.
+    #[test]
+    fn a_tag_request_reaches_the_one_backend_that_has_them() {
+        let router = SearchRouter::new(vec![
+            Box::new(FakeEverything::indexing(&["D:/index/report.txt"])),
+            Box::new(Labels),
+        ]);
+
+        let (names, searched) = delivered(&router, &fam_core::SearchRequest::new("tag:合同"));
+        assert_eq!(searched.provider, "labels");
+        assert_eq!(names.len(), 1, "the label library answered");
+
+        let (names, searched) = delivered(&router, &fam_core::SearchRequest::new("report"));
+        assert_eq!(searched.provider, "everything");
+        assert_eq!(names.len(), 1, "and a plain name search never touched it");
+    }
+
+    /// The smallest backend that could exist with the one capability the rule is about.
+    struct Labels;
+
+    impl SearchProvider for Labels {
+        fn id(&self) -> &'static str {
+            "labels"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn handles_tags(&self) -> bool {
+            true
+        }
+
+        fn covers(&self, request: &SearchRequest) -> bool {
+            request.names_tags()
+        }
+
+        fn search(
+            &self,
+            _request: &SearchRequest,
+            _cancel: &Cancellation,
+            sink: &mut dyn FnMut(SearchHit) -> bool,
+        ) -> Result<SearchOutcome, SearchError> {
+            let path = std::path::PathBuf::from("D:/library/合同.pdf");
+            sink(SearchHit {
+                key: fam_core::PathKey::of(&path),
+                path: fam_core::raw_path_units(&path),
+                kind: fam_core::Kind::Document,
+                size: 7,
+                mtime_ms: 1,
+            })
+            .then_some(())
+            .ok_or(SearchError::Empty)?;
+            Ok(SearchOutcome {
+                matched: 1,
+                visited: 1,
+                complete: true,
+            })
+        }
     }
     /// A running Everything, as the router sees it: a searcher that reaches past the caller's roots
     /// and knows nothing about their exclusions. The paging, the re-check and the row shape are the

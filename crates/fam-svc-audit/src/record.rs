@@ -44,13 +44,23 @@ pub enum Op {
     TagAdd,
     TagList,
     TagRemove,
-    TagFind,
+    TagMerge,
+    TagRename,
+    NoteGet,
+    NoteSet,
+    NoteClear,
     /// The tags of a window of a listing, asked for by path. `tag.list` is one file's tags because
     /// someone asked about that file; this is the same question asked for a hundred and twenty-eight
     /// files because a screen is showing them, and it happens on the shell's poll beat. It is a
     /// heartbeat for the same reason `dir.poll` is one: a line per beat per column would date nothing
     /// and would bury the acts that do.
     TagFetch,
+    /// The notes of a window of a listing, asked for by path. `note.get` is one file's note because
+    /// someone asked about that file; this is the same question asked for a hundred and twenty-eight
+    /// files because a screen is showing them, and it happens on the shell's poll beat. It is a
+    /// heartbeat for the same reason `TagFetch` is one: a line per beat per column would date nothing
+    /// and would bury the acts that do.
+    NoteFetch,
     /// Every tag name in the store with how many files carry it. This one is not a heartbeat - it is a
     /// read of the whole tag table, which is the largest thing on this surface that is not scoped to a
     /// directory, so it is a `Read` and the `record_reads` knob decides whether it leaves a line.
@@ -95,6 +105,7 @@ pub enum Op {
     McpTagsGet,
     McpTagsSet,
     McpTagsRemove,
+    McpTagsMerge,
     McpNoteGet,
     McpNoteSet,
     McpNoteClear,
@@ -116,8 +127,13 @@ impl Op {
             Self::TagAdd => "tag.add",
             Self::TagList => "tag.list",
             Self::TagRemove => "tag.remove",
-            Self::TagFind => "tag.find",
+            Self::TagMerge => "tag.merge",
+            Self::TagRename => "tag.rename",
+            Self::NoteGet => "note.get",
+            Self::NoteSet => "note.set",
+            Self::NoteClear => "note.clear",
             Self::TagFetch => "tag.fetch",
+            Self::NoteFetch => "note.fetch",
             Self::TagVocabulary => "tag.vocabulary",
             Self::DirOpen => "dir.open",
             Self::DirState => "dir.state",
@@ -145,6 +161,7 @@ impl Op {
             Self::McpTagsGet => "tags_get",
             Self::McpTagsSet => "tags_set",
             Self::McpTagsRemove => "tags_remove",
+            Self::McpTagsMerge => "tags_merge",
             Self::McpNoteGet => "note_get",
             Self::McpNoteSet => "note_set",
             Self::McpNoteClear => "note_clear",
@@ -168,7 +185,7 @@ impl Op {
             | Self::TagVocabulary
             | Self::McpFsList
             | Self::McpFsRead => Weight::Read,
-            Self::DirState | Self::DirPoll | Self::TagFetch => Weight::Poll,
+            Self::DirState | Self::DirPoll | Self::TagFetch | Self::NoteFetch => Weight::Poll,
             _ => Weight::Ask,
         }
     }
@@ -298,7 +315,13 @@ mod tests {
     /// is the case `record_reads` exists to cover.
     #[test]
     fn the_tag_reads_are_split_by_how_often_they_happen() {
+        assert_eq!(Op::TagMerge.name(), "tag.merge");
+        assert_eq!(Op::TagRename.name(), "tag.rename");
+        assert_eq!(Op::NoteGet.name(), "note.get");
+        assert_eq!(Op::NoteSet.name(), "note.set");
+        assert_eq!(Op::NoteClear.name(), "note.clear");
         assert_eq!(Op::TagFetch.name(), "tag.fetch");
+        assert_eq!(Op::NoteFetch.name(), "note.fetch");
         assert_eq!(Op::TagFetch.weight(), Weight::Poll);
         assert_eq!(Op::TagVocabulary.name(), "tag.vocabulary");
         assert_eq!(Op::TagVocabulary.weight(), Weight::Read);
@@ -321,6 +344,7 @@ mod tests {
             (Op::McpTagsGet, "tags_get"),
             (Op::McpTagsSet, "tags_set"),
             (Op::McpTagsRemove, "tags_remove"),
+            (Op::McpTagsMerge, "tags_merge"),
             (Op::McpNoteGet, "note_get"),
             (Op::McpNoteSet, "note_set"),
             (Op::McpNoteClear, "note_clear"),

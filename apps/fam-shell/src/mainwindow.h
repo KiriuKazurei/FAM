@@ -16,6 +16,8 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QTimer;
+class NoteDialog;
+class TagFilterBar;
 
 class MainWindow final : public QWidget {
     Q_OBJECT
@@ -115,6 +117,29 @@ public:
      * Puts one tag on the probe file first so the list is not empty, and takes it off again after. */
     bool grabTagDialogForSelfCheck(const QString &imagePath);
 
+    /* The vocabulary strip, driven the way a hand drives it: a chip is clicked, the query it writes
+     * runs, and the results that come back carry the tagged file. Then the chip is clicked again and
+     * the strip's own mark is the thing that clears the search. This is the step that exercises
+     * `fam_tag_vocabulary` from its only interface caller. */
+    void tagSearchForSelfCheck();
+
+    /* The chip on a row, clicked the way a hand clicks it: the delegate's own hit test says where
+     * the chip is, and a real press-and-release is posted there. Everything after the click is the
+     * production path - the query written to the box, the search, the tagged file in the results. */
+    void rowChipClickForSelfCheck();
+
+    /* The note round trip on the probe file: none, written, read back, a blank save refused
+     * without crossing the wire, cleared - and a second clear reporting there was nothing. Every
+     * call goes through the dialog's own operations, which are the same ones a click reaches. */
+    void notesForSelfCheck();
+    /* The dialog as a picture, with a note in it - a new surface wears the theme or the picture
+     * says so (increment 16's lesson). */
+    bool grabNoteDialogForSelfCheck(const QString &imagePath);
+
+    /* The strip itself, as an image: one chip checked and one not, so the two states a style sheet
+     * has to tell apart are both in the frame. */
+    bool grabTagFilterForSelfCheck(const QString &imagePath);
+
     /* Drops the deepest column, as Backspace would. */
     void goUpForSelfCheck();
 
@@ -127,6 +152,14 @@ private slots:
     void pollChanges();
     void openFolderDialog();
     void tagSelectedFile();
+    /* The free-text note on the selected row or folder - the note the agent could always read and
+     * write, and the human face could not see at all until now. */
+    void noteSelectedFile();
+    /* A chip on a row was clicked: search that label, the same box-writing way the strip's chips
+     * do. */
+    void searchTagActivated(const QString &path, const QString &tag);
+    /* The strip's context menu asked for a library-wide merge. */
+    void mergeTags(const QString &from, const QString &into);
     /* Putting the folder back on screen: a search no longer closes the columns it was started in, so
      * clearing the box is what returns to them. */
     void showFolder();
@@ -156,6 +189,10 @@ private:
     /* Shows or hides the left pane. Collapsed, the window is one browsing surface - the shape a
      * person who never asked for a second column has been getting all along. */
     void toggleSplit();
+    /* Rebuilds the query from the strip's checked chips plus whatever name words are in the box,
+     * then runs (or clears) the search. The box is the one place the query lives; this is the hand
+     * that writes it when the gesture was a click. */
+    void applyTagFilter();
 
     /* --- drag and drop ---------------------------------------------------------------
      *
@@ -206,11 +243,20 @@ private:
      * "search here" would be the only thing a search could do once a folder was open - and the
      * previous build could only search everywhere, so either one alone is a regression. */
     QComboBox *m_scope = nullptr;
+    /* The library's vocabulary as clickable chips, under the toolbar controls. Absent while the
+     * library holds no tags, which is why it is hidden at construction. */
+    TagFilterBar *m_tagBar = nullptr;
     QLabel *m_status = nullptr;
     QTimer *m_timer = nullptr;
     QStringList m_kinds;
     /* Set while the opt-in self-check mutation is in the watched folder, so it can be undone. */
     QString m_probe;
+    /* The store's file, and what it looked like at the last beat. An agent writes tags from another
+     * process, and nothing inside this one would otherwise know - so the beat stats the file (and
+     * its WAL, where a commit lands first) and a change buys one vocabulary re-read. */
+    QString m_storeFile;
+    qint64 m_storeStamp = -1;
+    static qint64 storeStamp(const QString &file);
     /* The two ends of the headless transfer, both remembered because a copy leaves a file at each of
      * them and the cleanup step has to undo both. */
     QString m_draggedFrom;

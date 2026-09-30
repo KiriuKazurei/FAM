@@ -2,6 +2,7 @@
 
 #include <QFontMetrics>
 #include <QIcon>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
@@ -18,6 +19,10 @@ namespace {
 constexpr int kIconSide = 16;
 constexpr int kIconGap = 10;
 /* Ant Design's Tag: 12px text, 7px of horizontal padding, a 4px radius, a hairline of its own. */
+/* The has-a-note dot: six pixels of the accent colour at the row's right edge. Presence of free
+ * text, not a label - which is why it is a dot and not a chip, and why it is the first field the
+ * ladder takes back. */
+constexpr int kNoteDot = 6;
 constexpr int kTagPadding = 7;
 constexpr int kTagHeight = 20;
 constexpr int kRightGap = 8;
@@ -82,6 +87,83 @@ RowDelegate::RowDelegate(const Theme *theme, const RowRoles &roles, QObject *par
 QSize RowDelegate::sizeHint(const QStyleOptionViewItem &, const QModelIndex &) const {
     return QSize(0, m_theme->tokens().rowHeight);
 }
+QString RowDelegate::kindOf(const QModelIndex &index, bool directory) const {
+    return directory ? QString() : index.data(m_roles.kind).toString();
+}
+
+QString RowDelegate::sizeOf(const QModelIndex &index, bool directory) const {
+    if (directory) {
+        /* A directory has no size to print. Its `size` field is zero because nothing wrote a byte
+         * count into it, and "0 B" on every folder is a row of the list saying something untrue. */
+        return QString();
+    }
+    const qint64 bytes = index.data(m_roles.size).toLongLong();
+    return bytes >= 0 ? m_roles.formatSize(static_cast<quint64>(bytes)) : QString();
+}
+
+RowDelegate::Layout RowDelegate::layoutRow(const QRect &ground, const QStringList &tags,
+                                            const QString &kind, const QString &size,
+                                            bool noted) const {
+    const Tokens &t = m_theme->tokens();
+    const QRect slot = cursorRect(ground);
+    const int cursor = slot.right() + 1 + kIconGap;
+    int boundary = ground.right() - t.sm;
+
+    QFontMetrics baseMetrics(m_theme->fontAt(t.fontBase));
+    const int sizeCost = size.isEmpty() ? 0 : baseMetrics.horizontalAdvance(size) + t.md;
+    const int kindCost = kind.isEmpty() ? 0 : chipWidth(kind) + kRightGap;
+    const int noteCost = noted ? kNoteDot + kRightGap : 0;
+
+    /* What the band would occupy and how many tags it would show, for a given set of fields drawn to
+     * its right. */
+    auto laidOut = [&](bool showKind, bool showSize, bool showNote, int *width) {
+        const int right = boundary - (showKind ? kindCost : 0) - (showSize ? sizeCost : 0)
+            - (showNote ? noteCost : 0);
+        int group = 0;
+        const int kept = tagsFitting(tags, cursor, right, &group);
+        *width = kept > 0 ? group + kNameTagGap : 0;
+        return kept;
+    };
+
+    bool showKind = !kind.isEmpty();
+    bool showSize = !size.isEmpty();
+    bool showNote = noted;
+    int band = 0;
+    int kept = laidOut(showKind, showSize, showNote, &band);
+    /* The ladder the fields right of the name climb down when the row runs out of room: the note dot
+     * first - it says free text exists somewhere, the weakest fact on the row - then the kind chip,
+     * because the glyph and the extension in the name already say what it says, then the size, because
+     * a number is read slower than a name. The name's floor is the promise the row keeps; a column
+     * narrower than that floor loses everything but the name rather than printing a row with no name in
+     * it - which is what a 150px column used to do to a file with a type chip. */
+    while (boundary - (showKind ? kindCost : 0) - (showSize ? sizeCost : 0)
+               - (showNote ? noteCost : 0) - band - cursor
+           < kNameFloor) {
+        if (showNote) {
+            showNote = false;
+        } else if (showKind) {
+            showKind = false;
+        } else if (showSize) {
+            showSize = false;
+        } else {
+            break;
+        }
+        kept = laidOut(showKind, showSize, showNote, &band);
+    }
+    /* The chip also yields when giving it up is all the tags were missing. A row with room for its name
+     * either way should still show every tag it has. */
+    if (showKind && kept < tags.size()) {
+        int wholeBand = 0;
+        if (laidOut(false, showSize, showNote, &wholeBand) == tags.size()) {
+            showKind = false;
+            band = wholeBand;
+            kept = tags.size();
+        }
+    }
+    const int right = boundary - (showKind ? kindCost : 0) - (showSize ? sizeCost : 0)
+        - (showNote ? noteCost : 0);
+    return Layout{cursor, right, kept, showKind, showSize, showNote};
+}
 
 int RowDelegate::chipWidth(const QString &text) const {
     const Tokens &t = m_theme->tokens();
@@ -111,6 +193,15 @@ int RowDelegate::paintTag(QPainter *painter, const QRect &row, const QString &te
     painter->setPen(t.textSecondary);
     painter->drawText(chip, Qt::AlignCenter, text);
     return chip.left() - kRightGap;
+}
+
+int RowDelegate::paintNoteMark(QPainter *painter, const QRect &row, int right) const {
+    const Tokens &t = m_theme->tokens();
+    const QRect dot(right - kNoteDot, row.center().y() - kNoteDot / 2, kNoteDot, kNoteDot);
+    painter->setPen(Qt::NoPen);
+    painter->setBrush(t.accentText);
+    painter->drawEllipse(dot);
+    return dot.left() - kRightGap;
 }
 
 int RowDelegate::tagBandWidth(const QStringList &tags) const {
@@ -225,101 +316,102 @@ void RowDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
     }
 
     const QString name = index.data(m_roles.name).toString();
-    const QString kind = directory ? QString() : index.data(m_roles.kind).toString();
+    const QString kind = kindOf(index, directory);
     const QStringList tags = index.data(m_roles.tags).toStringList();
-    const qint64 bytes = index.data(m_roles.size).toLongLong();
+    const QString size = sizeOf(index, directory);
 
     const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
-    const QRect slot(cursorRect(ground));
+    const QRect slot = cursorRect(ground);
     if (!icon.isNull()) {
         icon.paint(painter, slot, Qt::AlignCenter);
     } else {
         drawGlyph(painter, QRectF(slot), directory, t.textTertiary);
     }
-    int cursor = slot.right() + 1 + kIconGap;
 
-    /* Right to left, because the name is the thing that gives: the fields to its right keep their
-     * width, and the text is elided into what is left of it. */
+    const Layout layout =
+        layoutRow(ground, tags, kind, size, index.data(m_roles.hasNote).toBool());
+    QFontMetrics baseMetrics(m_theme->fontAt(t.fontBase));
     int boundary = ground.right() - t.sm;
 
-    QFontMetrics baseMetrics(m_theme->fontAt(t.fontBase));
-    /* A directory has no size to print. Its `size` field is zero because nothing wrote a byte count
-     * into it, and "0 B" on every folder is a row of the list saying something untrue. */
-    const QString size = (!directory && bytes >= 0)
-                             ? m_roles.formatSize(static_cast<quint64>(bytes))
-                             : QString();
-    const int sizeCost = size.isEmpty() ? 0 : baseMetrics.horizontalAdvance(size) + t.md;
-    const int kindCost = kind.isEmpty() ? 0 : chipWidth(kind) + kRightGap;
-
-    /* What the band would occupy and how many tags it would show, for a given set of fields drawn to
-     * its right. */
-    auto laidOut = [&](bool showKind, bool showSize, int *width) {
-        const int right = boundary - (showKind ? kindCost : 0) - (showSize ? sizeCost : 0);
-        int group = 0;
-        const int kept = tagsFitting(tags, cursor, right, &group);
-        *width = kept > 0 ? group + kNameTagGap : 0;
-        return kept;
-    };
-
-    bool showKind = !kind.isEmpty();
-    bool showSize = !size.isEmpty();
-    int band = 0;
-    int kept = laidOut(showKind, showSize, &band);
-    /* The ladder the fields right of the name climb down when the row runs out of room: the kind chip
-     * first, because the glyph and the extension in the name already say what it says, then the size,
-     * because a number is read slower than a name. The name's floor is the promise the row keeps; a
-     * column narrower than that floor loses everything but the name rather than printing a row with no
-     * name in it - which is what a 150px column used to do to a file with a type chip. */
-    while (boundary - (showKind ? kindCost : 0) - (showSize ? sizeCost : 0) - band - cursor
-           < kNameFloor) {
-        if (showKind) {
-            showKind = false;
-        } else if (showSize) {
-            showSize = false;
-        } else {
-            break;
-        }
-        kept = laidOut(showKind, showSize, &band);
+    if (layout.showNote) {
+        boundary = paintNoteMark(painter, ground, boundary);
     }
-    /* The chip also yields when giving it up is all the tags were missing. A row with room for its name
-     * either way should still show every tag it has. */
-    if (showKind && kept < tags.size()) {
-        int wholeBand = 0;
-        if (laidOut(false, showSize, &wholeBand) == tags.size()) {
-            showKind = false;
-            band = wholeBand;
-            kept = tags.size();
-        }
-    }
-
-    if (showKind) {
+    if (layout.showKind) {
         boundary = paintTag(painter, ground, kind, boundary);
     }
-    if (showSize) {
+    if (layout.showSize) {
         painter->setFont(m_theme->fontAt(t.fontBase));
         const QRect sizeRect(boundary - baseMetrics.horizontalAdvance(size), ground.top(),
                              baseMetrics.horizontalAdvance(size), ground.height());
         painter->setPen(t.textTertiary);
         painter->drawText(sizeRect, Qt::AlignVCenter | Qt::AlignLeft, size);
-        boundary -= sizeCost;
+        boundary -= baseMetrics.horizontalAdvance(size) + t.md;
     }
 
     /* The band is right-aligned against whatever survives to its right, so it ends in one of two
      * places on the screen - at the kind chip's left edge, or at the row's own margin where the chip
      * used to be. It is never ragged within one of those two: tags are the field here that varies in
      * number, and a field that varies in number reads as a column when its edge is aligned. */
-    boundary = paintTags(painter, ground, tags, cursor, boundary);
+    boundary = paintTags(painter, ground, tags, layout.cursor, boundary);
 
     /* The one weight difference in a row: a folder is somewhere you can go, so it carries the
      * demi-bold a Table gives its key column. */
     painter->setFont(m_theme->fontAt(t.fontBase, directory));
     QFontMetrics metrics(painter->font());
     painter->setPen(t.text);
-    const QRect nameRect(cursor, ground.top(), qMax(0, boundary - cursor), ground.height());
+    const QRect nameRect(layout.cursor, ground.top(), qMax(0, boundary - layout.cursor),
+                         ground.height());
     painter->drawText(nameRect, Qt::AlignVCenter | Qt::AlignLeft,
                       metrics.elidedText(name, Qt::ElideRight, nameRect.width()));
 
     painter->restore();
+}
+
+bool RowDelegate::editorEvent(QEvent *event, QAbstractItemModel *model,
+                              const QStyleOptionViewItem &option, const QModelIndex &index) {
+    if (event->type() == QEvent::MouseButtonRelease) {
+        const auto *release = static_cast<QMouseEvent *>(event);
+        if (release->button() == Qt::LeftButton) {
+            const QString tag = tagAt(option, index, release->position().toPoint());
+            if (!tag.isEmpty()) {
+                emit tagClicked(index, tag);
+                /* Consumed: the click was about the label, not about picking the row, and a
+                 * selection change the person never asked for is the kind of side effect that
+                 * makes a chip impossible to aim at. */
+                return true;
+            }
+        }
+    }
+    return QStyledItemDelegate::editorEvent(event, model, option, index);
+}
+
+QString RowDelegate::tagAt(const QStyleOptionViewItem &option, const QModelIndex &index,
+                           const QPoint &pos) const {
+    const Tokens &t = m_theme->tokens();
+    const bool directory = index.data(m_roles.directory).toBool();
+    const QStringList tags = index.data(m_roles.tags).toStringList();
+    if (tags.isEmpty()) {
+        return QString();
+    }
+    const QRect ground = option.rect.adjusted(t.xxs, 0, -t.xxs, 0);
+    const Layout layout =
+        layoutRow(ground, tags, kindOf(index, directory), sizeOf(index, directory),
+                  index.data(m_roles.hasNote).toBool());
+    if (layout.kept <= 0) {
+        return QString();
+    }
+    int group = 0;
+    tagsFitting(tags, layout.cursor, layout.right, &group);
+    int cursor = layout.right - group;
+    for (int chip = 0; chip < layout.kept; ++chip) {
+        const int width = chipWidth(tags.at(chip));
+        const QRect box(cursor, ground.center().y() - kTagHeight / 2, width, kTagHeight);
+        if (box.contains(pos)) {
+            return tags.at(chip);
+        }
+        cursor += width + kTagGap;
+    }
+    return QString();
 }
 
 QRect RowDelegate::cursorRect(const QRect &ground) const {

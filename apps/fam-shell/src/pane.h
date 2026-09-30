@@ -53,6 +53,9 @@ public:
     void invalidateTags() {
         chain->invalidateTags();
         model->invalidateTags();
+        /* The note marker is the same class of cache: a write from either face moves no row, so
+         * nothing else would notice. */
+        model->invalidateNotes();
     }
 
 signals:
@@ -64,6 +67,10 @@ signals:
     /* One of this pane's columns took a drop. Relayed straight from the chain, because the folder a
      * drop lands in is the column's own and the window only needs to know a transfer was asked for. */
     void dropped(const QString &folder, const QStringList &paths, bool copy);
+
+    /* A tag chip was clicked on this pane - in a column or in the results list. The window hears
+     * it once per pane, whichever half it came from. */
+    void tagActivated(const QString &path, const QString &tag);
 
 protected:
     /* Child views and their viewports swallow the press before a parent widget would see it, so the

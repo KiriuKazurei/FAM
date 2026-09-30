@@ -11,6 +11,8 @@ pub enum StoreError {
     InvalidTag { tag: String, reason: &'static str },
     #[error("no tag named {tag:?} on {}", .path.display())]
     NotFound { path: PathBuf, tag: String },
+    #[error("no tag named {0:?} in the library")]
+    TagNotFound(String),
     #[error("{} already has a tag named {tag:?}", .path.display())]
     Conflict { path: PathBuf, tag: String },
     #[error("unknown tag source {0:?}; expected manual or auto")]

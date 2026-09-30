@@ -526,3 +526,212 @@ CREATE INDEX tags_tag_source_idx ON tags(tag, source);
         Ok(_) => panic!("a v99 database opened; it should have been refused"),
     }
 }
+
+#[test]
+fn a_merge_moves_the_name_and_collapses_where_the_target_already_sat() {
+    let store = store();
+    let both = Path::new("D:/Library/a.pdf");
+    let other = Path::new("D:/Library/b.pdf");
+    store
+        .add_tags(both, &[NewTag::manual("pdf"), NewTag::manual("PDF")])
+        .unwrap();
+    store
+        .add_tags(other, &[NewTag::manual("pdf"), NewTag::auto("PDF")])
+        .unwrap();
+
+    let outcome = store.merge_tags("pdf", "PDF").unwrap();
+
+    // `a` already carried `PDF` from the same source, so its `pdf` row collapses into it; `b`'s
+    // `pdf` truly moves, and lands beside the auto `PDF` - the two-sources-one-name shape the
+    // shell's dialog has to draw, now produced by a real call rather than only by readers.
+    assert_eq!(
+        (outcome.moved, outcome.collapsed, outcome.files),
+        (1, 1, 2),
+        "{outcome:?}"
+    );
+    let on_a = store.tags_of(both, None).unwrap();
+    assert_eq!(
+        on_a.iter().map(|t| t.tag.as_str()).collect::<Vec<_>>(),
+        ["PDF"]
+    );
+    let on_b = store.tags_of(other, None).unwrap();
+    assert_eq!(
+        on_b.iter()
+            .map(|t| (t.tag.as_str(), t.source.as_str()))
+            .collect::<Vec<_>>(),
+        [("PDF", "manual"), ("PDF", "auto")]
+    );
+    assert!(store.vocabulary().unwrap().iter().all(|f| f.tag != "pdf"));
+}
+
+#[test]
+fn a_merge_of_an_unknown_or_invalid_name_is_an_error_not_a_silent_nothing() {
+    let store = store();
+    let file = Path::new("D:/Library/a.pdf");
+    store.add_tags(file, &[NewTag::manual("PDF")]).unwrap();
+
+    let error = store.merge_tags("pdf ", "PDF").unwrap_err();
+    assert!(
+        matches!(error, StoreError::InvalidTag { .. }),
+        "the target is validated like any tag text: {error:?}"
+    );
+    let error = store.merge_tags("pdf", "PDF").unwrap_err();
+    assert!(
+        matches!(error, StoreError::TagNotFound(ref name) if name == "pdf"),
+        "a typo merging onto a real name must not read as success: {error:?}"
+    );
+    let error = store.merge_tags("PDF", "PDF").unwrap_err();
+    assert!(matches!(error, StoreError::NothingToChange), "{error:?}");
+    assert_eq!(store.tags_of(file, None).unwrap().len(), 1, "nothing moved");
+}
+
+#[test]
+fn a_prune_counts_first_and_deletes_only_when_asked() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stays = dir.path().join("stays.txt");
+    let gone = dir.path().join("gone.txt");
+    std::fs::write(
+        &stays, "live
+",
+    )
+    .expect("the live file exists on disk");
+    std::fs::write(
+        &gone, "doomed
+",
+    )
+    .expect("the doomed file exists on disk");
+    let store = store();
+    store.add_tags(&stays, &[NewTag::manual("kept")]).unwrap();
+    store.set_note(&stays, "still here").unwrap();
+    store.add_tags(&gone, &[NewTag::manual("lost")]).unwrap();
+    store.set_note(&gone, "the note goes with it").unwrap();
+    std::fs::remove_file(&gone).expect("the file goes");
+
+    let dry = store.prune_missing(false).unwrap();
+    assert_eq!((dry.files, dry.tags, dry.notes), (1, 1, 1), "{dry:?}");
+    // A dry run counts and stops: the rows are all still there.
+    assert_eq!(store.stats().unwrap().files, 2);
+
+    let applied = store.prune_missing(true).unwrap();
+    assert_eq!((applied.files, applied.tags, applied.notes), (1, 1, 1));
+    assert_eq!(
+        store.stats().unwrap().files,
+        1,
+        "only the live path remains"
+    );
+    assert_eq!(store.stats().unwrap().tags, 1);
+    assert!(
+        store.note(&gone).unwrap().is_none(),
+        "the cascade took the note"
+    );
+    assert_eq!(
+        store.tags_of(&stays, None).unwrap().len(),
+        1,
+        "and the live file keeps its tag and its note"
+    );
+    assert_eq!(
+        store.note(&stays).unwrap().expect("note survives").body,
+        "still here"
+    );
+    // A second run finds nothing and deletes nothing.
+    let again = store.prune_missing(true).unwrap();
+    assert_eq!((again.files, again.tags, again.notes), (0, 0, 0));
+}
+
+#[test]
+fn a_v2_database_gains_the_covering_index_and_keeps_its_rows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("tags.db");
+    {
+        let store = TagStore::open(&file).expect("a v3 store opens");
+        store
+            .add_tags(Path::new("D:/Library/a.pdf"), &[NewTag::manual("kept")])
+            .unwrap();
+    }
+    {
+        // Rewound to v2 with the old index back in place - exactly what a database written by the
+        // previous build looks like.
+        let old = rusqlite::Connection::open(&file).expect("reopen as v2");
+        old.execute_batch(
+            "DROP INDEX IF EXISTS tags_tag_path_idx;
+             CREATE INDEX tags_tag_source_idx ON tags(tag, source);",
+        )
+        .expect("v2 index shape");
+        old.pragma_update(None, "user_version", 2_i64)
+            .expect("stamp v2");
+    }
+
+    let store = TagStore::open(&file).expect("the migration runs on open");
+    assert_eq!(
+        store
+            .tags_of(Path::new("D:/Library/a.pdf"), None)
+            .unwrap()
+            .len(),
+        1,
+        "the rows survive the re-index"
+    );
+    let (has_new, has_old) = {
+        let conn = store.connection();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'tags'")
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        (
+            names.iter().any(|name| name == "tags_tag_path_idx"),
+            names.iter().any(|name| name == "tags_tag_source_idx"),
+        )
+    };
+    assert!(has_new, "the covering index is created");
+    assert!(!has_old, "the index nothing used is gone");
+}
+
+#[test]
+fn the_tag_search_walks_the_covering_index_not_the_table() {
+    let store = store();
+    let file = Path::new("D:/Library/a.pdf");
+    store.add_tags(file, &[NewTag::manual("contract")]).unwrap();
+
+    let mut stmt = store
+        .connection()
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT f.path_norm, f.path FROM tags t \
+                  JOIN files f ON f.path_norm = t.path_norm WHERE t.tag IN ('contract')",
+        )
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let plan = plan.join("; ");
+    assert!(
+        plan.contains("tags_tag_path_idx"),
+        "the search must walk the covering index: {plan}"
+    );
+}
+
+#[test]
+fn has_notes_answers_which_paths_carry_one_and_nothing_for_the_rest() {
+    let store = store();
+    let noted = Path::new("D:/Library/with.txt");
+    let bare = Path::new("D:/Library/without.txt");
+    store.set_note(noted, "here").unwrap();
+    // A path that exists in `files` (a tag was set) but carries no note, and one the store has
+    // never heard of: all three shapes in one ask.
+    store.add_tags(bare, &[NewTag::manual("tag")]).unwrap();
+    let stranger = Path::new("D:/Library/stranger.txt");
+
+    let keys: Vec<String> = [noted, bare, stranger]
+        .iter()
+        .map(|p| fam_core::path_key(p))
+        .collect();
+    let found = store.has_notes(&keys).unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found.contains(&fam_core::path_key(noted)));
+    // Empty ask, empty answer - the shape a window with no rows asks.
+    assert!(store.has_notes(&[]).unwrap().is_empty());
+}

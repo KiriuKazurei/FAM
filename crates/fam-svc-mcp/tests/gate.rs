@@ -631,3 +631,141 @@ fn a_configuration_with_no_roots_is_answered_not_panicked() {
         "that answer did not come from the guard: {answer}"
     );
 }
+
+/// A tag query is answered from the library, under the same scope rules as a name query - and the
+/// library knows paths on every volume, which is exactly why the answer may not widen: a file
+/// somebody labelled outside every configured root is dropped by the router's scope, not served.
+/// The credential here covers every root there is, so the unscoped search is admitted at the gate;
+/// what keeps the outside row out is the scope check, not a refusal a narrower grant could bypass.
+#[test]
+fn a_tag_search_answers_inside_the_roots_and_not_beyond_them() {
+    let bench = Bench::at(Tier::Admin, &[Place::Wildcard]);
+    let mut server = bench.server();
+
+    // A file inside the granted root, labelled the way an agent labels: through the tool.
+    let (answer, failure) = call(
+        &mut server,
+        "tags_set",
+        json!({"path": spelled(&bench.inbox.join("alpha.txt")), "tags": ["contract"]}),
+    );
+    assert!(
+        !failure,
+        "the agent labels a file inside its roots: {answer}"
+    );
+
+    // ... and one outside every root, labelled the way only the person's own side could have - the
+    // agent cannot reach that path to label it, but the store it searches is shared with whoever can.
+    let elsewhere = tempfile::tempdir().expect("a folder outside every root");
+    let outside = elsewhere.path().join("leak-me.txt");
+    std::fs::write(&outside, "secret\n").expect("write the file that must not surface");
+    {
+        let store =
+            fam_svc_store::TagStore::open(&bench.config.database_path).expect("the store opens");
+        store
+            .add_tags(&outside, &[fam_svc_store::NewTag::manual("contract")])
+            .expect("the person's label is in the library");
+    }
+
+    let (answer, failure) = call(&mut server, "fs_search", json!({"query": "tag:contract"}));
+    assert!(!failure, "{answer}");
+    let paths: Vec<String> = answer["hits"]
+        .as_array()
+        .expect("an answer with hits")
+        .iter()
+        .filter_map(|hit| hit["path"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        paths.iter().any(|path| path.ends_with("alpha.txt")),
+        "the labelled file inside the roots is answered: {answer}"
+    );
+    assert!(
+        !paths.iter().any(|path| path.contains("leak-me")),
+        "a label cannot widen the roots: {answer}"
+    );
+    assert_eq!(
+        answer["provider"].as_str(),
+        Some("tags"),
+        "the library answered, not a name index: {answer}"
+    );
+}
+
+/// A merge is a write on the shared library, so the tier matrix is what stands at it - it names no
+/// path, so there is no workspace for the gate to ask about, and the read-only tier is refused
+/// before the store is touched at all. The answer is counts: never a path, which is why the tool
+/// can be allowed to span a library the caller may only partly see.
+#[test]
+fn a_merge_is_a_write_the_read_only_tier_cannot_ask_for() {
+    let browse = Bench::at(Tier::Browse, &[Place::Inbox]);
+    let mut server = browse.server();
+    let (answer, failure) = call(
+        &mut server,
+        "tags_merge",
+        json!({"from": "pdf", "into": "PDF"}),
+    );
+    assert!(failure, "a browse token merged tags: {answer}");
+    assert!(
+        answer["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot call tags_merge")),
+        "that refusal came from the tier, not the store: {answer}"
+    );
+
+    let edit = Bench::at(Tier::Edit, &[Place::Inbox]);
+    let mut server = edit.server();
+    let inbox_file = spelled(&edit.inbox.join("alpha.txt"));
+    let (answer, failure) = call(
+        &mut server,
+        "tags_set",
+        json!({"path": inbox_file, "tags": ["pdf"]}),
+    );
+    assert!(!failure, "{answer}");
+    let private_file = {
+        // A second file the credential was never granted, tagged the way only the person's own
+        // side tags things: the merge must reach it, because the library is shared, and say so in
+        // counts without naming it.
+        let path = edit.root.join("private").join("secret.txt");
+        std::fs::write(&path, "outside the grant\n").expect("write");
+        let store =
+            fam_svc_store::TagStore::open(&edit.config.database_path).expect("the store opens");
+        store
+            .add_tags(&path, &[fam_svc_store::NewTag::manual("pdf")])
+            .expect("the person's label is stored");
+        spelled(&path)
+    };
+
+    let (answer, failure) = call(
+        &mut server,
+        "tags_merge",
+        json!({"from": "pdf", "into": "PDF"}),
+    );
+    assert!(!failure, "{answer}");
+    assert_eq!(
+        answer["moved"].as_i64(),
+        Some(2),
+        "both rows moved: {answer}"
+    );
+    assert_eq!(answer["files"].as_i64(), Some(2));
+    let text = answer.to_string();
+    assert!(
+        !text.contains("secret"),
+        "the answer counts, it does not name paths: {text}"
+    );
+    let (answer, failure) = call(&mut server, "tags_get", json!({"path": private_file}));
+    assert!(
+        failure,
+        "the merge must not have made the path readable: {answer}"
+    );
+
+    let (answer, failure) = call(
+        &mut server,
+        "tags_merge",
+        json!({"from": "no-such-tag", "into": "PDF"}),
+    );
+    assert!(failure, "an unknown source name must be refused: {answer}");
+    assert!(
+        answer["error"]
+            .as_str()
+            .is_some_and(|m| m.contains("no tag named")),
+        "{answer}"
+    );
+}

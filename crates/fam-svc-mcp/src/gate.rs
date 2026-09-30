@@ -126,6 +126,20 @@ impl Gate {
         &self.roots
     }
 
+    /// The tier question alone, for the verbs that name no path and so never reach `admit`'s
+    /// later questions. `whoami` is held by every tier, so this had no caller until a no-path
+    /// write arrived - and a write is exactly the call that must not skip the only question
+    /// left to ask it.
+    pub fn admit_verb(&self, token: &Token, verb: Verb) -> Result<(), Refusal> {
+        if !token.allows(verb) {
+            return Err(Refusal::TierLacks {
+                verb: verb.name(),
+                tier: token.tier.name(),
+            });
+        }
+        Ok(())
+    }
+
     /// The four questions, in order. `Ok(())` means the call may go ahead on `path` as spelled.
     pub fn admit(&self, token: &Token, verb: Verb, path: &Path) -> Result<(), Refusal> {
         if !token.allows(verb) {

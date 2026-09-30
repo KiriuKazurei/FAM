@@ -24,6 +24,10 @@ Pane::Pane(FamBridge *bridge, IconCache *icons, const QStringList &kinds, QWidge
                                   QHash<QString, QStringList> *tags, QString *error) {
         return bridge->tagsForPaths(paths, tags, error);
     });
+    model->setNoteFetcher([bridge](const QStringList &paths, QSet<QString> *noted,
+                                   QString *error) {
+        return bridge->notesForPaths(paths, noted, error);
+    });
 
     results = new FileView(this);
     results->setObjectName(QString::fromLatin1(Theme::listName()));
@@ -34,7 +38,9 @@ Pane::Pane(FamBridge *bridge, IconCache *icons, const QStringList &kinds, QWidge
     /* The delegate paints its own ground, so hover only arrives if the view is told to track it -
      * and a row that cannot show its hover state is a row whose selected state is the only feedback
      * about where the cursor is. */
-    results->setItemDelegate(new RowDelegate(&Theme::instance(), kFamRowRoles, results));
+    auto *rowDelegate = new RowDelegate(&Theme::instance(), kFamRowRoles, results);
+    results->setItemDelegate(rowDelegate);
+    connect(rowDelegate, &RowDelegate::tagClicked, results, &FileView::relayTagClick);
     results->setMouseTracking(true);
     results->viewport()->setAttribute(Qt::WA_Hover, true);
     /* Left a source-only FileView: no folder is named for it, so a drop that lands here is refused at
@@ -45,6 +51,8 @@ Pane::Pane(FamBridge *bridge, IconCache *icons, const QStringList &kinds, QWidge
     pages->addWidget(results);
 
     QObject::connect(chain, &ColumnChain::dropped, this, &Pane::dropped);
+    QObject::connect(chain, &ColumnChain::tagActivated, this, &Pane::tagActivated);
+    QObject::connect(results, &FileView::tagActivated, this, &Pane::tagActivated);
 
     /* The pane needs a layout of its own. Without one, `pages` is a child that keeps whatever
      * geometry it was born with, and the window can hand this pane half the screen while the listing

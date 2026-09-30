@@ -66,6 +66,7 @@ impl Tier {
                     | Verb::FsMove
                     | Verb::TagsSet
                     | Verb::TagsRemove
+                    | Verb::TagsMerge
                     | Verb::NoteSet
                     | Verb::NoteClear
             ),
@@ -83,6 +84,7 @@ impl Tier {
                     | Verb::FsMove
                     | Verb::TagsSet
                     | Verb::TagsRemove
+                    | Verb::TagsMerge
                     | Verb::NoteSet
                     | Verb::NoteClear
             ),
@@ -159,6 +161,7 @@ mod tests {
                 Verb::FsMove,
                 Verb::TagsSet,
                 Verb::TagsRemove,
+                Verb::TagsMerge,
                 Verb::NoteSet,
                 Verb::NoteClear,
             ],
@@ -176,6 +179,7 @@ mod tests {
                 Verb::FsMove,
                 Verb::TagsSet,
                 Verb::TagsRemove,
+                Verb::TagsMerge,
                 Verb::NoteSet,
                 Verb::NoteClear,
             ],

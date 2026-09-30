@@ -3,8 +3,9 @@ use std::fs;
 use std::path::Path;
 
 use famcore::{
-    fam_abi_version, fam_core_free, fam_core_new, fam_dir_close, fam_find, fam_free_string,
-    fam_stats, fam_tag_add, fam_tag_list, fam_tag_remove, FamCore,
+    fam_abi_version, fam_core_free, fam_core_new, fam_dir_close, fam_free_string, fam_note_clear,
+    fam_note_get, fam_note_set, fam_notes_for_paths, fam_stats, fam_tag_add, fam_tag_list,
+    fam_tag_merge, fam_tag_remove, fam_tag_rename, FamCore,
 };
 use serde_json::Value;
 
@@ -269,67 +270,287 @@ fn malformed_tag_payloads_are_rejected_with_a_message() {
 }
 
 #[test]
-fn find_returns_paths_with_their_tags() {
+fn merge_moves_a_name_everywhere_and_rename_moves_it_on_one_file() {
     let h = harness();
-    let first = text(h.tree.join("notes.txt").to_str().unwrap());
-    let second = text(h.tree.join("reports/q1-report.pdf").to_str().unwrap());
-    let mut out = Out::new();
+    let notes = text(h.tree.join("notes.txt").to_str().unwrap());
+    let report = text(h.tree.join("reports/q1-report.pdf").to_str().unwrap());
+    for (path, name) in [(&notes, "finance"), (&report, "finace")] {
+        let mut out = Out::new();
+        let tags = CString::new(format!("[\"{name}\"]")).unwrap();
+        let code = unsafe {
+            fam_tag_add(
+                h.core.handle(),
+                path.as_ptr(),
+                tags.as_ptr(),
+                std::ptr::null(),
+                0,
+                &mut out.value,
+                &mut out.error,
+            )
+        };
+        assert_eq!(code, 0, "{}", out.message());
+    }
+
+    // The typo leaves the library: the row truly moves, and the vocabulary has one name after.
+    let mut merged = Out::new();
+    let code = unsafe {
+        fam_tag_merge(
+            h.core.handle(),
+            text("finace").as_ptr(),
+            text("finance").as_ptr(),
+            &mut merged.value,
+            &mut merged.error,
+        )
+    };
+    assert_eq!(code, 0, "{}", merged.message());
+    let outcome = merged.ok();
+    assert_eq!(
+        (
+            outcome["moved"].as_i64(),
+            outcome["collapsed"].as_i64(),
+            outcome["files"].as_i64()
+        ),
+        (Some(1), Some(0), Some(2)),
+        "{outcome}"
+    );
+
+    // The same call onto a name the file already carries collapses rather than doubles.
+    let mut second = Out::new();
     unsafe {
         fam_tag_add(
             h.core.handle(),
-            first.as_ptr(),
+            report.as_ptr(),
             text(r#"["finance"]"#).as_ptr(),
             std::ptr::null(),
             0,
+            &mut second.value,
+            &mut second.error,
+        )
+    };
+    let mut collapse = Out::new();
+    let code = unsafe {
+        fam_tag_merge(
+            h.core.handle(),
+            text("finance").as_ptr(),
+            text("billing").as_ptr(),
+            &mut collapse.value,
+            &mut collapse.error,
+        )
+    };
+    assert_eq!(code, 0, "{}", collapse.message());
+    let outcome = collapse.ok();
+    assert_eq!(
+        (
+            outcome["moved"].as_i64(),
+            outcome["collapsed"].as_i64(),
+            outcome["files"].as_i64()
+        ),
+        (Some(2), Some(0), Some(2)),
+        "a rename across two files moves both rows: {outcome}"
+    );
+
+    // The per-file entry point touches one row on one path and leaves the other file's name alone.
+    let mut renamed = Out::new();
+    let code = unsafe {
+        fam_tag_rename(
+            h.core.handle(),
+            report.as_ptr(),
+            text("billing").as_ptr(),
+            text("q1").as_ptr(),
+            std::ptr::null(),
+            &mut renamed.value,
+            &mut renamed.error,
+        )
+    };
+    assert_eq!(code, 0, "{}", renamed.message());
+    let mut listed = Out::new();
+    unsafe {
+        fam_tag_list(
+            h.core.handle(),
+            report.as_ptr(),
+            &mut listed.value,
+            &mut listed.error,
+        )
+    };
+    let tags: Vec<String> = listed
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tag| tag["tag"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(tags, ["q1"], "only this file's name moved: {tags:?}");
+    let mut other = Out::new();
+    unsafe {
+        fam_tag_list(
+            h.core.handle(),
+            notes.as_ptr(),
+            &mut other.value,
+            &mut other.error,
+        )
+    };
+    let tags: Vec<String> = other
+        .ok()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tag| tag["tag"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(tags, ["billing"], "{tags:?}");
+
+    // A call that would change nothing is refused, not answered with success.
+    let mut nothing = Out::new();
+    let code = unsafe {
+        fam_tag_rename(
+            h.core.handle(),
+            report.as_ptr(),
+            text("q1").as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            &mut nothing.value,
+            &mut nothing.error,
+        )
+    };
+    assert_ne!(code, 0, "a rename with no target must be refused");
+}
+
+#[test]
+fn a_note_round_trips_and_a_blank_write_is_refused_not_read_as_a_clear() {
+    let h = harness();
+    let target = text(h.tree.join("notes.txt").to_str().unwrap());
+    let mut out = Out::new();
+    unsafe {
+        fam_note_get(
+            h.core.handle(),
+            target.as_ptr(),
             &mut out.value,
             &mut out.error,
         )
     };
-    let mut second_out = Out::new();
-    unsafe {
-        fam_tag_add(
+    assert_eq!(
+        out.ok()["body"],
+        Value::Null,
+        "no note yet is null, not an error"
+    );
+
+    let mut set = Out::new();
+    let set_code = unsafe {
+        fam_note_set(
             h.core.handle(),
-            second.as_ptr(),
-            text(r#"["finance","q1"]"#).as_ptr(),
-            std::ptr::null(),
-            0,
-            &mut second_out.value,
-            &mut second_out.error,
+            target.as_ptr(),
+            text("the port is 5900, not the one in the wiki").as_ptr(),
+            &mut set.value,
+            &mut set.error,
         )
     };
+    assert_eq!(set_code, 0, "{}", set.message());
 
-    let mut any = Out::new();
+    let mut back = Out::new();
+    unsafe {
+        fam_note_get(
+            h.core.handle(),
+            target.as_ptr(),
+            &mut back.value,
+            &mut back.error,
+        )
+    };
+    let note = back.ok();
+    assert_eq!(note["body"], "the port is 5900, not the one in the wiki");
+    assert!(note["updated_at"].is_string(), "{note}");
+
+    // A blank body is the store's refusal, spelled the same way an agent hears it - and the note
+    // that was there is still there, which is the whole point of refusing instead of clearing.
+    let mut blank = Out::new();
     let code = unsafe {
-        fam_find(
+        fam_note_set(
             h.core.handle(),
-            text(r#"["finance"]"#).as_ptr(),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            &mut any.value,
-            &mut any.error,
+            target.as_ptr(),
+            text("   ").as_ptr(),
+            &mut blank.value,
+            &mut blank.error,
         )
     };
-    assert_eq!(code, 0, "{}", any.message());
-    assert_eq!(any.ok().as_array().unwrap().len(), 2);
+    assert_ne!(code, 0, "a blank note must be refused");
+    assert!(
+        blank.message().contains("must say something"),
+        "{}",
+        blank.message()
+    );
 
-    let mut all = Out::new();
-    unsafe {
-        fam_find(
+    let mut cleared = Out::new();
+    let code = unsafe {
+        fam_note_clear(
             h.core.handle(),
-            text(r#"["finance","q1"]"#).as_ptr(),
-            1,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            &mut all.value,
-            &mut all.error,
+            target.as_ptr(),
+            &mut cleared.value,
+            &mut cleared.error,
         )
     };
-    let hits = all.ok();
-    assert_eq!(hits.as_array().unwrap().len(), 1);
-    assert!(hits[0]["path"].as_str().unwrap().ends_with("q1-report.pdf"));
+    assert_eq!(code, 0);
+    assert_eq!(cleared.ok()["cleared"], Value::Bool(true));
+    // The second clear says there was nothing - "cleared" and "was empty" stay two facts.
+    let mut again = Out::new();
+    unsafe {
+        fam_note_clear(
+            h.core.handle(),
+            target.as_ptr(),
+            &mut again.value,
+            &mut again.error,
+        )
+    };
+    assert_eq!(again.ok()["cleared"], Value::Bool(false));
+
+    // The batch read: a window of two paths, one carrying a note - keyed by the caller's own
+    // spelling, the other absent rather than present with a false, and an empty window answered
+    // with an empty object because a shell really asks that.
+    let mut seeded = Out::new();
+    let seed_code = unsafe {
+        fam_note_set(
+            h.core.handle(),
+            target.as_ptr(),
+            text("noted").as_ptr(),
+            &mut seeded.value,
+            &mut seeded.error,
+        )
+    };
+    assert_eq!(seed_code, 0, "{}", seeded.message());
+    let mut batch = Out::new();
+    let code = unsafe {
+        fam_notes_for_paths(
+            h.core.handle(),
+            text(&format!(
+                "[\"{}\", \"{}\"]",
+                toml_path(&h.tree.join("notes.txt")),
+                toml_path(&h.tree.join("reports"))
+            ))
+            .as_ptr(),
+            &mut batch.value,
+            &mut batch.error,
+        )
+    };
+    assert_eq!(code, 0, "{}", batch.message());
+    let noted = batch.ok();
+    assert_eq!(
+        noted.as_object().unwrap().len(),
+        1,
+        "only the noted path is in the answer: {noted}"
+    );
+    assert_eq!(
+        noted[toml_path(&h.tree.join("notes.txt"))],
+        Value::Bool(true)
+    );
+
+    let mut empty = Out::new();
+    let code = unsafe {
+        fam_notes_for_paths(
+            h.core.handle(),
+            text("[]").as_ptr(),
+            &mut empty.value,
+            &mut empty.error,
+        )
+    };
+    assert_eq!(code, 0);
+    assert!(empty.ok().as_object().unwrap().is_empty());
 }
 
 #[test]

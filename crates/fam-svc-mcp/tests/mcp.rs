@@ -19,7 +19,7 @@ fn path_string_local(path: &std::path::Path) -> String {
 }
 
 /// The names a client sees, in the order the table declares them.
-const NAMES: [&str; 14] = [
+const NAMES: [&str; 15] = [
     "fs_list",
     "fs_read",
     "fs_search",
@@ -30,6 +30,7 @@ const NAMES: [&str; 14] = [
     "tags_get",
     "tags_set",
     "tags_remove",
+    "tags_merge",
     "note_get",
     "note_set",
     "note_clear",

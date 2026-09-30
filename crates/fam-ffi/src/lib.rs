@@ -29,7 +29,7 @@ use fam_core::{Config, Order, PathKey, SearchRequest as NameRequest, SortKey};
 use fam_sched::{spawn, SchedulerConfig};
 use fam_svc_audit::{Actor, AuditLog, Draft, Op, Options as AuditOptions};
 use fam_svc_index::DirIndex;
-use fam_svc_store::{NewTag, SearchRequest, Source, TagStore};
+use fam_svc_store::{NewTag, Source, TagSearch, TagStore};
 use fam_svc_walk::Kind;
 use serde::Serialize;
 
@@ -63,7 +63,11 @@ const MAX_SEARCH_LIMIT: u32 = 20_000;
 
 pub struct FamCore {
     config: Config,
-    store: Mutex<TagStore>,
+    /// Shared with the tag search backend, which is a reader of this store on the search thread while
+    /// the GUI thread writes through it. A mutex rather than a per-thread handle because SQLite is
+    /// opened once, and locked per query rather than per search so a thousand `metadata` calls never
+    /// hold up a `Tags…` dialog.
+    store: Arc<Mutex<TagStore>>,
     /// Events discarded since the pipeline started, read by a v2 view against the baseline it was
     /// opened with. Nothing ever resets it: the only thing that makes a loss stop matter is a
     /// completed re-read, and that moves the view's baseline rather than this count.
@@ -140,12 +144,6 @@ struct TagOut {
     source: String,
     priority: i32,
     created_at: String,
-}
-
-#[derive(Serialize)]
-struct FileTagsOut {
-    path: String,
-    tags: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -251,7 +249,9 @@ impl FamCore {
                 config.audit_dir.display()
             )
         })?;
-        let store = TagStore::open(&config.database_path).map_err(|error| error.to_string())?;
+        let store = Arc::new(Mutex::new(
+            TagStore::open(&config.database_path).map_err(|error| error.to_string())?,
+        ));
         let losses = Arc::new(AtomicU64::new(0));
         let index = DirIndex::with_budget_bytes(config.cache_budget_bytes());
         let v2 = Views::new();
@@ -284,7 +284,13 @@ impl FamCore {
                 ask_for_read(&sink_index, &sink_queue, &delta.dir);
             }
         };
-        let router = Arc::new(SearchRouter::from_config(&config));
+        // The product's own backends, plus the tag store as one of them: a search that names a tag is
+        // answered by the library rather than by the filesystem, and its rows arrive in the same shape,
+        // which is what lets the shell show a tag hit as an ordinary file row.
+        let router = Arc::new(
+            SearchRouter::from_config(&config)
+                .with_provider(Box::new(TagSearch::new(Arc::clone(&store)))),
+        );
         let searches = Searches::start(Arc::clone(&router));
 
         let pipeline = Arc::new(Mutex::new(
@@ -301,7 +307,7 @@ impl FamCore {
         );
         Ok(Self {
             config,
-            store: Mutex::new(store),
+            store,
             losses,
             index,
             v2,
@@ -519,37 +525,97 @@ impl FamCore {
         Ok(format!("{{\"removed\":{removed}}}"))
     }
 
-    fn find(
+    /// Renames a label across the whole library, collapsing duplicates as it goes. This is the
+    /// operation the store calls a merge, and it is deliberately one operation rather than two:
+    /// "rename" is what a merge looks like when the target name has no rows yet, and a caller that
+    /// wanted them split would have to keep the difference alive in every face.
+    fn tag_merge(&self, from: &str, into: &str) -> Result<String, String> {
+        let outcome = self
+            .store()
+            .merge_tags(from, into)
+            .map_err(|error| error.to_string())?;
+        Ok(format!(
+            "{{\"moved\":{},\"collapsed\":{},\"files\":{}}}",
+            outcome.moved, outcome.collapsed, outcome.files
+        ))
+    }
+
+    /// Which of a window of paths carries a note - the batch read a row's "has a note" marker is
+    /// drawn from, keyed by the caller's spelling and absent for paths with nothing. The shape is
+    /// `fam_tags_for_paths`'s exactly, and for the same reason: the caller never reproduces
+    /// `path_norm`. An empty window is an empty answer, which is what a shell asks while it opens
+    /// an empty folder.
+    fn notes_for_paths(&self, paths_json: &str) -> Result<String, String> {
+        let paths = parse_paths(paths_json)?;
+        let store = self.store();
+        let keys: Vec<String> = paths
+            .iter()
+            .map(|path| fam_core::path_key(Path::new(path)))
+            .collect();
+        let noted = store.has_notes(&keys).map_err(|error| error.to_string())?;
+        let mut answered: HashMap<String, bool> = HashMap::new();
+        for (path, key) in paths.into_iter().zip(keys) {
+            if noted.contains(&key) {
+                answered.insert(path, true);
+            }
+        }
+        serde_json::to_string(&answered).map_err(|error| error.to_string())
+    }
+
+    /// The note on one path, or `{"body": null}` when there is none - the shape a dialog wants,
+    /// where "empty" and "absent" are the same fact and neither is an error.
+    fn note_get(&self, path: &Path) -> Result<String, String> {
+        let store = self.store();
+        let found = store.note(path).map_err(|error| error.to_string())?;
+        match found {
+            Some(record) => serde_json::to_string(&serde_json::json!({
+                "body": record.body,
+                "updated_at": record.updated_at,
+            }))
+            .map_err(|error| error.to_string()),
+            None => Ok("{\"body\":null}".to_string()),
+        }
+    }
+
+    /// Writes the note, replacing whatever was there. The store's own rules arrive as their
+    /// sentences: over-long is `note.set`'s refusal, and a blank body is refused rather than read
+    /// as a clear - the caller has `note_clear` for that, and a tool that deletes when handed
+    /// nothing is a tool that loses a note over one dropped argument.
+    fn note_set(&self, path: &Path, body: &str) -> Result<String, String> {
+        self.store()
+            .set_note(path, body)
+            .map_err(|error| error.to_string())?;
+        Ok("{\"set\":true}".to_string())
+    }
+
+    fn note_clear(&self, path: &Path) -> Result<String, String> {
+        let removed = self
+            .store()
+            .clear_note(path)
+            .map_err(|error| error.to_string())?;
+        Ok(format!("{{\"cleared\":{removed}}}"))
+    }
+
+    /// Renames one label on one file - the per-file operation a tag dialog offers, which keeps the
+    /// file's other tags and the tag's other files exactly where they are. `to` or `source` may be
+    /// absent to leave that field alone; both absent is refused, because a call that changes
+    /// nothing is a bug wearing a request's clothes.
+    fn tag_rename(
         &self,
-        tags_json: &str,
-        match_all: bool,
-        within: Option<&Path>,
+        path: &Path,
+        from: &str,
+        to: Option<&str>,
         source: Option<&str>,
-        limit: Option<usize>,
     ) -> Result<String, String> {
-        let tags = parse_tags(tags_json)?;
         let source = source
             .map(Source::parse)
             .transpose()
             .map_err(|e| e.to_string())?;
-        let request = SearchRequest {
-            tags,
-            match_all,
-            source,
-            within: within.map(PathBuf::from),
-            limit,
-            offset: None,
-        };
-        let store = self.store();
-        let hits = store.search(&request).map_err(|error| error.to_string())?;
-        let files: Vec<FileTagsOut> = hits
-            .iter()
-            .map(|hit| FileTagsOut {
-                path: hit.path.display().to_string(),
-                tags: hit.tags.iter().map(|record| record.tag.clone()).collect(),
-            })
-            .collect();
-        serde_json::to_string(&files).map_err(|error| error.to_string())
+        self.store()
+            .rename_tag(path, from, to, source)
+            .map_err(|error| error.to_string())?;
+        // The store has already refused a no-op and a miss; by here exactly one row changed.
+        Ok("{\"renamed\":1}".to_string())
     }
 
     // ---- v2: directory views, bounded fetch, and the delta poll -----------------------------
@@ -1338,32 +1404,121 @@ pub unsafe extern "C" fn fam_tag_remove(
     })
 }
 
+/// Renames a label **everywhere** - both sources, every file - collapsing the rows that land on an
+/// identity the target already holds. One call, because a rename and a merge are the same operation
+/// seen from two distances: with nothing yet named `into` this is a rename, and with rows already
+/// there it is the merge that turns `pdf` and `PDF` back into one name. The answer says which
+/// happened: `moved` rows changed their name, `collapsed` died as duplicates, `files` counts what
+/// carries the target name now.
 #[no_mangle]
-pub unsafe extern "C" fn fam_find(
+pub unsafe extern "C" fn fam_tag_merge(
     core: *mut FamCore,
-    tags_json: *const c_char,
-    match_all: c_int,
-    within: *const c_char,
-    source: *const c_char,
-    limit: u32,
+    from: *const c_char,
+    into: *const c_char,
     out: *mut *mut c_char,
     err: *mut *mut c_char,
 ) -> c_int {
-    with_core(core, Call::new(Op::TagFind), out, err, |borrow, call| {
-        let tags = required_str(tags_json, "tags")?;
-        let within = arg_str(within)?;
+    with_core(core, Call::new(Op::TagMerge), out, err, |borrow, call| {
+        let from = required_str(from, "from")?;
+        let into = required_str(into, "into")?;
+        call.says(format!("from={from} into={into}"));
+        borrow.tag_merge(from, into)
+    })
+}
+
+/// Renames one label on one file. `to` and `source` are each optional; passing neither is refused -
+/// the store answers `nothing to change`, which is the sentence a call that would do nothing
+/// deserves.
+#[no_mangle]
+pub unsafe extern "C" fn fam_tag_rename(
+    core: *mut FamCore,
+    path: *const c_char,
+    from: *const c_char,
+    to: *const c_char,
+    source: *const c_char,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, Call::new(Op::TagRename), out, err, |borrow, call| {
+        let path = required_str(path, "path")?;
+        let from = required_str(from, "from")?;
+        let to = arg_str(to)?;
         let source = arg_str(source)?;
-        let limit = (limit > 0).then_some(limit as usize);
-        if let Some(within) = within {
-            call.names(within);
-        }
-        call.says(format!(
-            "tags={tags} all={} source={} limit={}",
-            match_all != 0,
-            source.unwrap_or("-"),
-            limit.unwrap_or(0)
+        call.names(path).says(format!(
+            "from={from} to={} source={}",
+            to.unwrap_or("-"),
+            source.unwrap_or("-")
         ));
-        borrow.find(tags, match_all != 0, within.map(Path::new), source, limit)
+        borrow.tag_rename(Path::new(path), from, to, source)
+    })
+}
+
+/// Which paths of a window carry a note: `{"<path>":true}` for the ones that do, keys spelled as
+/// the caller spelled them, absent keys meaning "no note" - the twin of `fam_tags_for_paths`, and
+/// a heartbeat like it: a listing asks this of its window on the shell's poll beat, so
+/// `note.fetch` never reaches the audit trail, and an empty window is an empty answer rather than
+/// an error.
+#[no_mangle]
+pub unsafe extern "C" fn fam_notes_for_paths(
+    core: *mut FamCore,
+    paths_json: *const c_char,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, Call::new(Op::NoteFetch), out, err, |borrow, _| {
+        let paths_json = required_str(paths_json, "paths")?;
+        borrow.notes_for_paths(paths_json)
+    })
+}
+
+/// The free-text note beside one path - or `{"body":null}` when there is none. A note is not a tag
+/// and never enters the directory index, so this call on the exact path is the only way to read one
+/// back; that is what keeps "what did anyone see" answerable from the audit trail alone.
+#[no_mangle]
+pub unsafe extern "C" fn fam_note_get(
+    core: *mut FamCore,
+    path: *const c_char,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, Call::new(Op::NoteGet), out, err, |borrow, call| {
+        let path = required_str(path, "path")?;
+        call.names(path);
+        borrow.note_get(Path::new(path))
+    })
+}
+
+/// Writes the note on a path, replacing whatever was there. Blank is refused - `fam_note_clear`
+/// exists, and the store refuses to read an empty body as "delete it for me".
+#[no_mangle]
+pub unsafe extern "C" fn fam_note_set(
+    core: *mut FamCore,
+    path: *const c_char,
+    body: *const c_char,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, Call::new(Op::NoteSet), out, err, |borrow, call| {
+        let path = required_str(path, "path")?;
+        let body = required_str(body, "body")?;
+        call.names(path).says(format!("bytes={}", body.len()));
+        borrow.note_set(Path::new(path), body)
+    })
+}
+
+/// Drops the note. The answer says whether there was one, so "cleared" and "there was nothing"
+/// stay two facts.
+#[no_mangle]
+pub unsafe extern "C" fn fam_note_clear(
+    core: *mut FamCore,
+    path: *const c_char,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, Call::new(Op::NoteClear), out, err, |borrow, call| {
+        let path = required_str(path, "path")?;
+        call.names(path);
+        borrow.note_clear(Path::new(path))
     })
 }
 

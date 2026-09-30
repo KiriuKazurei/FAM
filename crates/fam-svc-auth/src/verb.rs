@@ -36,6 +36,10 @@ pub enum Verb {
     TagsSet,
     /// Take one off.
     TagsRemove,
+    /// Rename a label across the whole library, collapsing duplicates into the target name. Names
+    /// no path, so like `whoami` it carries no workspace check - and unlike `whoami` it is a write,
+    /// so the tier matrix keeps it out of the read-only hands.
+    TagsMerge,
     /// The free-text note attached to a path, which is not a tag and never appears in a tag list.
     NoteGet,
     NoteSet,
@@ -59,6 +63,7 @@ impl Verb {
         Verb::TagsGet,
         Verb::TagsSet,
         Verb::TagsRemove,
+        Verb::TagsMerge,
         Verb::NoteGet,
         Verb::NoteSet,
         Verb::NoteClear,
@@ -78,6 +83,7 @@ impl Verb {
             Self::TagsGet => "tags_get",
             Self::TagsSet => "tags_set",
             Self::TagsRemove => "tags_remove",
+            Self::TagsMerge => "tags_merge",
             Self::NoteGet => "note_get",
             Self::NoteSet => "note_set",
             Self::NoteClear => "note_clear",
@@ -92,7 +98,7 @@ impl Verb {
     /// Whether this verb is *about* a path. `whoami` is not: it answers with the caller's own
     /// credential, so there is nothing outside the token to scope.
     pub fn names_a_path(self) -> bool {
-        !matches!(self, Self::WhoAmI)
+        !matches!(self, Self::WhoAmI | Self::TagsMerge)
     }
 }
 
@@ -117,7 +123,7 @@ mod tests {
             "an invented verb is not accepted"
         );
         assert_eq!(Verb::parse(""), None);
-        assert_eq!(Verb::ALL.len(), 14);
+        assert_eq!(Verb::ALL.len(), 15);
     }
 
     /// The names an MCP caller must never be offered, in any spelling. This is the reverse test the
@@ -158,8 +164,11 @@ mod tests {
     #[test]
     fn only_identity_names_no_path() {
         assert!(!Verb::WhoAmI.names_a_path());
+        /* The merge is the second pathless verb, and it is a write: the tier question is the only
+         * one the gate can ask it, which is exactly why it must be answered. */
+        assert!(!Verb::TagsMerge.names_a_path());
         for verb in Verb::ALL {
-            if *verb == Verb::WhoAmI {
+            if *verb == Verb::WhoAmI || *verb == Verb::TagsMerge {
                 continue;
             }
             assert!(verb.names_a_path(), "{verb} is about a path");

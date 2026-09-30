@@ -46,10 +46,18 @@ public:
     void setDropFolder(const QString &folder);
     QString dropFolder() const { return m_folder; }
 
+    /* The relay one connect points at: the delegate reports a chip click by model index, and this
+     * turns it into the view's `tagActivated` by reading the path off its own model. Called from
+     * the two places a row delegate is installed (the column chain and the pane's results). */
+    void relayTagClick(const QModelIndex &index, const QString &tag);
+
 signals:
     /* A drop this view took: `folder` is the one it owns, `paths` what the drag carried, `copy`
      * whether Ctrl was held when it landed. */
     void dropped(const QString &folder, const QStringList &paths, bool copy);
+    /* A tag chip on one of this view's rows was clicked. `path` is the row's own, resolved here
+     * because the delegate knows the model index but not which model it came from. */
+    void tagActivated(const QString &path, const QString &tag);
 
 protected:
     void dragEnterEvent(QDragEnterEvent *event) override;

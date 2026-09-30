@@ -81,11 +81,14 @@ pub const TOOLS: &[ToolSpec] = &[
         name: "fs_search",
         description: "Search file names. Routed between the installed index and a recursive walk the \
                       same way the shell routes it, and the answer says which backend answered and \
-                      whether the answer is complete - a partial result is reported as partial.",
+                      whether the answer is complete - a partial result is reported as partial. A \
+                      word prefixed `tag:` names a label instead of part of a name; several of them \
+                      mean all of them, and they combine with name words. Tags are matched exactly, \
+                      so the case must be the one that was set.",
         schema: r#"{
   "type": "object",
   "properties": {
-    "query": {"type": "string", "description": "Words that must all appear in the name."},
+    "query": {"type": "string", "description": "Words that must all appear in the name; `tag:name` asks for files carrying that label instead."},
     "within": {"type": "string", "description": "Restrict to this subtree. It must be inside a granted workspace; it narrows the roots, it never widens them."},
     "kind": {"type": "string", "enum": ["directory", "image", "video", "audio", "document", "archive", "code", "executable", "other"]},
     "limit": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "Hits to return. Default 200."}
@@ -194,6 +197,20 @@ pub const TOOLS: &[ToolSpec] = &[
     "tags": {"type": "array", "items": {"type": "string"}}
   },
   "required": ["path"],
+  "additionalProperties": false
+}"#,
+    },
+    ToolSpec {
+        verb: Verb::TagsMerge,
+        name: "tags_merge",
+        description: "Rename a tag **across the whole library**: every file carrying `from` ends up                       carrying `into` instead, and where a file already has `into` from the same                       source the two rows collapse into one. Names no path, because the library is                       shared; the answer reports counts, never paths. An unknown `from` is an error,                       so a typo merging onto a real name cannot read as success.",
+        schema: r#"{
+  "type": "object",
+  "properties": {
+    "from": {"type": "string", "description": "The tag name to move every row off. Must exist."},
+    "into": {"type": "string", "description": "The name the rows take. Validated like any tag; equal to `from` is refused."}
+  },
+  "required": ["from", "into"],
   "additionalProperties": false
 }"#,
     },

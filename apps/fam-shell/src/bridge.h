@@ -5,7 +5,7 @@
 #include <QJsonValue>
 #include <QString>
 #include <QStringList>
-#include <QHash>
+#include <QSet>
 #include <QVector>
 #include <functional>
 
@@ -65,7 +65,10 @@ struct FamIpcCount {
      * action. Counted separately because `total()` mixing it in would make a folder that grew by one
      * row look like it grew by a store read. */
     int tagReads = 0;
-    int total() const { return headers + pages + polls + retries + tagReads; }
+    /* The note marker's read: same shape, same beat, its own number - so "a folder that grew by one
+     * row" and "a screen of note markers" stay distinguishable in the log. */
+    int noteReads = 0;
+    int total() const { return headers + pages + polls + retries + tagReads + noteReads; }
 };
 
 /* One tag name and how many files carry it, as the vocabulary read reports them - most used first.
@@ -133,8 +136,19 @@ public:
                 QJsonValue *result, QString *error);
     bool tagList(const QString &path, QJsonValue *result, QString *error);
     bool tagRemove(const QString &path, const QStringList &tags, QJsonValue *result, QString *error);
-    bool find(const QStringList &tags, bool matchAll, const QString &within, QJsonValue *result,
-              QString *error);
+    /* Renaming comes in two reaches, and both go through the store's one merge rule: a label on
+     * this file only, and a label across the whole library - which is what consolidating a
+     * duplicate (`pdf` beside `PDF`) is. */
+    bool tagRename(const QString &path, const QString &from, const QString &to, QJsonValue *result,
+                   QString *error);
+    bool tagMerge(const QString &from, const QString &into, QJsonValue *result, QString *error);
+
+    /* The free-text note beside a path: read, written whole, or dropped. A note is not a tag and
+     * never appears in a listing or a search; the store's rules (8 KiB, nothing blank) come back
+     * as their own sentences in `error`. */
+    bool noteGet(const QString &path, QJsonValue *result, QString *error);
+    bool noteSet(const QString &path, const QString &body, QJsonValue *result, QString *error);
+    bool noteClear(const QString &path, QJsonValue *result, QString *error);
 
     /* --- the two reads a listing needs to show tags ------------------------------------------
      *
@@ -146,6 +160,9 @@ public:
      * tag is absent from the result rather than present with an empty list, so "untagged" and "not
      * asked about" stay the same answer here as they are on the wire. */
     bool tagsForPaths(const QStringList &paths, QHash<QString, QStringList> *tags, QString *error);
+    /* Which of the named paths carry a note - the keys of the answer, not the bodies. Absent means
+     * "no note"; "not asked about" and "has no note" stay the same answer here as on the wire. */
+    bool notesForPaths(const QStringList &paths, QSet<QString> *noted, QString *error);
     /* Every tag name in the store, most used first. */
     bool tagVocabulary(QVector<TagFacet> *facets, QString *error);
 

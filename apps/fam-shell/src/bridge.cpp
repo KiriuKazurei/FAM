@@ -125,15 +125,78 @@ bool FamBridge::tagRemove(const QString &path, const QStringList &tags, QJsonVal
     return invoke(code, out, err, result, error);
 }
 
-bool FamBridge::find(const QStringList &tags, bool matchAll, const QString &within,
-                     QJsonValue *result, QString *error) {
-    const QByteArray utf8Tags = stringArrayJson(tags);
-    const QByteArray utf8Within = within.toUtf8();
+bool FamBridge::tagMerge(const QString &from, const QString &into, QJsonValue *result,
+                         QString *error) {
+    const QByteArray utf8From = from.toUtf8();
+    const QByteArray utf8Into = into.toUtf8();
     char *out = nullptr;
     char *err = nullptr;
-    const int code = fam_find(m_core, utf8Tags.constData(), matchAll ? 1 : 0,
-                              within.isEmpty() ? nullptr : utf8Within.constData(), nullptr, 0, &out,
-                              &err);
+    const int code =
+        fam_tag_merge(m_core, utf8From.constData(), utf8Into.constData(), &out, &err);
+    return invoke(code, out, err, result, error);
+}
+
+bool FamBridge::tagRename(const QString &path, const QString &from, const QString &to,
+                          QJsonValue *result, QString *error) {
+    const QByteArray utf8Path = path.toUtf8();
+    const QByteArray utf8From = from.toUtf8();
+    const QByteArray utf8To = to.toUtf8();
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_tag_rename(m_core, utf8Path.constData(), utf8From.constData(),
+                                    to.isEmpty() ? nullptr : utf8To.constData(), nullptr, &out,
+                                    &err);
+    return invoke(code, out, err, result, error);
+}
+
+bool FamBridge::notesForPaths(const QStringList &paths, QSet<QString> *noted, QString *error) {
+    noted->clear();
+    if (paths.isEmpty()) {
+        /* A window with nothing in it is a normal question with an empty answer, and it is not worth
+         * crossing the wire to ask. */
+        return true;
+    }
+    const QByteArray utf8Paths = stringArrayJson(paths);
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_notes_for_paths(m_core, utf8Paths.constData(), &out, &err);
+    ++m_ipc.noteReads;
+    QJsonValue result;
+    if (!invoke(code, out, err, &result, error)) {
+        return false;
+    }
+    const QJsonObject object = result.toObject();
+    for (auto entry = object.constBegin(); entry != object.constEnd(); ++entry) {
+        if (entry.value().toBool()) {
+            noted->insert(entry.key());
+        }
+    }
+    return true;
+}
+
+bool FamBridge::noteGet(const QString &path, QJsonValue *result, QString *error) {
+    const QByteArray utf8Path = path.toUtf8();
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_note_get(m_core, utf8Path.constData(), &out, &err);
+    return invoke(code, out, err, result, error);
+}
+
+bool FamBridge::noteSet(const QString &path, const QString &body, QJsonValue *result,
+                        QString *error) {
+    const QByteArray utf8Path = path.toUtf8();
+    const QByteArray utf8Body = body.toUtf8();
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_note_set(m_core, utf8Path.constData(), utf8Body.constData(), &out, &err);
+    return invoke(code, out, err, result, error);
+}
+
+bool FamBridge::noteClear(const QString &path, QJsonValue *result, QString *error) {
+    const QByteArray utf8Path = path.toUtf8();
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_note_clear(m_core, utf8Path.constData(), &out, &err);
     return invoke(code, out, err, result, error);
 }
 

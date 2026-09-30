@@ -238,10 +238,14 @@ QWidget *PreviewWindow::buildColumn(int index) {
     /* `Qt::UserRole` for the tags: this model has no tag store and answers nothing for that role, so
      * the row draws no chips. That is the seam doing its job - the sample and the product paint one
      * row painter over models that carry different fields. */
+    /* `Qt::UserRole` twice for tags and the note marker: this model has no tag store and answers
+     * nothing for either role, so the row draws no chips and no dot. That is the seam doing its
+     * job - the sample and the product paint one row painter over models that carry different
+     * fields. */
     view->setItemDelegate(new RowDelegate(&Theme::instance(),
                                                {PreviewModel::NameRole, PreviewModel::KindRole,
                                                 PreviewModel::SizeRole, PreviewModel::DirectoryRole,
-                                                Qt::UserRole, &preview::formatSize},
+                                                Qt::UserRole, Qt::UserRole, &preview::formatSize},
                                                view));
     /* Hover is a row state the delegate reads, and a view only tracks it when asked. */
     view->setMouseTracking(true);

@@ -26,6 +26,7 @@ use fam_svc_auth::Verb;
 use fam_svc_store::NewTag;
 use serde_json::json;
 
+use crate::proto::Request;
 use crate::server::{Server, ToolAnswer, MAX_FILE_BYTES};
 
 impl Server {
@@ -254,6 +255,35 @@ impl Server {
                 "removed": removed,
             })),
             Err(why) => ToolAnswer::error(format!("cannot remove tags: {why}")),
+        }
+    }
+
+    /// Renames a label across the whole library. The one tool in this family that names no path:
+    /// the library is shared between everyone who can write it, and the answer is counts rather
+    /// than paths, so there is no workspace for the gate to ask about - what stands between a
+    /// caller and this call is the tier, and `tags_merge` sits beside `tags_set` in the matrix,
+    /// out of the read-only hands.
+    pub(super) fn tags_merge(&mut self, request: &Request) -> ToolAnswer {
+        if let Err(why) = self.admit_verb(Verb::TagsMerge) {
+            return ToolAnswer::error(why);
+        }
+        let from = match request.string_param("from") {
+            Ok(from) => from,
+            Err(error) => return ToolAnswer::error(error.message),
+        };
+        let into = match request.string_param("into") {
+            Ok(into) => into,
+            Err(error) => return ToolAnswer::error(error.message),
+        };
+        match self.tags().merge_tags(&from, &into) {
+            Ok(outcome) => ToolAnswer::ok(json!({
+                "from": from,
+                "into": into,
+                "moved": outcome.moved,
+                "collapsed": outcome.collapsed,
+                "files": outcome.files,
+            })),
+            Err(why) => ToolAnswer::error(format!("cannot merge tags: {why}")),
         }
     }
 

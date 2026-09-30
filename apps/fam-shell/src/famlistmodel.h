@@ -3,7 +3,7 @@
 
 #include <QAbstractListModel>
 #include <QStringList>
-#include <QVector>
+#include <QSet>
 #include <functional>
 
 #include "bridge.h"
@@ -42,6 +42,9 @@ public:
         /* A `QStringList` of the tags this row's path carries, empty when it carries none. Appended
          * last because the numbers already on the wire are what a delegate is built against. */
         TagsRole,
+        /* `true` when the row's path carries a note, `false` otherwise. The same shape as tags: a
+         * paint never asks the store, so this is a cache read driven by the poll beat. */
+        HasNoteRole,
     };
 
     /* Fills `window` with rows [first, first + count) of the bound directory. Returns false when the
@@ -53,6 +56,11 @@ public:
     using TagFetcher =
         std::function<bool(const QStringList &paths, QHash<QString, QStringList> *tags,
                            QString *error)>;
+
+    /* The paths among a window that carry a note - the bridge's `notesForPaths`, bound by whoever
+     * owns the ABI. A path with no note is absent from `noted`. */
+    using NoteFetcher =
+        std::function<bool(const QStringList &paths, QSet<QString> *noted, QString *error)>;
 
     explicit FamListModel(QObject *parent = nullptr);
 
@@ -128,9 +136,27 @@ public:
      * 250ms either way, and the one that does not look like a broken row. */
     void invalidateTags();
 
+    /* The notes of the named paths, keyed by the caller's own spelling of each - the bridge's
+     * `notesForPaths`, bound by whoever owns the ABI. A path with no note is absent from `noted`. */
+    void setNoteFetcher(NoteFetcher fetch);
+
+    /* Reads the notes of the window currently materialised and repaints the rows whose answer moved.
+     * The same skip the tags read takes: a window that has not moved, is not overdue, and was not
+     * marked dirty costs nothing this beat. */
+    void refreshNotes();
+
+    /* Drops the skip: the next `refreshNotes` reads even if the window is the same one. A note edit
+     * through this process's own dialog is the case - it changes no row, so nothing else would
+     * notice. */
+    void invalidateNotes();
+
     quint32 totalRows() const { return m_total; }
     QString pathAt(int index) const;
     int count() const { return int(m_total); }
+    /* The row this path sits at, or -1. One lookup for the three callers that used to loop over
+     * `pathAt` by hand, and the seam the headless steps read instead of the loop they kept
+     * reinventing. */
+    int findRowOfPath(const QString &path) const;
 
     /* Test seam: how many rows the model has materialised right now. */
     int materialised() const { return m_rows.size(); }
@@ -177,6 +203,14 @@ private:
     int m_tagDue = 0;
     bool m_tagDirty = true;
 
+    /* The notes seam: the same shape as the tags seam. `m_notes` is the set of paths that carry a
+     * note, read for the window that was materialised when it was last asked. */
+    NoteFetcher m_noteFetch;
+    QSet<QString> m_notes;
+    QStringList m_notedPaths;
+    int m_noteDue = 0;
+    bool m_noteDirty = true;
+
     /* Painting is what triggers a fetch, so the window it fills is mutable state - rows the core
      * already served, never guesses about rows it did not. */
     mutable quint32 m_total = 0;
@@ -199,6 +233,7 @@ QString formatSize(quint64 bytes);
  * a kind in the other. */
 inline const RowRoles kFamRowRoles{FamListModel::NameRole,    FamListModel::KindRole,
                                    FamListModel::SizeRole,    FamListModel::DirectoryRole,
-                                   FamListModel::TagsRole,    &formatSize};
+                                   FamListModel::TagsRole,    FamListModel::HasNoteRole,
+                                   &formatSize};
 
 #endif /* FAMLISTMODEL_H */

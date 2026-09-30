@@ -144,6 +144,7 @@ mod tests {
         // A scope alone would be "everything under here", which is a listing, not a search.
         let scope_only = SearchRequest {
             terms: Vec::new(),
+            tags: Vec::new(),
             scope: Some(PathBuf::from("D:/Docs")),
             kind: None,
             limit: 0,

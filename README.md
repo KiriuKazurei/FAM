@@ -12,17 +12,17 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 | 位置 | 内容 |
 |---|---|
 | `crates/fam-core` | 配置与 Windows 路径归一（`path_key`） |
-| `crates/fam-svc-store` | SQLite 标签存储 + 按路径的备注（`tags` 与 `notes` 两张表，schema v2） |
+| `crates/fam-svc-store` | SQLite 标签存储 + 按路径的备注（`tags` 与 `notes` 两张表，schema v3：按名字的覆盖索引），标签搜索后端，跨库归并（`merge_tags`）与回收（`prune_missing`） |
 | `crates/fam-svc-enumerate` | 单层目录列举（Win32 后端 + 可取消、可超时的读者） |
 | `crates/fam-svc-walk` | 递归遍历，以及"遍历"这一个名字检索后端 |
 | `crates/fam-svc-audit` | 审计日志：追加式 JSONL、一天一文件、按会话串 SHA-256 哈希链 |
 | `crates/fam-svc-auth` | MCP 令牌的签发与判定：三等级 × 动词白名单、工作区路径范围、加盐摘要存储 |
-| `crates/fam-svc-mcp` | 给 agent 的那一面：JSON-RPC 2.0 分行协议、14 个工具、门（等级 → 范围 → 排除 → reparse） |
+| `crates/fam-svc-mcp` | 给 agent 的那一面：JSON-RPC 2.0 分行协议、15 个工具、门（等级 → 范围 → 排除 → reparse） |
 | `crates/fam-svc-fs` | 移动与复制的**唯一一份**实现：`transfer(from, to, Move\|Copy)`，规则（永不覆盖、目录不复制、跨卷目录不做）住在这里，agent 与人都撞同一句话 |
 | `crates/fam-svc-index` | 懒目录索引（定长表 + 缓存 + 按目录就地改行）、视图窗口，以及搜索后端的路由与范围规则 |
 | `crates/fam-svc-everything` | Everything 客户端：运行期绑定、状态探测、查询编译、按页取结果 |
 | `crates/fam-sched` | 监视事件 → 有界队列 → 批量合并的行变更 |
-| `crates/fam-ffi` | 对 C++ 暴露的 ABI（`famcore.dll`）：行是定长缓冲 + 窗口化，控制载荷（stats、标签、find、配置）是 JSON。v1 的视图与监视入口已在增量 9 删除 |
+| `crates/fam-ffi` | 对 C++ 暴露的 ABI（`famcore.dll`）：行是定长缓冲 + 窗口化，控制载荷（stats、标签、备注、配置）是 JSON，批量读（行上的标签芯片与备注记号的心跳）也在其上。v1 的视图与监视入口已在增量 9 删除，无人调用的 `fam_find` 已在增量 17d 收回 |
 | `crates/fam-bench` | 度量台与地板门槛 |
 | `apps/fam-cli` | `fam` 命令行（无头测试台） |
 | `apps/fam-mcp` | MCP stdio 服务器进程：读一行答一行，凭据只从 `FAM_MCP_TOKEN` 环境变量来 |
@@ -44,12 +44,33 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 列表按**名字**一行一条、把来源写在后面（`contract (manual, auto)`），
 因为 `fam_tag_remove` 删的是名字——连带所有来源；而名单为空时那句 SQL 会删掉这个文件的**全部**标签，
 所以"没选行"在操作层就被挡住，不会发出去。
+标签也**画在每一行上**：一条梯子让名字保住地板、标签带最多吃剩下的三分之二、放不下从右往左折成
+`+N`；填它的是拍子驱动的每列缓存，绘制路径上依旧一个查询都没有。
+**按标签搜由库作答**：搜索框里 `tag:名字`（可多个，与名字词可混用；标签逐字精确匹配）由标签库
+作为搜索后端回答，命中带着 size、mtime 与 kind 以普通行画出——名字索引不会被问标签，那道
+`handles_tags` 能力位在 `covers` 之前拦住它；agent 的 `fs_search` 与 `fam search` 走同一条路由，
+根外的标签命中过不了现成的 Scope。工具栏下面那条**词表筛选栏**是同一个库的另一个手势：
+一枚 chip 一个标签、写着有几份文件 carry 它，点下去就是那次搜索、再点一次回到文件夹——
+box 是查询唯一活着的地方，chip 写它、再从它读回自己的勾选态，库没有标签时整条收起。
+**行上的 chip 也点得动了**：命中测试与绘制共用同一份梯子几何，点了就搜那个标签。
+**备注在行上有记号**：带备注的文件在行右缘亮一枚 6px 的圆点（三种行底的最不利对比
+入表，17 对受门槛全过），拍子驱动的批量读填它——`fam_notes_for_paths` 是标签批量读的
+孪生契约，`note.fetch` 与 `tag.fetch` 同族不记账，IPC 日志里 `note=` 单独可数。
+**备注也到人这一面了**（agent 自增量 12 就能读写）：`Note…` 按钮打开一个自由文本对话框
+——不是标签、不进索引、不可搜索，8 KiB 按 UTF-8 计；空着保存会被拒（用 Clear 删除，
+store 拒绝把"空"读成"帮我删了"），第二次 Clear 如实说没有可清的。CLI 的
+`fam note get|set|clear` 与 agent 的三个工具答同一套句子。
+**改名与归并是一句话**：`fam tag merge <from> <into>`（agent 的 `tags_merge`、筛选栏
+chip 的右键菜单走同一个 store 操作）把一个名字的所有行移到目标名上，落在已占用身份上的
+行折叠——没有目标时它就是改名，有目标时它就是归并；对话框里的 `Rename selected` 只动
+这一个文件的一行。删除是两段式按钮：第一下亮出会删什么，第二下才删。`fam store prune`
+回收"路径已经不在"的 `files` 行（标签与备注跟着级联走），干跑是默认、`--write` 才落盘。
 样式是 Ant Design 5 的 token 集，**产品壳与设计基准共用同一份实现**（`apps/fam-ui`），
 渲染走 Fusion 而不是原生 Windows 样式——sheet 沉默处原生样式会自己画渐变与焦点环，与 token 打架。
 文件行由委托手绘：名字带 demi-bold、尺寸三级色、类型是 Tag 芯片，
 **文件夹不再印 `0 B`**（那字段的零是"没写"，不是"没有大小"）。
 可读性是量出来的不是抄来的：`Theme::contrastReport()` 现算 WCAG 比，
-壳的 `--self-check` 日志里就带着这张表（13 对受门槛、两处免除照点名）。
+壳的 `--self-check` 日志里就带着这张表（16 对受门槛、照测点名）。
 每一次被 core 回答的请求都会在审计日志里留下一行（追加式 JSONL，一天一文件，链按会话串），
 日志写不出来时 core 直接拒绝启动；而**读这份日志的路只有 CLI**——
 `fam audit tail|verify|stats`，`famcore.dll` 的导出表里没有任何读接口。
@@ -58,7 +79,7 @@ agent 的凭证已经在同一侧：**签发、撤销、轮换只有人手那条
 `fam mcp token add|list|revoke|rotate`），`fam-svc-auth` 不是 `fam-ffi` 的依赖，
 所以 ABI 面上不存在任何 token/permission/audit 的入口——不是运行时检测出来的，是链接期就没有这条路。
 给 agent 的那一面（`apps/fam-mcp`，stdio 上一行一条 JSON-RPC）今天真的存在了，
-它同样管不了凭据：14 个工具的名字是快照测试钉住的，
+它同样管不了凭据：15 个工具的名字是快照测试钉住的，
 `token` `grant` `revoke` `rotate` `audit` `config` `secret` `credential` `mcp` 这些词出现在
 任何一个名字里就会让测试红。三个等级是动词白名单而不是可以比较大小的阶梯，
 谁都不能越出自己那几个工作区目录；未解析的写法（带 `.` 或 `..`）一律算越界，
@@ -87,7 +108,10 @@ FAM_MCP_TOKEN=fam_xxxxxxxx_... \
 **没有 `--token` 这个旗标**：命令行上的令牌对本机每个进程可见（一行 `Get-CimInstance Win32_Process`
 就抄走了），环境变量只对这个进程可见。没有凭据时这个进程**拒绝启动**并且说清缺的是什么，
 而不是起一个"连不上"的服务；日志与那句拒绝都走 stderr，stdout 上只有协议。
-`docs/notes/mcp-server-four-questions-before-the-disk.md` 记着 14 个工具的边界、
+标签的逐增量账：`docs/notes/tags-were-write-only-in-the-shell.md`（16）、
+`tag-search-was-a-different-question.md`（17c）、`tag-debts-and-the-one-name-rule.md`（17d）、
+`notes-were-never-on-the-human-face.md`（18）；`docs/notes/mcp-server-four-questions-before-the-disk.md`
+记着工具的边界、
 每次请求的实测代价，以及没解决的那一串（没有 HTTP 传输、没有区间读、没有速率限制）。
 
 `famcore.dll` 必须用 GNU 工具链构建（Qt 侧是 MinGW kit，MSVC 版无法与之链接），
@@ -151,6 +175,13 @@ Debug 产物的体积记在账里：壳 125MB / 23 个文件，其中 `famcore.d
 "移动"与"复制"唯一可分辨的观测就是源文件还在不在。
 同一次跑还走一遍**标签往返**（读回 → 加 → 读回 → 试删空 → 删），并把那个对话框单独抓一张
 `<截图名>.tags.png`——线全绿不代表新表面吃到了主题，第一张图里它就没吃到。
+行上的 chip（`.rowtags.png`）与词表筛选栏（`.filter.png`）各有一张：筛选栏那一步把 chip
+**点到搜索结算、命中探针文件、再点一次回到文件夹**，随后一步**归并**（两枚 chip 进一枚出），
+对话框那一步走键盘（Return=add、Esc=关）与两段式删除（第一下不删），"一名两源"由两次
+真实的写读回成一行再改回，行上那枚 chip 会被一发**真的鼠标按下加释放**点到
+（落点由 delegate 自己的命中测试给出），备注走一遍**空起→写→读回→空写被拒→清→再清
+如实说没有**，行上的备注点随同一步**亮起又熄灭**（`marker: shown=1 gone=1`）——这些读数
+全 1 才算过。
 最后把图标提取/销毁计数与 IPC 调用计数打进日志，这两个计数就是"无 HICON 泄漏"和"轮询不贵"的读数形式。
 **进程中途被杀时这两个文件会留在你指给它的那棵树里**，名字都是 `fam-self-check-*.txt`。
 

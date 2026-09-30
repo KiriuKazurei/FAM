@@ -6,6 +6,7 @@
 mod error;
 mod model;
 mod notes;
+mod search;
 mod store;
 
 pub use error::StoreError;
@@ -14,4 +15,8 @@ pub use model::{
     MAX_TAG_CHARS,
 };
 pub use notes::{NoteRecord, MAX_NOTE_BYTES};
-pub use store::{AddOutcome, StoreStats, TagStore, DEFAULT_SEARCH_LIMIT, SCHEMA_VERSION};
+pub use search::TagSearch;
+pub use store::{
+    AddOutcome, MergeOutcome, PruneOutcome, StoreStats, TagStore, DEFAULT_SEARCH_LIMIT,
+    SCHEMA_VERSION,
+};

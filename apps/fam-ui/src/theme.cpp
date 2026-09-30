@@ -140,6 +140,17 @@ QLineEdit:disabled, QComboBox:disabled {
     background: {{fillAlter}};
     border-color: {{borderSecondary}};
 }
+QTextEdit#noteEditor {
+    background: {{bgContainer}};
+    border: 1px solid {{border}};
+    border-radius: {{radius}}px;
+    padding: {{sm}}px;
+    color: {{text}};
+    selection-background-color: {{primary}};
+    selection-color: #ffffff;
+}
+QTextEdit#noteEditor:hover { border-color: {{primaryHover}}; }
+QTextEdit#noteEditor:focus { border-color: {{primary}}; }
 QLineEdit#searchInput {
     padding-left: {{md}}px;
     min-width: 260px;
@@ -202,6 +213,26 @@ QPushButton#toggleButton:checked {
 }
 QPushButton#toggleButton:checked:hover { border-color: {{primaryHover}}; }
 QPushButton#toggleButton:checked:pressed { border-color: {{primaryActive}}; }
+/* The vocabulary strip's chips. Unchecked is an outline control in the metadata colour; checked is
+ * exactly what a row's tag chip wears - the brand's preset Tag over the container - so the same
+ * label reads as the same thing in both places, and the contrast pairs are the ones already
+ * reported (标签文字/标签底 for the checked ground, 次级文字/容器 for the unchecked one). */
+QPushButton#tagChip {
+    height: {{control}}px;
+    padding: 0px {{sm}}px;
+    background: {{bgContainer}};
+    border: 1px solid {{borderSecondary}};
+    border-radius: {{radiusSM}}px;
+    color: {{textSecondary}};
+    font-weight: 400;
+}
+QPushButton#tagChip:hover { color: {{accentText}}; border-color: {{primaryHover}}; }
+QPushButton#tagChip:checked {
+    background: {{primaryBg}};
+    border-color: {{tagBorder}};
+    color: {{accentText}};
+    font-weight: 500;
+}
 QPushButton#primaryButton {
     background: {{primarySolid}};
     border-color: {{primarySolid}};
@@ -259,6 +290,26 @@ QPushButton#iconButton:hover {
     border-color: transparent;
 }
 QPushButton#iconButton:pressed { color: {{accentText}}; background: {{fillSecondary}}; }
+
+/* ---- menus -----------------------------------------------------------
+   The one popup this shell builds itself: a chip's right-click merge menu. Left to Fusion it would
+   take the desktop's colours - the same way an unnamed QDialog did, which is the lesson the tag
+   dialog's first screenshot taught. */
+QMenu#tagChipMenu {
+    background: {{bgElevated}};
+    color: {{text}};
+    border: 1px solid {{borderSecondary}};
+    border-radius: {{radius}}px;
+    padding: {{xxs}}px;
+}
+QMenu#tagChipMenu::item {
+    padding: 4px 24px 4px 12px;
+    border-radius: {{radiusSM}}px;
+    color: {{text}};
+}
+QMenu#tagChipMenu::item:selected { background: {{bgSelected}}; color: {{accentText}}; }
+QMenu#tagChipMenu::item:disabled { color: {{textQuaternary}}; }
+QMenu#tagChipMenu::separator { height: 1px; background: {{split}}; margin: {{xxs}}px 0px; }
 
 /* ---- labels ---------------------------------------------------------- */
 QLabel { background: transparent; }
@@ -464,15 +515,18 @@ QString Theme::buildSheet() const {
         {QStringLiteral("textQuaternary"), css(t.textQuaternary)},
         {QStringLiteral("accentText"), css(t.accentText)},
         {QStringLiteral("primary"), css(t.primary)},
+        {QStringLiteral("primaryBg"), css(t.primaryBg)},
         {QStringLiteral("primaryHover"), css(t.primaryHover)},
         {QStringLiteral("primaryActive"), css(t.primaryActive)},
         {QStringLiteral("primarySolid"), css(t.primarySolid)},
         {QStringLiteral("primarySolidHover"), css(t.primarySolidHover)},
         {QStringLiteral("primarySolidActive"), css(t.primarySolidActive)},
+        {QStringLiteral("tagBorder"), css(t.tagBorder)},
         {QStringLiteral("onPrimary"), css(t.onPrimary)},
         {QStringLiteral("onSpotlight"), css(t.onSpotlight)},
         {QStringLiteral("scrollbar"), css(t.scrollbar)},
         {QStringLiteral("scrollbarHover"), css(t.scrollbarHover)},
+        {QStringLiteral("radiusSM"), QString::number(t.radiusSM)},
     };
     for (auto entry = values.constBegin(); entry != values.constEnd(); ++entry) {
         sheet.replace(QStringLiteral("{{") + entry.key() + QStringLiteral("}}"), entry.value());
@@ -489,6 +543,22 @@ QVector<Theme::ContrastPair> Theme::contrastPairs() const {
         double floor;
         bool exempt;
     };
+    /* The note dot sits on whichever ground the row happens to be on - container, hover, or
+     * selected - and the pair below is quoted at the least favourable of the three, computed here
+     * rather than trusted: a marker that passed on the container and failed on the selected fill
+     * would disappear exactly when a person is looking at it. */
+    const QColor noteGrounds[] = {flattenOnto(t.bgContainer, t.bgContainer),
+                                  flattenOnto(t.bgHover, t.bgContainer),
+                                  flattenOnto(t.bgSelected, t.bgContainer)};
+    QColor worstNoteGround = noteGrounds[0];
+    double worstNoteRatio = 99.0;
+    for (const QColor &ground : noteGrounds) {
+        const double ratio = contrast(t.accentText, ground);
+        if (ratio < worstNoteRatio) {
+            worstNoteRatio = ratio;
+            worstNoteGround = ground;
+        }
+    }
     /* The pairs are the ones the design actually puts on screen, not a sample of them: a text token
      * that appears in exactly one place is still a place someone has to read. */
     const QVector<Raw> raw {
@@ -507,6 +577,9 @@ QVector<Theme::ContrastPair> Theme::contrastPairs() const {
          * same colour and only the hairline still says where the chip ends. */
         {"标签文字 / 标签底", t.accentText, flattenOnto(t.primaryBg, t.bgContainer), 4.5, false},
         {"标签描边 / 标签底", t.tagBorder, flattenOnto(t.primaryBg, t.bgContainer), 3.0, true},
+        /* The filter strip's chip, unchecked: the same decorative hairline the tag pair above
+         * excuses, over the container the strip sits on. The checked state is the tag pair itself. */
+        {"筛选芯片描边 / 容器", t.borderSecondary, t.bgContainer, 3.0, true},
         {"选中行文字 / 选中底", t.text, flattenOnto(t.bgSelected, t.bgContainer), 4.5, false},
         {"悬停行文字 / 悬停底", t.text, flattenOnto(t.bgHover, t.bgContainer), 4.5, false},
         {"提示文字 / 气泡", t.onSpotlight,
@@ -514,6 +587,12 @@ QVector<Theme::ContrastPair> Theme::contrastPairs() const {
         {"滚动条 / 容器", t.scrollbar, t.bgContainer, 3.0, false},
         {"表头文字 / 表头底", t.textSecondary, flattenOnto(t.fillAlter, t.bgContainer), 4.5, false},
         {"输入框边框 / 容器", t.border, t.bgContainer, 3.0, true},
+        /* The merge menu's two readable pairs, on the elevated ground a popup floats on. */
+        {"菜单文字 / 菜单底", t.text, t.bgElevated, 4.5, false},
+        {"菜单选中文字 / 菜单选中底", t.accentText, flattenOnto(t.bgSelected, t.bgElevated), 4.5, false},
+        /* The has-a-note dot, quoted at its worst ground (see above). A UI component that carries
+         * information, so the non-text 3:1 floor applies rather than the decorative exemption. */
+        {"备注点 / 最不利行底", t.accentText, worstNoteGround, 3.0, false},
     };
     QVector<ContrastPair> pairs;
     for (const Raw &entry : raw) {

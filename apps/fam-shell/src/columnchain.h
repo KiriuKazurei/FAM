@@ -106,6 +106,9 @@ signals:
      * by the column's view and relayed unchanged - the chain has no idea which pane it belongs to, and
      * the caller has to know that to say where the file came from. */
     void dropped(const QString &folder, const QStringList &paths, bool copy);
+    /* A tag chip on one of the columns' rows was clicked; straight up to the pane, which relays
+     * it with the results list's own. */
+    void tagActivated(const QString &path, const QString &tag);
 
 private:
     struct Column {

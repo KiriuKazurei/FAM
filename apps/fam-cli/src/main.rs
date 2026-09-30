@@ -58,6 +58,16 @@ enum Commands {
         #[command(subcommand)]
         action: TagAction,
     },
+    /// Upkeep of the tag store itself.
+    Store {
+        #[command(subcommand)]
+        action: StoreAction,
+    },
+    /// The free-text note beside a path.
+    Note {
+        #[command(subcommand)]
+        action: NoteAction,
+    },
     /// Find files by tag.
     Find {
         #[arg(long = "tag")]
@@ -159,6 +169,37 @@ enum ConfigAction {
     },
 }
 
+/// The note beside a path: read, written whole, or dropped. A note is not a tag and never shows
+/// up in a listing or a search - the only way back is by the exact path, which is what these are.
+#[derive(Debug, clap::Subcommand)]
+enum NoteAction {
+    /// Print the note, or `no note` when there is none.
+    Get { path: PathBuf },
+    /// Write the note, replacing whatever was there. Blank is refused - the store will not read
+    /// an empty body as "delete it".
+    Set {
+        path: PathBuf,
+        #[arg(long)]
+        body: String,
+    },
+    /// Drop the note, and say whether there was one.
+    Clear { path: PathBuf },
+}
+
+/// The library's own upkeep. Nothing here runs by itself: a prune looks at the filesystem and a
+/// drive that is merely offline looks exactly like one whose files are gone, so every action is a
+/// command a person runs on purpose.
+#[derive(Debug, Subcommand)]
+enum StoreAction {
+    /// Count the `files` rows whose path no longer exists, with the tags and notes that would go
+    /// with them.
+    Prune {
+        /// Apply the deletion. Without this flag the command only reports.
+        #[arg(long)]
+        write: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum TagAction {
     Add {
@@ -187,6 +228,10 @@ enum TagAction {
         #[arg(long)]
         source: Option<String>,
     },
+    /// The whole-library rename: every file carrying `from` ends up on `into`, and where a file
+    /// already carries `into` from the same source the rows collapse. This is how a duplicate
+    /// (`pdf` beside `PDF`) goes back to being one name.
+    Merge { from: String, into: String },
     Priority {
         path: PathBuf,
         tag: String,
@@ -245,6 +290,8 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
             backend.as_deref(),
         ),
         Commands::Tag { action } => commands::tag(&config, action),
+        Commands::Store { action } => commands::store(&config, action),
+        Commands::Note { action } => commands::note(&config, action),
         Commands::Find {
             tags,
             all,

@@ -1,5 +1,8 @@
 #include "fileview.h"
 
+#include "famlistmodel.h"
+#include "rowdelegate.h"
+
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
@@ -19,6 +22,13 @@ FileView::FileView(QWidget *parent) : QListView(parent) {
     /* No drop indicator. The line a list draws between two rows says "the item lands here", and a
      * file dropped into a folder has no landing position - the folder's own order decides that. */
     setDropIndicatorShown(false);
+}
+
+void FileView::relayTagClick(const QModelIndex &index, const QString &tag) {
+    const QString path = index.data(FamListModel::PathRole).toString();
+    if (!path.isEmpty()) {
+        emit tagActivated(path, tag);
+    }
 }
 
 void FileView::setDropFolder(const QString &folder) {

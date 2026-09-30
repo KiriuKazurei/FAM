@@ -196,11 +196,21 @@ public:
     static const char *toolbarName() { return "toolbar"; }
     static const char *toolbarActionsName() { return "toolbarActions"; }
     static const char *searchName() { return "searchInput"; }
+    /* The note dialog's editor - a QTextEdit, which the sheet's QLineEdit rules do not reach. */
+    static const char *noteEditorName() { return "noteEditor"; }
     static const char *primaryButtonName() { return "primaryButton"; }
     static const char *iconButtonName() { return "iconButton"; }
     /* A button that stays down - the split toggle. It needs its own rule because a control whose
      * state you cannot see is a control that appears not to work. */
     static const char *toggleButtonName() { return "toggleButton"; }
+    /* The vocabulary strip under the toolbar, and the one chip on it: `tagFilterBar` owns the
+     * surface, `tagChip` owns a chip - two names because the strip is a place and the chip is a
+     * control a person acts on, and a style rule for one is not a rule for the other. */
+    static const char *tagFilterBarName() { return "tagFilterBar"; }
+    static const char *tagChipName() { return "tagChip"; }
+    /* The menu a chip's right-click builds - a QMenu, which otherwise takes the desktop's colours
+     * the same way an unnamed QDialog did. */
+    static const char *tagChipMenuName() { return "tagChipMenu"; }
     static const char *sidebarName() { return "sidebar"; }
     static const char *columnFrameName() { return "column"; }
     static const char *columnHeaderName() { return "columnHeader"; }

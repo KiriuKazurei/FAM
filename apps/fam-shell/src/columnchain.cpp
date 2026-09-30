@@ -73,12 +73,15 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     column->view = new FileView(column->frame);
     column->view->setObjectName(QString::fromLatin1(Theme::listName()));
     column->view->setModel(column->model);
-    column->view->setItemDelegate(new RowDelegate(&Theme::instance(), kFamRowRoles, column->view));
+    auto *rowDelegate = new RowDelegate(&Theme::instance(), kFamRowRoles, column->view);
+    column->view->setItemDelegate(rowDelegate);
+    connect(rowDelegate, &RowDelegate::tagClicked, column->view, &FileView::relayTagClick);
     /* This column *is* a folder, so it is a place a drag can land. A column's directory never changes
      * while it exists - a different folder gets a different column - which is why the target is named
      * once here rather than re-asked on every drop. */
     column->view->setDropFolder(path);
     QObject::connect(column->view, &FileView::dropped, this, &ColumnChain::dropped);
+    QObject::connect(column->view, &FileView::tagActivated, this, &ColumnChain::tagActivated);
     /* Hover is a row state the delegate reads, and a view only tracks it when asked. */
     column->view->setMouseTracking(true);
     column->view->viewport()->setAttribute(Qt::WA_Hover, true);
@@ -150,6 +153,10 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     column->model->setTagFetcher([bridge](const QStringList &paths,
                                           QHash<QString, QStringList> *tags, QString *error) {
         return bridge->tagsForPaths(paths, tags, error);
+    });
+    column->model->setNoteFetcher([bridge](const QStringList &paths, QSet<QString> *noted,
+                                           QString *error) {
+        return bridge->notesForPaths(paths, noted, error);
     });
 
     QObject::connect(column->view->selectionModel(), &QItemSelectionModel::currentChanged, this,
@@ -310,6 +317,7 @@ QString ColumnChain::poll() {
          * event reaching the folder: a tag an agent writes over MCP moves no byte here, so nothing
          * else on this path would ever notice. The model decides whether the read is worth it. */
         column->model->refreshTags();
+        column->model->refreshNotes();
         if (polled.totalRows != before) {
             /* Logged as well as returned: "the rows arrived" was a gate line when one column existed,
              * and a sentence in the status bar is not something the headless run can assert on. */
@@ -330,6 +338,7 @@ QString ColumnChain::poll() {
 void ColumnChain::invalidateTags() {
     for (Column *column : m_columns) {
         column->model->invalidateTags();
+        column->model->invalidateNotes();
     }
 }
 

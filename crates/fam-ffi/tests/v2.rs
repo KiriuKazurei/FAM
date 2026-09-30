@@ -16,7 +16,7 @@ use famcore::{
     fam_abi_version, fam_backends_json, fam_core_free, fam_core_new, fam_dir_close, fam_dir_fetch,
     fam_dir_poll, fam_dir_set_filter, fam_dir_set_sort, fam_dir_state, fam_free_string,
     fam_open_dir, fam_search_begin, fam_search_cancel, fam_search_close, fam_search_page,
-    fam_stats, FamCore,
+    fam_stats, fam_tag_add, FamCore,
 };
 
 use famcore::wire::{
@@ -247,6 +247,28 @@ impl Core {
     fn close_search(&self, token: u64) {
         unsafe { fam_search_close(self.handle, token) };
     }
+
+    /// Puts one label on one path, through the same entry point an agent writes with. The search
+    /// backend under test reads this store, so a tag query needs a way to say "somebody tagged this".
+    fn tag(&self, path: &Path, name: &str) {
+        let path = CString::new(toml_path(path)).unwrap();
+        let tags = CString::new(format!("[\"{name}\"]")).unwrap();
+        let mut out = ptr::null_mut();
+        let mut error = Error::new();
+        let code = unsafe {
+            fam_tag_add(
+                self.handle,
+                path.as_ptr(),
+                tags.as_ptr(),
+                ptr::null(),
+                0,
+                &mut out,
+                &mut error.value,
+            )
+        };
+        assert_eq!(code, 0, "tag failed: {}", error.text());
+        unsafe { fam_free_string(out) };
+    }
 }
 
 impl Drop for Core {
@@ -316,6 +338,7 @@ impl Header {
 }
 
 /// One row as the wire carries it: the record, plus the name it points into the blob for.
+#[derive(Debug)]
 struct Row {
     name: String,
     size: u64,
@@ -825,6 +848,86 @@ fn a_search_begins_without_waiting_and_pages_rows_that_carry_their_paths() {
         "a search row's name is a path, so a hit two folders deep is distinguishable: {names:?}"
     );
     core.close_search(token);
+}
+
+/// The tag store answering a search, seen from the far side of the wire. The claim is about the row:
+/// a query that names a label answers with ordinary v2 records carrying a real size and the
+/// folder-or-not bit, even though the library that found them stores neither. That is what lets the
+/// shell paint a tag hit with the same row painter it uses for a name hit - and if this ever came back
+/// as paths only, the row would print `0 B` for every hit, which is the defect the row painter was
+/// written to stop.
+#[test]
+fn a_tag_query_answers_with_rows_that_carry_metadata() {
+    let tree = tree(3);
+    let core = Core::with(&tree);
+    let file = tree.root.join("f00000.txt");
+    let folder = tree.root.join("标签");
+    fs::create_dir(&folder).expect("create the folder to tag");
+    core.tag(&file, "contract");
+    core.tag(&folder, "contract");
+
+    let token = core.search("tag:contract", None, None, 0);
+    let header = core.wait_settled(token);
+    assert_eq!(header.state, READY, "{header:?}");
+    assert_eq!(
+        header.flags & FLAG_INCOMPLETE,
+        0,
+        "the library holds exactly these two: {header:?}"
+    );
+    assert_eq!(
+        header.total_rows, 2,
+        "the tagged file and the tagged folder"
+    );
+
+    let (_, rows) = core.search_page(token, 0, 10, 8192);
+    let file_row = rows
+        .iter()
+        .find(|row| !row.directory)
+        .expect("one of the two is a file");
+    // `tree(3)` writes its first file as one byte, so this is the filesystem's number rather than a
+    // default the backend could have left in place.
+    assert_eq!(file_row.size, 1, "hydrated from disk: {file_row:?}");
+    assert!(
+        rows.iter().any(|row| row.directory),
+        "a folder somebody labelled reports itself as a folder, not as a zero-byte file: {rows:?}"
+    );
+    core.close_search(token);
+}
+
+/// A tag query that also names a word of a name narrows rather than widens, and a tag nobody used
+/// answers nothing while still saying it covered the scope - "no file carries this label" has to be
+/// tellable apart from "the search did not run".
+#[test]
+fn a_tag_query_narrows_by_name_and_answers_empty_honestly() {
+    let tree = tree(3);
+    let core = Core::with(&tree);
+    for index in 0..3 {
+        core.tag(&tree.root.join(format!("f{index:05}.txt")), "contract");
+    }
+
+    let narrowed = core.search("tag:contract f00001", None, None, 0);
+    let header = core.wait_settled(narrowed);
+    assert_eq!(
+        header.total_rows, 1,
+        "the name term applies to the tag hits: {header:?}"
+    );
+    let (_, rows) = core.search_page(narrowed, 0, 10, 4096);
+    assert!(
+        rows[0].name.ends_with("f00001.txt"),
+        "the one file that matched both: {rows:?}"
+    );
+    core.close_search(narrowed);
+
+    let unused = core.search("tag:never-used", None, None, 0);
+    let header = core.wait_settled(unused);
+    assert_eq!(header.state, READY, "an empty answer is a finished search");
+    assert_eq!(header.total_rows, 0);
+    assert_eq!(
+        header.flags & FLAG_INCOMPLETE,
+        0,
+        "and it covered everything it could reach: {header:?}"
+    );
+    core.close_search(unused);
 }
 
 #[test]

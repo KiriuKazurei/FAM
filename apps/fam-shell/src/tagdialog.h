@@ -8,6 +8,7 @@ class FamBridge;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QPushButton;
 
 /* The tags on one file: what they are, who put them there, and a way to take one back off.
  *
@@ -32,21 +33,47 @@ public:
 
     /* What the file carries right now, one entry per tag *name*, in the store's display order. */
     QStringList tagNames() const;
+    /* The same rows as they are displayed - the name with its sources spelled out - what the
+     * headless step reads to prove the two-sources-one-name line is what a person sees. */
+    QStringList tagDisplay() const;
     bool addTag(const QString &tag, QString *error);
     bool removeTag(const QString &name, QString *error);
+    /* Renames one label on this file - `from` must be one of `tagNames()`. The library-wide reach
+     * (consolidating a duplicate everywhere it sits) is the filter bar's gesture, not this dialog's:
+     * this dialog manages one file, and a rename here moves one row. */
+    bool renameTag(const QString &from, const QString &to, QString *error);
     /* Re-reads the store and refreshes the list. */
     void reload();
 
+    /* The confirm step, as the button drives it: the first call arms and names what the second
+     * will do, the second removes. A public slot for the same reason the operations above are
+     * public methods - the armed state is exactly what a headless run has to prove, and the direct
+     * `removeTag` skips the confirm on purpose. */
+    void removeSelected();
+    void selectFirstRow();
     /* True once anything has been added or removed, so the window can say so on the status line
      * rather than guess from a dialog closing. */
     bool changed() const { return m_changed; }
+    /* The note line and the entry, readable and settable from outside - what the keyboard step
+     * needs to see a refusal land and to type without inventing a second input. */
+    QString noteText() const;
+    void setEntryText(const QString &text);
 
 private slots:
     void add();
-    void removeSelected();
+    void renameSelected();
 
 private:
     void showList();
+    /* The two destructive-or-easy-to-misfire buttons are two-step: the first press names what will
+     * happen and arms, the second does it. The confirm lives here rather than in a pop-up because
+     * a QMessageBox would be one more surface the style sheet has to be taught to colour - the
+     * same lesson the dialog's own first screenshot taught - and these widgets already wear it. */
+    void disarmConfirm();
+    QPushButton *m_removeButton = nullptr;
+    QPushButton *m_renameButton = nullptr;
+    bool m_removeArmed = false;
+    QString m_pendingRemove;
 
     FamBridge *m_bridge;
     QString m_path;

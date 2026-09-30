@@ -207,8 +207,8 @@ fn a_full_session_over_a_real_pipe_leaves_one_line_per_call_and_a_chain_that_ver
     let tools = client.request(2, "tools/list", json!({}));
     assert_eq!(
         tools["result"]["tools"].as_array().expect("tools").len(),
-        14,
-        "the pipe advertises the same fourteen the library does"
+        15,
+        "the pipe advertises the same fifteen the library does"
     );
 
     let (who, failure) = client.call(3, "whoami", json!({}));

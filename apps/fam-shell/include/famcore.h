@@ -163,8 +163,27 @@ int fam_tag_add(FamCore *core, const char *path, const char *tags_json, const ch
 int fam_tag_list(FamCore *core, const char *path, char **out, char **err);
 int fam_tag_remove(FamCore *core, const char *path, const char *tags_json, const char *source,
                    char **out, char **err);
-int fam_find(FamCore *core, const char *tags_json, int match_all, const char *within,
-             const char *source, uint32_t limit, char **out, char **err);
+
+/* The free-text note beside one path - `{"body":"...","updated_at":"..."}`, or `{"body":null}`
+ * when there is none. A note is deliberately not a tag and never enters the directory index, so
+ * this call on the exact path is the only way to read one back. `fam_note_set` replaces whatever
+ * was there and refuses a blank body (the store will not read "empty" as "delete it" -
+ * `fam_note_clear` exists); the limit is 8 KiB of UTF-8, and an over-long body is refused whole. */
+int fam_note_get(FamCore *core, const char *path, char **out, char **err);
+int fam_note_set(FamCore *core, const char *path, const char *body, char **out, char **err);
+int fam_note_clear(FamCore *core, const char *path, char **out, char **err);
+
+/* Rename a label across the whole library: every row named `from` takes the name `into`, and where
+ * a file already carries `into` from the same source the two rows collapse into the one that was
+ * already there. With nothing yet named `into` this is simply a rename; with rows already there it
+ * is the merge that turns `pdf` and `PDF` back into one name. The answer reports what happened as
+ * counts - `{"moved":N,"collapsed":N,"files":N}` - and an unknown `from` is an error, so a typo
+ * merging onto a real name cannot read as success. */
+int fam_tag_merge(FamCore *core, const char *from, const char *into, char **out, char **err);
+
+/* Rename one label on one file; `to` and `source` are each optional and neither may be absent. */
+int fam_tag_rename(FamCore *core, const char *path, const char *from, const char *to,
+                   const char *source, char **out, char **err);
 
 /* The tags of many files at once: `paths_json` is a JSON array of paths, the answer a JSON object
  * keyed by those same strings, holding only the files that carry a tag - an absent key means "no
@@ -179,6 +198,20 @@ int fam_find(FamCore *core, const char *tags_json, int match_all, const char *wi
  * It is a heartbeat, not an act: `tag.fetch` never reaches the audit trail, because it runs on the
  * shell's poll beat for as long as a folder is on screen. */
 int fam_tags_for_paths(FamCore *core, const char *paths_json, char **out, char **err);
+
+/* Which paths of a window carry a note: `{"<path>":true}` for the ones that do, keys spelled as the
+ * caller spelled them, absent keys meaning "no note" - the twin of `fam_tags_for_paths`, and a
+ * heartbeat like it (`note.fetch` never reaches the audit trail). An empty window is an empty
+ * answer rather than an error. */
+int fam_notes_for_paths(FamCore *core, const char *paths_json, char **out, char **err);
+
+/* The notes of many files at once: `paths_json` is a JSON array of paths, the answer a JSON object
+ * keyed by those same strings, holding `true` for each path that carries a note. An absent key means
+ * "no note", so "has note" and "not asked about" stay the same answer here as they are on the wire.
+ *
+ * It is a heartbeat, not an act: `note.fetch` never reaches the audit trail, because it runs on the
+ * shell's poll beat for as long as a folder is on screen. */
+int fam_notes_for_paths(FamCore *core, const char *paths_json, char **out, char **err);
 
 /* Every tag name in the store with how many files carry it, most used first:
  * `[{"tag":"contract","files":2}, ...]`. A name on one file under both sources counts as one file,

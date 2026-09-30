@@ -278,6 +278,8 @@ int main(int argc, char *argv[]) {
     bool vocabularyCountsFiles = false;
     bool batchKeysByCaller = false;
     bool emptyWindowIsAnAnswer = false;
+    bool mergedMoved = false;
+    bool markerRead = false;
     {
         const QString firstTagged = tree + QStringLiteral("/fam-abi-tag-a.txt");
         const QString secondTagged = tree + QStringLiteral("/fam-abi-tag-b.txt");
@@ -329,6 +331,93 @@ int main(int argc, char *argv[]) {
          * semantics the shell's tag dialog had to draw around. */
         bridge.tagRemove(firstTagged, {QString::fromLatin1(kTag)}, &answer, &error);
         bridge.tagRemove(secondTagged, {QString::fromLatin1(kTag)}, &answer, &error);
+
+        /* The write the increment adds: a rename across the library, which with no other holder of
+         * the target name is a pure move, and where a file already carries both - the seeded shape
+         * above, one name two sources - collapses rather than doubles. Both readings asserted, and
+         * the per-file rename checked to stay on its one row. */
+        bridge.tagAdd(firstTagged, {QStringLiteral("fam-abi-typo")}, QStringLiteral("manual"), 0,
+                      &answer, &error);
+        bridge.tagAdd(secondTagged, {QStringLiteral("fam-abi-typo")}, QStringLiteral("manual"), 0,
+                      &answer, &error);
+        bridge.tagAdd(secondTagged, {QStringLiteral("fam-abi-merged")}, QStringLiteral("manual"), 0,
+                      &answer, &error);
+        QJsonValue mergeAnswer;
+        const bool merged = bridge.tagMerge(QStringLiteral("fam-abi-typo"),
+                                            QStringLiteral("fam-abi-merged"), &mergeAnswer, &error);
+        /* The first reading: one file carries the typo alone (its row truly moves), the other carries
+         * the typo beside the target (its row collapses - it already had the target from the same
+         * source). Both in one answer. */
+        const QJsonObject counts = mergeAnswer.toObject();
+        mergedMoved = merged && counts.value(QStringLiteral("moved")).toInt() == 1
+            && counts.value(QStringLiteral("collapsed")).toInt() == 1
+            && counts.value(QStringLiteral("files")).toInt() == 2;
+        /* The second reading: with no row named the target left anywhere, the same call is a pure
+         * rename - both files' rows move, nothing collapses. */
+        QJsonValue renameAllAnswer;
+        const bool renamedAll = bridge.tagMerge(QStringLiteral("fam-abi-merged"),
+                                                QStringLiteral("fam-abi-typo"), &renameAllAnswer,
+                                                &error);
+        const QJsonObject movedAll = renameAllAnswer.toObject();
+        mergedMoved = mergedMoved && renamedAll
+            && movedAll.value(QStringLiteral("moved")).toInt() == 2
+            && movedAll.value(QStringLiteral("collapsed")).toInt() == 0;
+
+        QJsonValue renameAnswer;
+        const bool renamed = bridge.tagRename(firstTagged, QStringLiteral("fam-abi-typo"),
+                                              QStringLiteral("fam-abi-final"), &renameAnswer,
+                                              &error);
+        QVector<TagFacet> after;
+        bridge.tagVocabulary(&after, &error);
+        bool firstIsFinal = false;
+        bool secondUntouched = false;
+        for (const TagFacet &facet : after) {
+            if (facet.tag == QLatin1String("fam-abi-final")) {
+                firstIsFinal = facet.files == 1;
+            }
+            if (facet.tag == QLatin1String("fam-abi-typo")) {
+                secondUntouched = facet.files == 1;
+            }
+        }
+        mergedMoved = mergedMoved && renamed && firstIsFinal && secondUntouched;
+        printf("merge: move-and-collapse=%d rename-everywhere=%d rename-on-one-file=%d\n",
+               counts.value(QStringLiteral("moved")).toInt() == 1
+                       && counts.value(QStringLiteral("collapsed")).toInt() == 1
+                   ? 1
+                   : 0,
+               renamedAll ? 1 : 0, renamed ? 1 : 0);
+
+        /* The marker read: one file noted, one not - the answer carries the noted one under the
+         * spelling the caller sent and says nothing about the other, which is the contract a row's
+         * marker is painted from. Cleared afterwards, and the batch afterwards is empty. */
+        bool notedBatchByCaller = false;
+        bridge.noteSet(firstTagged, QStringLiteral("smoke note"), &answer, &error);
+        QSet<QString> noted;
+        if (bridge.notesForPaths(QStringList{firstTagged, secondTagged, untagged}, &noted, &error)) {
+            notedBatchByCaller = noted.size() == 1 && noted.contains(firstTagged)
+                && !noted.contains(secondTagged) && !noted.contains(untagged);
+            printf("notes batch: %d of 3 marked\n", noted.size());
+        } else {
+            fprintf(stderr, "the batch note read failed: %s\n", qUtf8Printable(error));
+        }
+        bridge.noteClear(firstTagged, &answer, &error);
+        QSet<QString> notedAfter;
+        if (!bridge.notesForPaths(QStringList{firstTagged}, &notedAfter, &error)
+            || !notedAfter.isEmpty()) {
+            emptyWindowIsAnAnswer = false;
+        }
+        markerRead = notedBatchByCaller;
+
+        /* Off the shelf, every name this block touched - on both files. The store keeps a file's
+         * tags after the file is gone (that is the debt the prune command exists for), so a smoke
+         * run that left rows behind would poison the next run's batch read with names the seed
+         * never wrote. */
+        for (const QString &path : {firstTagged, secondTagged}) {
+            bridge.tagRemove(path,
+                             {QStringLiteral("fam-abi-typo"), QStringLiteral("fam-abi-merged"),
+                              QStringLiteral("fam-abi-final")},
+                             &answer, &error);
+        }
         QFile::remove(firstTagged);
         QFile::remove(secondTagged);
         QFile::remove(untagged);
@@ -345,11 +434,13 @@ int main(int argc, char *argv[]) {
 
     bridge.closeDir(dir);
     const bool passed = sawInsert && sawCut && movedOk && copiedOk && overwriteRefused
-        && vocabularyCountsFiles && batchKeysByCaller && emptyWindowIsAnAnswer;
+        && vocabularyCountsFiles && batchKeysByCaller && emptyWindowIsAnAnswer && mergedMoved
+        && markerRead;
     printf("insert=%d cut=%d move=%d copy=%d refuse-overwrite=%d vocabulary=%d batch=%d empty=%d"
-           " -> %s\n",
+           " merge=%d marker=%d -> %s\n",
            sawInsert ? 1 : 0, sawCut ? 1 : 0, movedOk ? 1 : 0, copiedOk ? 1 : 0,
            overwriteRefused ? 1 : 0, vocabularyCountsFiles ? 1 : 0, batchKeysByCaller ? 1 : 0,
-           emptyWindowIsAnAnswer ? 1 : 0, passed ? "ok" : "FAILED");
+           emptyWindowIsAnAnswer ? 1 : 0, mergedMoved ? 1 : 0, markerRead ? 1 : 0,
+           passed ? "ok" : "FAILED");
     return passed ? 0 : 1;
 }

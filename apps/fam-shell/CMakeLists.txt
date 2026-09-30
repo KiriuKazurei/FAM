@@ -39,6 +39,8 @@ add_executable(fam-shell WIN32
     src/fileview.cpp
     src/pane.cpp
     src/tagdialog.cpp
+    src/tagfilterbar.cpp
+    src/notedialog.cpp
     src/drivelist.cpp
     src/iconcache.cpp)
 target_include_directories(fam-shell PRIVATE include src)

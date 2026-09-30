@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::{NoteAction, StoreAction};
 use anyhow::{anyhow, bail, Result};
 use fam_core::{path_buf_from_units, AppPaths, Config, SearchHit, SearchRequest as NameRequest};
 use fam_sched::{spawn, Batch, SchedulerConfig};
@@ -99,9 +100,17 @@ pub fn search(
 ) -> Result<()> {
     let kind = parse_kind(kind)?;
     // Which backends exist, in what order, and what may be reported is the router's own answer, so a
-    // CLI search and a shell search cannot drift apart over the same question.
+    // CLI search and a shell search cannot drift apart over the same question. The default router
+    // carries the tag store with it: a `tag:` query is answered by the library under the same scope
+    // rules as everywhere else. A caller who named a backend gets that backend and its refusals -
+    // insisting on the walk does not make the walk know what anybody labelled.
     let router = match backend {
-        None | Some("auto") | Some("walk") => SearchRouter::from_config(config),
+        None | Some("auto") | Some("walk") => {
+            let store = fam_svc_store::TagStore::open(&config.database_path)?;
+            SearchRouter::from_config(config).with_provider(Box::new(
+                fam_svc_store::TagSearch::new(std::sync::Arc::new(std::sync::Mutex::new(store))),
+            ))
+        }
         Some("walk-only") => SearchRouter::walking(config),
         Some("everything") => SearchRouter::indexed(config),
         Some(other) => {
@@ -223,6 +232,13 @@ pub fn tag(config: &Config, action: &TagAction) -> Result<()> {
             store.rename_tag(path, from, Some(to), source)?;
             println!("{}: {from} -> {to}", path.display());
         }
+        TagAction::Merge { from, into } => {
+            let outcome = store.merge_tags(from, into)?;
+            println!(
+                "{from} -> {into}: {} row(s) moved, {} collapsed as duplicates, {} file(s) carry {into} now",
+                outcome.moved, outcome.collapsed, outcome.files
+            );
+        }
         TagAction::Priority {
             path,
             tag,
@@ -232,6 +248,58 @@ pub fn tag(config: &Config, action: &TagAction) -> Result<()> {
             let source = Source::parse(source)?;
             store.set_priority(path, tag, source, *priority)?;
             println!("{}: {tag} ({source}) priority={priority}", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// The note beside a path - the same three sentences the agent's tools answer with, because the
+/// store is one store and a rule with two wordings is a rule that drifted.
+pub fn note(config: &Config, action: &NoteAction) -> Result<()> {
+    let store = TagStore::open(&config.database_path)?;
+    match action {
+        NoteAction::Get { path } => match store.note(path)? {
+            Some(record) => println!("{}", record.body),
+            None => println!("no note"),
+        },
+        NoteAction::Set { path, body } => {
+            store.set_note(path, body)?;
+            println!("{}: note written ({} bytes)", path.display(), body.len());
+        }
+        NoteAction::Clear { path } => {
+            let removed = store.clear_note(path)?;
+            println!(
+                "{}: {}",
+                path.display(),
+                if removed {
+                    "note cleared"
+                } else {
+                    "no note to clear"
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The store's own upkeep. The dry run is the default and the applied run prints the same counts,
+/// so the person running it sees what went before it went.
+pub fn store(config: &Config, action: &StoreAction) -> Result<()> {
+    let store = TagStore::open(&config.database_path)?;
+    match action {
+        StoreAction::Prune { write } => {
+            let outcome = store.prune_missing(*write)?;
+            println!(
+                "{} file(s) gone, {} tag(s) and {} note(s) {}",
+                outcome.files,
+                outcome.tags,
+                outcome.notes,
+                if *write {
+                    "removed"
+                } else {
+                    "would be removed (run with --write to apply)"
+                }
+            );
         }
     }
     Ok(())

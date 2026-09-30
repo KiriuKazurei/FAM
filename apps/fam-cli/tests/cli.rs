@@ -553,3 +553,111 @@ fn watch_prints_merged_batches_for_live_changes() {
     assert!(text.contains("stopped:"), "{text}");
     assert!(text.contains("0 dropped event(s)"), "{text}");
 }
+
+#[test]
+fn tag_merge_consolidates_a_duplicate_across_the_library() {
+    let cli = Cli::new();
+    let root = &cli.root;
+    std::fs::write(root.join("a.txt"), "a\n").expect("file");
+    std::fs::write(root.join("b.txt"), "b\n").expect("file");
+    let a_path = root.join("a.txt");
+    let b_path = root.join("b.txt");
+    let a = a_path.to_str().unwrap();
+    let b = b_path.to_str().unwrap();
+
+    // `a` carries the typo beside the real name (a collapse), `b` carries only the typo (a move),
+    // `c` carries only the real name and must not change.
+    let c_path = root.join("c.txt");
+    let c = c_path.to_str().unwrap();
+    std::fs::write(
+        &c_path, "c
+",
+    )
+    .expect("file");
+    cli.stdout(&["tag", "add", a, "finace"]);
+    cli.stdout(&["tag", "add", a, "finance"]);
+    cli.stdout(&["tag", "add", b, "finace"]);
+    cli.stdout(&["tag", "add", c, "finance"]);
+
+    let merged = cli.stdout(&["tag", "merge", "finace", "finance"]);
+    assert!(
+        merged.contains("1 row(s) moved, 1 collapsed as duplicates, 3 file(s)"),
+        "{merged}"
+    );
+
+    let listed = cli.stdout(&["tag", "list", a]);
+    assert!(listed.contains("finance"), "{listed}");
+    assert!(!listed.contains("finace"), "{listed}");
+    let listed = cli.stdout(&["tag", "list", b]);
+    assert!(listed.contains("finance"), "{listed}");
+    let stats = cli.stdout(&["stats"]);
+    assert!(
+        stats.contains("tags:     3"),
+        "one row per file now: {stats}"
+    );
+
+    let unknown = cli.failure(&["tag", "merge", "no-such", "finance"]);
+    assert!(unknown.contains("no tag named"), "{unknown}");
+}
+
+#[test]
+fn store_prune_reports_first_and_deletes_only_when_asked() {
+    let cli = Cli::new();
+    let root = &cli.root;
+    let staying = root.join("stays.txt");
+    let leaving = root.join("leaves.txt");
+    std::fs::write(&staying, "live\n").expect("file");
+    std::fs::write(&leaving, "doomed\n").expect("file");
+    let stays = staying.to_str().unwrap();
+    let leaves = leaving.to_str().unwrap();
+    cli.stdout(&["tag", "add", stays, "kept"]);
+    cli.stdout(&["tag", "add", leaves, "lost"]);
+    std::fs::remove_file(&leaving).expect("the file goes");
+
+    let dry = cli.stdout(&["store", "prune"]);
+    assert!(
+        dry.contains("1 file(s) gone, 1 tag(s) and 0 note(s) would be removed"),
+        "{dry}"
+    );
+    // The dry run changed nothing: the stats still count the doomed path.
+    let stats = cli.stdout(&["stats"]);
+    assert!(stats.contains("files:    2"), "{stats}");
+
+    let applied = cli.stdout(&["store", "prune", "--write"]);
+    assert!(
+        applied.contains("1 file(s) gone, 1 tag(s) and 0 note(s) removed"),
+        "{applied}"
+    );
+    let stats = cli.stdout(&["stats"]);
+    assert!(stats.contains("files:    1"), "{stats}");
+    assert!(stats.contains("tags:     1"), "{stats}");
+    let listed = cli.stdout(&["tag", "list", stays]);
+    assert!(listed.contains("kept"), "{listed}");
+}
+
+#[test]
+fn a_note_round_trips_and_refuses_what_the_store_refuses() {
+    let cli = Cli::new();
+    let path_buf = cli.root.join("notes.txt");
+    std::fs::write(&path_buf, "x\n").expect("file");
+    let path = path_buf.to_str().unwrap();
+
+    let none = cli.stdout(&["note", "get", path]);
+    assert!(none.contains("no note"), "{none}");
+
+    let written = cli.stdout(&["note", "set", path, "--body", "the port is 5900"]);
+    assert!(written.contains("note written"), "{written}");
+    let back = cli.stdout(&["note", "get", path]);
+    assert!(back.contains("the port is 5900"), "{back}");
+
+    // A blank body is refused, and the note that was there is still there.
+    let blank = cli.failure(&["note", "set", path, "--body", "   "]);
+    assert!(blank.contains("must say something"), "{blank}");
+    let back = cli.stdout(&["note", "get", path]);
+    assert!(back.contains("the port is 5900"), "{back}");
+
+    let cleared = cli.stdout(&["note", "clear", path]);
+    assert!(cleared.contains("note cleared"), "{cleared}");
+    let again = cli.stdout(&["note", "clear", path]);
+    assert!(again.contains("no note to clear"), "{again}");
+}

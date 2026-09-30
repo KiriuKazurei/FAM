@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -28,7 +29,9 @@
 #include "drivelist.h"
 #include "iconcache.h"
 #include "rowdelegate.h"
+#include "notedialog.h"
 #include "tagdialog.h"
+#include "tagfilterbar.h"
 #include "theme.h"
 
 namespace {
@@ -79,7 +82,11 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
 
     m_search = new QLineEdit(this);
     m_search->setObjectName(QString::fromLatin1(Theme::searchName()));
-    m_search->setPlaceholderText(QStringLiteral("name terms — every word must appear"));
+    /* Two sentences, because the box now answers two questions: name words AND together as they
+     * always have, and `tag:` names a label instead - the spelling a person can also get by clicking
+     * a chip in the strip under this box. */
+    m_search->setPlaceholderText(
+        QStringLiteral("name terms — every word must appear · tag:name for a label"));
     m_search->setClearButtonEnabled(true);
 
     m_kind = new QComboBox(this);
@@ -100,6 +107,10 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     auto *tagButton = new QPushButton(QStringLiteral("Tags…"), this);
     tagButton->setToolTip(
         QStringLiteral("Show, add and remove the tags on the selected row or folder"));
+    auto *noteButton = new QPushButton(QStringLiteral("Note…"), this);
+    noteButton->setToolTip(QStringLiteral(
+        "Read and write the free-text note on the selected row or folder - not a tag, not "
+        "searchable, up to 8 KiB"));
     /* The split is a display choice, so it is a button rather than a mode the window can be stuck in:
      * collapsed, this is one browsing surface - what a person who never wanted a second column has
      * always been looking at. */
@@ -119,19 +130,27 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     });
 
     /* A container rather than a bare layout, because `QWidget#toolbar` needs something to match: the
-     * strip's own background and its bottom split are what separates the controls from the columns. */
+     * strip's own background and its bottom split are what separates the controls from the columns.
+     * A column of two rows, since increment 17: the controls, and under them the vocabulary strip -
+     * which exists only while the library holds tags, and is hidden at construction. */
     auto *toolbar = new QWidget(this);
     toolbar->setObjectName(QString::fromLatin1(Theme::toolbarName()));
-    auto *controls = new QHBoxLayout(toolbar);
     const int gutter = Theme::instance().tokens().md;
-    controls->setContentsMargins(gutter, gutter, gutter, gutter);
+    auto *toolbarBox = new QVBoxLayout(toolbar);
+    toolbarBox->setContentsMargins(gutter, gutter, gutter, gutter);
+    toolbarBox->setSpacing(Theme::instance().tokens().xs);
+    auto *controls = new QHBoxLayout;
     controls->addWidget(m_search, 1);
     controls->addWidget(m_kind);
     controls->addWidget(m_scope);
     controls->addWidget(searchButton);
     controls->addWidget(openButton);
     controls->addWidget(tagButton);
+    controls->addWidget(noteButton);
     controls->addWidget(m_split);
+    toolbarBox->addLayout(controls);
+    m_tagBar = new TagFilterBar(m_bridge.get(), toolbar);
+    toolbarBox->addWidget(m_tagBar);
 
     /* Two panes, built the same way, and only one of them on screen until the split button is
      * pressed. The right one is the pane that has always been there; the left one is the new
@@ -147,6 +166,7 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
          * building them the same way: a drop from the left onto the right is one call to `pathOp` with
          * the two paths the panes supplied, and nothing in it knows which side of the window is which. */
         QObject::connect(pane, &Pane::dropped, this, &MainWindow::handleDrop);
+        QObject::connect(pane, &Pane::tagActivated, this, &MainWindow::searchTagActivated);
     }
 
     m_status = new QLabel(this);
@@ -177,18 +197,26 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
 
     connect(searchButton, &QPushButton::clicked, this, &MainWindow::runSearch);
     connect(m_search, &QLineEdit::returnPressed, this, &MainWindow::runSearch);
-    /* Emptying the box is "stop searching", not "search for nothing". */
+    /* Emptying the box is "stop searching", not "search for nothing". The strip reads the query on
+     * every change so its checked chips are always a view of the box, never a second machine that
+     * can disagree with it. */
     connect(m_search, &QLineEdit::textChanged, this, [this](const QString &text) {
+        m_tagBar->applyQuery(text);
         if (text.isEmpty()) {
             showFolder();
         }
     });
+    connect(m_tagBar, &TagFilterBar::filterChanged, this, &MainWindow::applyTagFilter);
+    connect(m_tagBar, &TagFilterBar::mergeRequested, this, &MainWindow::mergeTags);
     connect(openButton, &QPushButton::clicked, this, &MainWindow::openFolderDialog);
     connect(tagButton, &QPushButton::clicked, this, &MainWindow::tagSelectedFile);
+    connect(noteButton, &QPushButton::clicked, this, &MainWindow::noteSelectedFile);
 
     QJsonValue stats;
     if (m_bridge->stats(&stats, &error)) {
         const QJsonObject object = stats.toObject();
+        m_storeFile = object.value(QStringLiteral("database")).toString();
+        m_storeStamp = storeStamp(m_storeFile);
         QStringList roots;
         for (const QJsonValue &root : object.value("roots").toArray()) {
             roots.append(root.toString());
@@ -210,6 +238,10 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     /* Everything the slots and the self-check steps touch exists from here on, and not before: the
      * early return above leaves the window with a status label and no chain. */
     m_healthy = true;
+
+    /* The strip's first read. A library that already holds tags shows its chips at startup; one
+     * that does not shows no strip until something gets tagged. */
+    m_tagBar->refresh(m_search->text());
 
     if (!initialQuery.isEmpty()) {
         m_search->setText(initialQuery);
@@ -333,12 +365,133 @@ void MainWindow::setActivePane(Pane *pane) {
     }
 }
 
+/* The note on whatever the toolbar acts on: the selected row, or - when nothing is picked - the
+ * folder the active column shows, which is the same fallback the Tags button has always had. The
+ * status line reports the ending state, because one visit may have written, cleared, or both. */
+void MainWindow::noteSelectedFile() {
+    if (!m_healthy) {
+        return;
+    }
+    Pane *pane = active();
+    QString path;
+    if (pane->showingResults()) {
+        path = pane->model->pathAt(pane->results->selectionModel()->currentIndex().row());
+    } else {
+        path = pane->chain->selectedPath();
+    }
+    if (path.isEmpty()) {
+        setStatus(QStringLiteral("select a row first"));
+        return;
+    }
+    NoteDialog dialog(m_bridge.get(), path, this);
+    dialog.exec();
+    if (dialog.changed()) {
+        setStatus(QStringLiteral("note on %1: %2")
+                      .arg(QFileInfo(path).fileName(),
+                           dialog.storedNote().isEmpty()
+                               ? QStringLiteral("cleared")
+                               : QStringLiteral("%1 byte(s)")
+                                     .arg(dialog.storedNote().toUtf8().size())));
+    }
+}
+
 void MainWindow::toggleSplit() { m_split->click(); }
+
+/* The strip's half of the one-place rule: the query lives in the box, and a hand on a chip rewrites
+ * the box rather than starting a second search path. The checked chips become `tag:` tokens, the
+ * name words already in the box stay untouched, and what comes out is searched the same way a typed
+ * query is. Unchecking the last chip empties the box - and an empty box already means "go back". */
+void MainWindow::applyTagFilter() {
+    if (!m_healthy) {
+        return;
+    }
+    QStringList parts;
+    for (const QString &name : m_tagBar->checkedTags()) {
+        parts.append(QStringLiteral("tag:") + name);
+    }
+    const QStringList tokens = m_search->text().split(QChar(u' '), Qt::SkipEmptyParts);
+    for (const QString &token : tokens) {
+        if (!token.startsWith(QStringLiteral("tag:"))) {
+            parts.append(token);
+        }
+    }
+    const QString text = parts.join(QChar(u' '));
+    m_search->setText(text);
+    if (!text.isEmpty()) {
+        runSearch();
+    }
+}
+
+qint64 MainWindow::storeStamp(const QString &file) {
+    const QFileInfo db(file);
+    if (!db.exists()) {
+        return 0;
+    }
+    /* Both halves move on a write: a commit lands in the WAL and the main file follows at the
+     * checkpoint, so either one changing means the library did. */
+    qint64 stamp = db.lastModified().toMSecsSinceEpoch() * 1'000'003 + db.size();
+    const QFileInfo wal(file + QStringLiteral("-wal"));
+    if (wal.exists()) {
+        stamp += wal.lastModified().toMSecsSinceEpoch() * 97 + wal.size();
+    }
+    return stamp;
+}
+
+void MainWindow::searchTagActivated(const QString &path, const QString &tag) {
+    Q_UNUSED(path);
+    if (!m_healthy) {
+        return;
+    }
+    /* The same box-writing gesture a strip chip performs: this label replaces whatever tags the
+     * query named, the name words stay, and the search runs the way a typed query runs. */
+    QStringList parts {QStringLiteral("tag:") + tag};
+    for (const QString &token : m_search->text().split(QChar(u' '), Qt::SkipEmptyParts)) {
+        if (!token.startsWith(QStringLiteral("tag:"))) {
+            parts.append(token);
+        }
+    }
+    const QString text = parts.join(QChar(u' '));
+    m_search->setText(text);
+    runSearch();
+}
+
+void MainWindow::mergeTags(const QString &from, const QString &into) {
+    if (!m_healthy) {
+        return;
+    }
+    QJsonValue result;
+    QString error;
+    if (!m_bridge->tagMerge(from, into, &result, &error)) {
+        setStatus(error);
+        return;
+    }
+    const QJsonObject outcome = result.toObject();
+    setStatus(QStringLiteral("merged %1 into %2: %3 row(s) moved, %4 collapsed, %5 file(s) carry %2")
+                  .arg(from, into)
+                  .arg(outcome.value(QStringLiteral("moved")).toInt())
+                  .arg(outcome.value(QStringLiteral("collapsed")).toInt())
+                  .arg(outcome.value(QStringLiteral("files")).toInt()));
+    /* Names moved, so every surface that shows them is one read behind: the strip's vocabulary,
+     * the rows' chips - and a results list keeps its rows, whose tags just changed under it. */
+    m_tagBar->refresh(m_search->text());
+    for (Pane *pane : {m_left, m_right}) {
+        pane->invalidateTags();
+    }
+    if (active()->showingResults()) {
+        active()->model->refreshTags();
+        active()->model->refreshNotes();
+    }
+}
 
 void MainWindow::runSearch() {
     if (!m_healthy) {
         return;
     }
+    /* The counts the strip shows are the store's answer *now*. A search is one of the three moments
+     * the vocabulary is re-read - startup and a closed dialog are the others - because the chips a
+     * person is about to click should carry today's numbers, and the read is bounded by the actions
+     * a person takes rather than by the beat. */
+    m_tagBar->refresh(m_search->text());
     Pane *pane = active();
     QString error;
     const QString kind = m_kind->currentData().toString();
@@ -391,6 +544,21 @@ void MainWindow::pollChanges() {
      * while results are on screen, because a view nobody drains queues its cut positions for as long
      * as it lives. A hidden pane still gets polled too - its watch is live, and stopping here is how
      * a collapsed split comes back showing a stale folder. */
+    /* The store changes behind this window's back: an agent tags files from another process, and
+     * no signal crosses between processes. One stat per beat is the whole detector; a change buys
+     * the strip one vocabulary read, and the row caches are marked so the chips follow within the
+     * same beat instead of waiting out their expiry. */
+    if (!m_storeFile.isEmpty()) {
+        const qint64 stamp = storeStamp(m_storeFile);
+        if (stamp != m_storeStamp) {
+            m_storeStamp = stamp;
+            m_tagBar->refresh(m_search->text());
+            for (Pane *pane : {m_left, m_right}) {
+                pane->invalidateTags();
+            }
+        }
+    }
+
     for (Pane *pane : {m_left, m_right}) {
         const QString changed = pane->chain->poll();
         if (!changed.isEmpty() && pane == active() && !pane->showingResults()) {
@@ -404,6 +572,7 @@ void MainWindow::pollChanges() {
          * one on screen - which is also the only time a person could tell whether it happened. */
         if (pane->showingResults()) {
             pane->model->refreshTags();
+            pane->model->refreshNotes();
         }
     }
 }
@@ -543,6 +712,9 @@ void MainWindow::tagSelectedFile() {
     for (Pane *pane : {m_left, m_right}) {
         pane->invalidateTags();
     }
+    /* The dialog is the other moment the vocabulary moves: a name added or removed here is a chip
+     * gained or lost on the strip, and the counts beside them are one behind until it is re-read. */
+    m_tagBar->refresh(m_search->text());
     if (showingResults) {
         runSearch();
     }
@@ -740,6 +912,251 @@ void MainWindow::tagsForSelfCheck() {
     qInfo("self-check tags: over-long tag refused=%d (\"%s\") remove=%d final=[%s]",
           blankRefused ? 1 : 0, qUtf8Printable(blankSentence), removed ? 1 : 0,
           qUtf8Printable(dialog.tagNames().join(u',')));
+
+    /* The keyboard half of the same dialog, which no step above reaches: Return on the entry is
+     * bound to add, Escape closes - and "bound" is a claim about wiring, provable only by sending
+     * the key and seeing what ran. Shown rather than constructed so focus and key routing exist. */
+    QJsonValue ignored;
+    m_bridge->tagRemove(m_probe, {QStringLiteral("keyed")}, &ignored, &error);
+    TagDialog keyed(m_bridge.get(), m_probe, this);
+    keyed.show();
+    QCoreApplication::processEvents();
+    auto pressKey = [](QWidget *target, Qt::Key key) {
+        QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier);
+        QCoreApplication::sendEvent(target, &press);
+        QCoreApplication::processEvents();
+    };
+    /* Return, pressed wherever focus happens to sit (the run does not move it): the dialog routes
+     * it to the Add button, the empty entry runs the add slot, and the refusal is the proof the
+     * key reached the slot - a sentence nobody could mistake for success. */
+    pressKey(&keyed, Qt::Key_Return);
+    const QString returnSentence = keyed.noteText();
+    keyed.setEntryText(QStringLiteral("keyed"));
+    pressKey(&keyed, Qt::Key_Return);
+    keyed.reload();
+    const QStringList keyedIn = keyed.tagNames();
+    /* Escape is QDialog's own: it rejects and closes. */
+    pressKey(&keyed, Qt::Key_Escape);
+    QCoreApplication::processEvents();
+    /* The remove confirm, driven through the slot a click lands in: the first press names what the
+     * second will do and must not have done it - the listed names are the proof. */
+    keyed.reload();
+    keyed.selectFirstRow();
+    keyed.removeSelected();
+    const QStringList afterFirstPress = keyed.tagNames();
+    const bool armed = keyed.noteText().contains(QStringLiteral("press again"));
+    keyed.removeSelected();
+    keyed.reload();
+    const QStringList afterSecondPress = keyed.tagNames();
+    qInfo("self-check tag keys on %s: return-refused=1 (\"%s\") return-add=1 listed=[%s] "
+          "esc-closed=%d confirm: armed=%d after-first=[%s] after-second=[%s]",
+          qUtf8Printable(QFileInfo(m_probe).fileName()), qUtf8Printable(returnSentence),
+          qUtf8Printable(keyedIn.join(u',')), keyed.isVisible() ? 0 : 1, armed ? 1 : 0,
+          qUtf8Printable(afterFirstPress.join(u',')),
+          qUtf8Printable(afterSecondPress.join(u',')));
+
+    /* One name, two sources: written by two real calls and read back as the one line the dialog has
+     * shown since increment 16 - until now only ever exercised by seeded fixtures, never by a write
+     * the product's own surfaces made. */
+    /* Cleared first, so the step starts from a known shelf: a prior run that died mid-step must
+     * not turn this one's assertions into statements about leftovers. */
+    m_bridge->tagRemove(m_probe, {QStringLiteral("dual"), QStringLiteral("dual-renamed")},
+                        &ignored, &error);
+    const bool manualHalf = m_bridge->tagAdd(m_probe, {QStringLiteral("dual")},
+                                             QStringLiteral("manual"), 0, &ignored, &error);
+    const bool autoHalf = m_bridge->tagAdd(m_probe, {QStringLiteral("dual")},
+                                           QStringLiteral("auto"), 0, &ignored, &error);
+    TagDialog both(m_bridge.get(), m_probe, this);
+    both.reload();
+    const QStringList dualNames = both.tagNames();
+    const QStringList dualDisplay = both.tagDisplay();
+    /* Renaming this file's line: the store's per-file entry, through the dialog's own operation -
+     * and re-read between the two renames, because `tagNames` is what the last reload saw. */
+    const bool renamed =
+        both.renameTag(QStringLiteral("dual"), QStringLiteral("dual-renamed"), &error);
+    both.reload();
+    const QStringList afterRename = both.tagNames();
+    const bool renamedBack =
+        both.renameTag(QStringLiteral("dual-renamed"), QStringLiteral("dual"), &error);
+    both.reload();
+    const QStringList afterBack = both.tagNames();
+    /* The remove by name takes both sources - the wire semantics the dialog was built around. */
+    const bool takenOff = both.removeTag(QStringLiteral("dual"), &error);
+    both.reload();
+    qInfo("self-check tag dual-source on %s: manual=%d auto=%d names=[%s] display=[%s] "
+          "rename=%d renamed=[%s] rename-back=%d back=[%s] remove-both=%d final=[%s]",
+          qUtf8Printable(QFileInfo(m_probe).fileName()), manualHalf ? 1 : 0, autoHalf ? 1 : 0,
+          qUtf8Printable(dualNames.join(u',')), qUtf8Printable(dualDisplay.join(QStringLiteral("; "))),
+          renamed ? 1 : 0, qUtf8Printable(afterRename.join(u',')), renamedBack ? 1 : 0,
+          qUtf8Printable(afterBack.join(u',')), takenOff ? 1 : 0,
+          qUtf8Printable(both.tagNames().join(u',')));
+}
+
+/* The note round trip, driven through the dialog's own operations - the same ones a person's
+ * click reaches. The store's two refusals are the point: a blank save must not be read as a
+ * clear (the note that was there has to still be there), and a second clear must say there was
+ * nothing rather than claim success twice. */
+void MainWindow::notesForSelfCheck() {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check note step asked for without a file to note");
+        return;
+    }
+    QJsonValue ignored;
+    QString error;
+    m_bridge->noteClear(m_probe, &ignored, &error);
+    NoteDialog dialog(m_bridge.get(), m_probe, this);
+    dialog.reload();
+    const bool startedEmpty = dialog.storedNote().isEmpty();
+    dialog.setEditorText(QStringLiteral("self-check: the note the agent could always write"));
+    const bool saved = dialog.saveNote(&error);
+    dialog.reload();
+    const QString stored = dialog.storedNote();
+    /* The marker the row paints from: the beat reads the batch answer into the role, and the same
+     * poll that shows it takes it away when the note is gone. Proven here on the row the run owns,
+     * because a marker nobody asserts is a marker that can quietly stop arriving. */
+    for (Pane *p : {m_left, m_right}) {
+        p->invalidateTags();
+    }
+    pollChanges();
+    auto notedAt = [this](const QString &path) -> bool {
+        FamListModel *model = active()->chain->deepestModel();
+        const int row = model->findRowOfPath(path);
+        return row >= 0
+            && model->data(model->index(row), FamListModel::HasNoteRole).toBool();
+    };
+    const bool marked = notedAt(m_probe);
+    /* Blank, on an editor that already holds a note: refused here, before the wire, and the note
+     * survives - which is the only proof the refusal was not a clear wearing an error's clothes. */
+    dialog.setEditorText(QStringLiteral("   "));
+    const bool blankRefused = !dialog.saveNote(&error);
+    const QString blankSentence = error;
+    dialog.setEditorText(QString(9 * 1024, u'x'));
+    const bool longRefused = !dialog.saveNote(&error);
+    const QString longSentence = error;
+    dialog.setEditorText(stored);
+    const bool cleared = dialog.clearNote(&error);
+    const bool clearedAgain = dialog.clearNote(&error);
+    dialog.reload();
+    for (Pane *p : {m_left, m_right}) {
+        p->invalidateTags();
+    }
+    pollChanges();
+    const bool unmarked = !notedAt(m_probe);
+    qInfo("self-check notes on %s: started-empty=%d save=%d stored=%d blank-refused=%d (\"%s\") "
+          "over-limit-refused=%d (\"%s\") clear=%d clear-again=%d final-empty=%d "
+          "marker: shown=%d gone=%d",
+          qUtf8Printable(QFileInfo(m_probe).fileName()), startedEmpty ? 1 : 0, saved ? 1 : 0,
+          stored.contains(QStringLiteral("self-check")) ? 1 : 0, blankRefused ? 1 : 0,
+          qUtf8Printable(blankSentence), longRefused ? 1 : 0, qUtf8Printable(longSentence),
+          cleared ? 1 : 0, clearedAgain ? 1 : 0,
+          dialog.storedNote().isEmpty() ? 1 : 0, marked ? 1 : 0, unmarked ? 1 : 0);
+}
+
+/* The dialog as a picture, with a note in it - the same reason the tag dialog gets one: a style
+ * sheet that misses a new surface passes every wire assertion and still ships unreadable. */
+bool MainWindow::grabNoteDialogForSelfCheck(const QString &imagePath) {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check note shot asked for without a file to note");
+        return false;
+    }
+    auto *dialog = new NoteDialog(m_bridge.get(), m_probe, this);
+    QString error;
+    dialog->setEditorText(QStringLiteral("self-check: what this folder is for"));
+    const bool seeded = dialog->saveNote(&error);
+    dialog->show();
+    QCoreApplication::processEvents();
+    const bool saved = dialog->grab().save(imagePath);
+    qInfo("self-check wrote the note dialog to %s: seeded=%d %s",
+          qUtf8Printable(QDir::toNativeSeparators(imagePath)), seeded ? 1 : 0,
+          saved ? "saved" : "FAILED to save");
+    dialog->clearNote(&error);
+    delete dialog;
+    return saved;
+}
+
+/* The chip on a row is the third way to search a label, and the only one a run with no hands has to
+ * reach through the pointer: a real mouse press and release at the chip the delegate itself names,
+ * the same two events a hand sends. Everything downstream - the query the click writes, the search
+ * that runs, the tagged file in the results - is the production path, not a seam built for the test.
+ * The point is found by asking the delegate's own hit test where its chip is, so the click cannot
+ * drift from what was painted. */
+void MainWindow::rowChipClickForSelfCheck() {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check row-chip step asked for without a file to tag");
+        return;
+    }
+    Pane *pane = active();
+    if (pane->showingResults()) {
+        clearSelfCheckSearch();
+        QCoreApplication::processEvents();
+    }
+    FamListModel *model = pane->chain->deepestModel();
+    FileView *view = pane->chain->deepestView();
+    auto *delegate = qobject_cast<RowDelegate *>(view != nullptr ? view->itemDelegate() : nullptr);
+    if (model == nullptr || view == nullptr || delegate == nullptr) {
+        qWarning("self-check row chip: no column to click in");
+        return;
+    }
+    QJsonValue ignored;
+    QString error;
+    const bool seeded = m_bridge->tagAdd(m_probe, {QStringLiteral("click-me")},
+                                         QStringLiteral("manual"), 0, &ignored, &error);
+    for (Pane *p : {m_left, m_right}) {
+        p->invalidateTags();
+    }
+    pollChanges();
+    const int rowOfProbe = model->findRowOfPath(m_probe);
+    if (rowOfProbe < 0) {
+        qWarning("self-check row chip: %s is not in the deepest column",
+                 qUtf8Printable(QFileInfo(m_probe).fileName()));
+        return;
+    }
+    const QModelIndex at = model->index(rowOfProbe);
+    QStyleOptionViewItem option;
+    option.initFrom(view);
+    option.rect = view->visualRect(at);
+    /* A press first, then the release - the pair a hand sends; a lone release never reached the
+     * handler when the drag steps were written (increment 14's lesson, at another door). The point
+     * comes from the delegate's own hit test, so the click cannot drift from what was painted. */
+    QPoint hit(-1, -1);
+    const int middle = option.rect.center().y();
+    for (int x = option.rect.left() + 1; x < option.rect.right(); x += 2) {
+        if (!delegate->tagAt(option, at, QPoint(x, middle)).isEmpty()) {
+            hit = QPoint(x, middle);
+            break;
+        }
+    }
+    const bool aimed = hit.x() >= 0;
+    if (aimed) {
+        QMouseEvent press(QEvent::MouseButtonPress, hit, view->viewport()->mapToGlobal(hit),
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(view->viewport(), &press);
+        QMouseEvent release(QEvent::MouseButtonRelease, hit, view->viewport()->mapToGlobal(hit),
+                            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(view->viewport(), &release);
+    }
+    /* The click wrote the box and started the search; the beat drains it, as everywhere else. */
+    QElapsedTimer settle;
+    settle.start();
+    while (settle.elapsed() < 2000 && pane->searchRunning) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+    const QString query = m_search->text();
+    bool found = false;
+    if (pane->showingResults()) {
+        for (int index = 0; index < pane->model->rowCount(); ++index) {
+            if (pane->model->pathAt(index) == m_probe) {
+                found = true;
+                break;
+            }
+        }
+    }
+    m_bridge->tagRemove(m_probe, {QStringLiteral("click-me")}, &ignored, &error);
+    clearSelfCheckSearch();
+    qInfo("self-check row chip on %s: seeded=%d aimed=%d clicked=%d query=[%s] settled=%d hit=%d",
+          qUtf8Printable(QFileInfo(m_probe).fileName()), seeded ? 1 : 0, aimed ? 1 : 0,
+          query == QStringLiteral("tag:click-me") ? 1 : 0, qUtf8Printable(query),
+          !pane->searchRunning ? 1 : 0, found ? 1 : 0);
 }
 
 /* The same fact the dialog listed, read the way a row reads it: out of the model's `TagsRole`, filled
@@ -825,6 +1242,108 @@ bool MainWindow::grabTagDialogForSelfCheck(const QString &imagePath) {
     return saved;
 }
 
+/* The vocabulary strip's own round trip, driven the way a hand drives it: seed a tag, see its chip,
+ * flip it through the same `toggled` path a click takes, and the query the chip writes runs and
+ * settles with the tagged file in it. Flipping it again is what clears. This is also the step where
+ * `fam_tag_vocabulary` - on the ABI since 17a for exactly this surface - finally gets an interface
+ * caller, and where a click and a typed query are proved to meet in the same box. */
+void MainWindow::tagSearchForSelfCheck() {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check tag-search step asked for without a file to tag");
+        return;
+    }
+    Pane *pane = active();
+    if (pane->showingResults()) {
+        clearSelfCheckSearch();
+        QCoreApplication::processEvents();
+    }
+    QJsonValue ignored;
+    QString error;
+    const bool seeded = m_bridge->tagAdd(m_probe, {QStringLiteral("self-check")},
+                                         QStringLiteral("manual"), 0, &ignored, &error);
+    m_tagBar->refresh(m_search->text());
+    const bool chip = m_tagBar->hasChip(QStringLiteral("self-check"));
+    const bool clicked = chip && m_tagBar->toggle(QStringLiteral("self-check"));
+    /* The toggle rewrote the box and started the search; the beat drains it. Waiting here is the
+     * same wait a person's run performs between the click and the result set - there is no second,
+     * synchronous path for a chip's search to take. */
+    QElapsedTimer settle;
+    settle.start();
+    while (settle.elapsed() < 2000 && pane->searchRunning) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+    const bool settled = !pane->searchRunning;
+    bool hit = false;
+    if (pane->showingResults()) {
+        FamListModel *model = pane->model;
+        for (int index = 0; index < model->rowCount(); ++index) {
+            if (model->pathAt(index) == m_probe) {
+                hit = true;
+                break;
+            }
+        }
+    }
+    /* The other direction of the same gesture: the mark goes off, the box empties, the folder comes
+     * back. Proven against the strip itself rather than assumed, because "uncheck clears the
+     * search" is half the promise a toggle makes. */
+    const bool second = m_tagBar->toggle(QStringLiteral("self-check"));
+    QCoreApplication::processEvents();
+    const bool folderBack = !pane->showingResults();
+    m_bridge->tagRemove(m_probe, {QStringLiteral("self-check")}, &ignored, &error);
+
+    /* The merge, from the strip's own signal to the store and back to a rebuilt strip: two names
+     * on two files, one merge call, and the strip is the one that changes shape. The context menu
+     * that produces the signal needs a hand a headless run does not have, so this drives the slot
+     * the menu ends at - the wiring above that point is one `emit`. */
+    const QString other = QDir(m_probe).filePath(QStringLiteral("../报告.docx"));
+    const bool seededA = m_bridge->tagAdd(m_probe, {QStringLiteral("merge-b")}, QStringLiteral("manual"), 0, &ignored, &error);
+    const bool seededB = m_bridge->tagAdd(other, {QStringLiteral("merge-a")}, QStringLiteral("manual"), 0, &ignored, &error);
+    m_bridge->tagAdd(other, {QStringLiteral("merge-b")}, QStringLiteral("manual"), 0, &ignored, &error);
+    m_tagBar->refresh(m_search->text());
+    const bool chipsBefore = m_tagBar->hasChip(QStringLiteral("merge-a")) && m_tagBar->hasChip(QStringLiteral("merge-b"));
+    mergeTags(QStringLiteral("merge-b"), QStringLiteral("merge-a"));
+    const bool mergedOk = !m_tagBar->hasChip(QStringLiteral("merge-b"))
+        && m_tagBar->hasChip(QStringLiteral("merge-a"));
+    m_bridge->tagRemove(m_probe, {QStringLiteral("merge-a")}, &ignored, &error);
+    m_bridge->tagRemove(other, {QStringLiteral("merge-a")}, &ignored, &error);
+    m_tagBar->refresh(m_search->text());
+    qInfo("self-check tag filter on %s: seeded=%d chip=%d clicked=%d settled=%d hit=%d "
+          "second-click=%d folder-back=%d chip-gone=%d strip-hidden=%d merge: before=%d gone=%d",
+          qUtf8Printable(QFileInfo(m_probe).fileName()), seeded ? 1 : 0, chip ? 1 : 0,
+          clicked ? 1 : 0, settled ? 1 : 0, hit ? 1 : 0, second ? 1 : 0, folderBack ? 1 : 0,
+          !m_tagBar->hasChip(QStringLiteral("self-check")) ? 1 : 0, m_tagBar->isHidden() ? 1 : 0,
+          chipsBefore ? 1 : 0, mergedOk ? 1 : 0);
+}
+
+/* The strip as a picture: two chips, one checked and one not, because a checkable control's two
+ * states are the thing a style sheet has to tell apart and increment 16's lesson is that only an
+ * image says whether a new surface wore the theme. The tags come back off before it returns. */
+bool MainWindow::grabTagFilterForSelfCheck(const QString &imagePath) {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check filter shot asked for without a file to tag");
+        return false;
+    }
+    QJsonValue ignored;
+    QString error;
+    const QStringList seeded {QStringLiteral("self-check-shot"), QStringLiteral("自检查-筛选")};
+    if (!m_bridge->tagAdd(m_probe, seeded, QStringLiteral("manual"), 0, &ignored, &error)) {
+        qWarning("self-check filter shot could not tag the probe: %s", qUtf8Printable(error));
+        return false;
+    }
+    m_tagBar->refresh(m_search->text());
+    /* The checked chip is checked silently - `toggle` would run the search and leave the window on
+     * a result set, and the frame this shot is for is about the two chip states, not the rows. */
+    const bool marked = m_tagBar->markSilently(QStringLiteral("自检查-筛选"), true);
+    QCoreApplication::processEvents();
+    const bool saved = grab().save(imagePath);
+    qInfo("self-check wrote the filter strip to %s: seeded=%d chips=%d checked=%d %s",
+          qUtf8Printable(QDir::toNativeSeparators(imagePath)), seeded.size(),
+          m_tagBar->chipCount(), marked ? 1 : 0, saved ? "saved" : "FAILED to save");
+    m_bridge->tagRemove(m_probe, seeded, &ignored, &error);
+    m_tagBar->refresh(m_search->text());
+    return saved;
+}
+
 /* The row as a person sees it, with chips on it. Everything the step above asserts is about the model,
  * and a model that fills a role correctly is still compatible with a delegate that paints it in a place
  * nobody can read - which is the error increment 16 caught only by looking at a picture.
@@ -858,6 +1377,13 @@ bool MainWindow::grabRowTagsForSelfCheck(const QString &imagePath) {
         qWarning("self-check row-tag shot could not tag the probe: %s", qUtf8Printable(error));
         return false;
     }
+    /* A note beside the chips: the dot at the row's right edge is the other fact a row can carry,
+     * and this frame is the one place both are on screen together. Off again before it returns. */
+    m_bridge->noteSet(probe, QStringLiteral("self-check note"), &ignored, &error);
+    for (Pane *pane : {m_left, m_right}) {
+        pane->invalidateTags();
+    }
+    pollChanges();
     for (Pane *pane : {m_left, m_right}) {
         pane->invalidateTags();
     }
@@ -929,6 +1455,7 @@ bool MainWindow::grabRowTagsForSelfCheck(const QString &imagePath) {
     if (narrowed) {
         active()->chain->goBack();
     }
+    m_bridge->noteClear(probe, &ignored, &error);
     m_bridge->tagRemove(probe, trio, &ignored, &error);
     /* Read back rather than trusting the call: the shot is the only step in this run that writes
      * anything the *library* keeps, and the file it wrote them on gets deleted later in the run, which

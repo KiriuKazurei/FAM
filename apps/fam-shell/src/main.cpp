@@ -176,6 +176,26 @@ int main(int argc, char *argv[]) {
                 window.grabRowTagsForSelfCheck(shot.dir().filePath(
                     shot.completeBaseName() + QStringLiteral(".rowtags.png")));
             });
+            /* The vocabulary strip's round trip: a chip is clicked, the query it writes runs and
+             * settles with the tagged file in it, and a second click clears. It runs after the row
+             * steps' tags are off, so the one chip the strip shows is this step's own. */
+            QTimer::singleShot(5700, [&window]() { window.tagSearchForSelfCheck(); });
+            QTimer::singleShot(5960, [&window, target]() {
+                const QFileInfo shot(target);
+                window.grabTagFilterForSelfCheck(shot.dir().filePath(
+                    shot.completeBaseName() + QStringLiteral(".filter.png")));
+            });
+            /* The chip on the row itself, clicked like a hand clicks it - after the filter strip's
+             * steps and before the drive pick replaces the chain they were pointed at. */
+            QTimer::singleShot(6040, [&window]() { window.rowChipClickForSelfCheck(); });
+            /* The note the agent could always write and the person could never see: a round trip
+             * through the dialog's own operations, then the dialog itself as a picture. */
+            QTimer::singleShot(6350, [&window]() { window.notesForSelfCheck(); });
+            QTimer::singleShot(6550, [&window, target]() {
+                const QFileInfo shot(target);
+                window.grabNoteDialogForSelfCheck(shot.dir().filePath(
+                    shot.completeBaseName() + QStringLiteral(".note.png")));
+            });
             /* The probe file used to be removed here, 80ms after the row-tag shot started pumping the
              * event loop - and a shot that pumps the loop can let a later timer run before it finishes,
              * which took the row out from under the frame it was supposed to be proving. The removal at
@@ -183,31 +203,31 @@ int main(int argc, char *argv[]) {
              * until then and the shot has room to breathe. */
             /* Last, because it replaces the chain: a drive pick is the sidebar doing its only job,
              * and the frame after it shows what the reader would see. */
-            QTimer::singleShot(6100, [&window]() { window.pickFirstDriveForSelfCheck(); });
+            QTimer::singleShot(6700, [&window]() { window.pickFirstDriveForSelfCheck(); });
             /* Then the split, because the frame it produces is the one worth looking at: two panes,
              * each on its own folder, each with its own chain. Collapsing it again is the same button
              * doing the other half of its job, and the collapsed frame is the one a person who never
              * wanted a second column gets. */
-            QTimer::singleShot(6600, [&window]() { window.toggleSplitForSelfCheck(true); });
-            QTimer::singleShot(7100, [&window]() { window.toggleSplitForSelfCheck(false); });
+            QTimer::singleShot(7200, [&window]() { window.toggleSplitForSelfCheck(true); });
+            QTimer::singleShot(7700, [&window]() { window.toggleSplitForSelfCheck(false); });
             /* And open it once more before the frame is taken: the collapse is the half of the
              * button the log proves, the expanded frame is the half a person will actually look at,
              * and one timeline can carry both without inventing a second screenshot path. */
-            QTimer::singleShot(7500, [&window]() { window.toggleSplitForSelfCheck(true); });
+            QTimer::singleShot(8100, [&window]() { window.toggleSplitForSelfCheck(true); });
             /* Drag and drop last, because it is the part of the surface a run with no hands cannot
              * do at all: the two panes are pointed at two folders of the watched tree, a file is
              * written into one of them, and a real drop event is posted at the other one's column -
              * once with no modifier, which is a move, and once with Ctrl, which is a copy. */
-            QTimer::singleShot(7900, [&window]() { window.prepareTransferForSelfCheck(); });
-            QTimer::singleShot(8300, [&window]() { window.moveAcrossPanesForSelfCheck(); });
-            QTimer::singleShot(8700, [&window]() { window.copyBackAcrossPanesForSelfCheck(); });
+            QTimer::singleShot(8500, [&window]() { window.prepareTransferForSelfCheck(); });
+            QTimer::singleShot(8900, [&window]() { window.moveAcrossPanesForSelfCheck(); });
+            QTimer::singleShot(9500, [&window]() { window.copyBackAcrossPanesForSelfCheck(); });
             /* And the drop that is not a transfer: back into the folder the file is already in. A
              * person does this by accident, and the difference between "nothing to do" and "the core
              * refused it" is only visible in the sentence the window prints. */
-            QTimer::singleShot(9000, [&window]() { window.dropInPlaceForSelfCheck(); });
+            QTimer::singleShot(9800, [&window]() { window.dropInPlaceForSelfCheck(); });
             /* The same opt-in undo as the probe's, a beat after the copy has left a file at each end
              * of the tree, so the run finishes with nothing of its own in the watched folder. */
-            QTimer::singleShot(9300, [&window]() { window.removeSelfCheckProbe(); });
+            QTimer::singleShot(10100, [&window]() { window.removeSelfCheckProbe(); });
         }
         /* The depth cap is only crossed by going deep, and crossing it is what drops a column from
          * the front of the chain - the one structural change that makes every captured position
@@ -222,7 +242,7 @@ int main(int argc, char *argv[]) {
                                [&window]() { window.clickHeaderForSelfCheck(); });
         }
         const int grabAt =
-            std::max({2500, mutate ? 9600 : 0, deep > 0 ? 2800 + deep * 300 : 0});
+            std::max({2500, mutate ? 10600 : 0, deep > 0 ? 2800 + deep * 300 : 0});
         QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so
@@ -235,8 +255,9 @@ int main(int argc, char *argv[]) {
              * poll plus the headers the paint needed; a `retries` above zero means buffers came back
              * truncated and the shell paid twice for an answer it already had. */
             const FamIpcCount ipc = window.ipcCount();
-            qInfo("ipc: headers=%d pages=%d polls=%d retries=%d tags=%d total=%d", ipc.headers,
-                  ipc.pages, ipc.polls, ipc.retries, ipc.tagReads, ipc.total());
+            qInfo("ipc: headers=%d pages=%d polls=%d retries=%d tags=%d notes=%d total=%d",
+                  ipc.headers, ipc.pages, ipc.polls, ipc.retries, ipc.tagReads, ipc.noteReads,
+                  ipc.total());
             if (window.grab().save(target)) {
                 qInfo("self-check wrote %s at %lldms",
                       qUtf8Printable(QDir::toNativeSeparators(target)), boot.elapsed());

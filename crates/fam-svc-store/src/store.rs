@@ -14,7 +14,7 @@ use crate::model::{
 
 /// The schema this build writes and expects. Public because a caller that reports store health
 /// (`fam stats`, `whoami`) should quote the same number the migration ran to, not its own guess.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Rows returned by a search that does not ask for a page.
 pub const DEFAULT_SEARCH_LIMIT: i64 = 500;
@@ -66,6 +66,24 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 "#;
 
+/// Version 3 reshapes the one tag-name index, and adds nothing else.
+///
+/// v1's `tags_tag_source_idx (tag, source)` answered a question nothing asks: `source` is only ever
+/// filtered *under* a `path_norm` (the primary key's own prefix), never across the library. The two
+/// reads that go out by tag name - a `tag:` search and the vocabulary count - both want the row's
+/// `path_norm` after the name, and with `(tag, source)` each hit cost a second hop into the table.
+/// `(tag, path_norm)` covers both: the search's `WHERE tag IN (...)` and the vocabulary's
+/// `GROUP BY tag` walk the index, and the join to `files` starts from its own primary key. The
+/// before/after numbers are in the increment 17d account - recorded on the same machine and build,
+/// both schemas fed by the same bench cases.
+///
+/// `DROP INDEX` because an index that no read uses is pure write cost - the kind of thing that
+/// survives because deleting it needs a migration and keeping it needs nothing.
+const SCHEMA_V3: &str = r#"
+CREATE INDEX IF NOT EXISTS tags_tag_path_idx ON tags(tag, path_norm);
+DROP INDEX IF EXISTS tags_tag_source_idx;
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddOutcome {
     pub inserted: usize,
@@ -84,6 +102,25 @@ pub struct StoreStats {
     pub tags: i64,
     pub manual: i64,
     pub auto: i64,
+}
+
+/// What one vocabulary-wide merge did. `moved` rows truly changed their name; `collapsed` rows died
+/// because the file already carried the target name from the same source; `files` is how many files
+/// carry the target name after the merge. `moved + collapsed` is every row the source name had.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MergeOutcome {
+    pub moved: usize,
+    pub collapsed: usize,
+    pub files: usize,
+}
+
+/// What one prune found. Counted before anything is deleted, so a dry run and an applied run report
+/// the same shape - and the counts are what `fam store prune` prints either way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PruneOutcome {
+    pub files: usize,
+    pub tags: usize,
+    pub notes: usize,
 }
 
 pub struct TagStore {
@@ -120,6 +157,9 @@ impl TagStore {
         }
         if version < 2 {
             conn.execute_batch(SCHEMA_V2)?;
+        }
+        if version < 3 {
+            conn.execute_batch(SCHEMA_V3)?;
         }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -197,6 +237,103 @@ impl TagStore {
             sql.push_str(&format!(" AND tag IN ({})", placeholders.join(",")));
         }
         Ok(self.conn.execute(&sql, params_from_iter(sql_refs(&args)))?)
+    }
+
+    /// Renames a label **across the library**: every row named `from` - both sources, every file -
+    /// ends up named `into`, and where a file already carried `into` from the same source the two
+    /// rows collapse into the one that was already there (its priority stands; the moved row is
+    /// dropped rather than doubled). With no `into` in the library this is just a rename; with one,
+    /// it is the merge that consolidates a duplicate - `pdf` into `PDF`, `合同2024` into `合同`.
+    /// The two names are validated like any other tag text, and a name that does not exist is an
+    /// error rather than a silent nothing: a merge of a typo onto a real name is exactly the call
+    /// where "0 rows affected" would read as success.
+    pub fn merge_tags(&self, from: &str, into: &str) -> Result<MergeOutcome, StoreError> {
+        validate_tag(from)?;
+        validate_tag(into)?;
+        if from == into {
+            return Err(StoreError::NothingToChange);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let existing: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM tags WHERE tag = ?1",
+            params![from],
+            |row| row.get(0),
+        )?;
+        if existing == 0 {
+            return Err(StoreError::TagNotFound(from.to_string()));
+        }
+        // The update skips the identities the target already holds - `OR IGNORE` over the
+        // `(path_norm, tag, source)` unique - and the delete reaps exactly those, so `collapsed`
+        // is the number of would-be duplicates and `moved` the number of rows that truly moved.
+        let moved = tx.execute(
+            "UPDATE OR IGNORE tags SET tag = ?1 WHERE tag = ?2",
+            params![into, from],
+        )?;
+        let collapsed = tx.execute("DELETE FROM tags WHERE tag = ?1", params![from])?;
+        let files: i64 = tx.query_row(
+            "SELECT COUNT(DISTINCT path_norm) FROM tags WHERE tag = ?1",
+            params![into],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(MergeOutcome {
+            moved,
+            collapsed,
+            files: files as usize,
+        })
+    }
+
+    /// Counts (when `apply` is false) or deletes (when true) every `files` row whose path the
+    /// filesystem no longer has. The rows it takes with it are the schema's own decision, not this
+    /// function's: `ON DELETE CASCADE` carries the tags and the note, because a tag on a path
+    /// nothing can stat is a row no search can ever serve - the search backend skips it, and the
+    /// `files` row is what made the library grow with every path that was ever labelled
+    /// (measured in the increment 16 account).
+    ///
+    /// Deliberately a command, not a habit: a network drive that is merely *offline* looks exactly
+    /// like one whose files are gone, so nothing here runs on open or on a timer. The caller - the
+    /// `fam store prune` command - prints what a dry run found and asks before applying.
+    pub fn prune_missing(&self, apply: bool) -> Result<PruneOutcome, StoreError> {
+        let paths: Vec<(String, String)> = {
+            let mut stmt = self.conn.prepare("SELECT path_norm, path FROM files")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let gone: Vec<String> = paths
+            .into_iter()
+            .filter(|(_, path)| fs::metadata(path).is_err())
+            .map(|(key, _)| key)
+            .collect();
+
+        let mut outcome = PruneOutcome {
+            files: gone.len(),
+            ..PruneOutcome::default()
+        };
+        for chunk in gone.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let args: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            {
+                let mut stmt = self.conn.prepare(&format!(
+                    "SELECT COUNT(*) FROM tags WHERE path_norm IN ({placeholders})"
+                ))?;
+                outcome.tags += stmt
+                    .query_row(params_from_iter(args.iter()), |row| row.get::<_, i64>(0))?
+                    as usize;
+                let mut stmt = self.conn.prepare(&format!(
+                    "SELECT COUNT(*) FROM notes WHERE path_norm IN ({placeholders})"
+                ))?;
+                outcome.notes += stmt
+                    .query_row(params_from_iter(args.iter()), |row| row.get::<_, i64>(0))?
+                    as usize;
+            }
+            if apply {
+                let sql = format!("DELETE FROM files WHERE path_norm IN ({placeholders})");
+                self.conn.execute(&sql, params_from_iter(args.iter()))?;
+            }
+        }
+        Ok(outcome)
     }
 
     pub fn tags_of(
@@ -372,7 +509,7 @@ impl TagStore {
     ///
     /// `COUNT(DISTINCT path_norm)` and not `COUNT(*)` because the same name can sit on one file twice
     /// - once `manual`, once `auto` - and a bar that said "3" for two files would be describing rows,
-    /// not the thing a person is about to filter.
+    ///   not the thing a person is about to filter.
     ///
     /// Unbounded by design: a vocabulary is small, and a cap here would silently hide a tag the
     /// person can see on a row, which is worse than a long list.

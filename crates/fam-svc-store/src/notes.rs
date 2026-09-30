@@ -10,9 +10,10 @@
 //! exact path. That keeps "what did the agent see" answerable from the audit trail alone: a note is
 //! never swept up by a search nobody asked for.
 
+use std::collections::HashSet;
 use std::path::Path;
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, params_from_iter, OptionalExtension};
 
 use crate::error::StoreError;
 use crate::store::TagStore;
@@ -76,6 +77,24 @@ impl TagStore {
             })
             .optional()?;
         Ok(found)
+    }
+
+    /// Which of these keys carry a note - the batch read a listing's "has a note" marker is drawn
+    /// from. Keyed by the caller's folding (`path_norm`), like `tag_names_for`; a path without a
+    /// note is absent rather than present with a false, so the answer's size is the number of
+    /// marked rows and nothing else.
+    pub fn has_notes(&self, keys: &[String]) -> Result<HashSet<String>, StoreError> {
+        if keys.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let placeholders = vec!["?"; keys.len()].join(",");
+        let sql = format!("SELECT path_norm FROM notes WHERE path_norm IN ({placeholders})");
+        let mut statement = self.connection().prepare(&sql)?;
+        let rows = statement
+            .query_map(params_from_iter(keys.iter().map(String::as_str)), |row| {
+                row.get::<_, String>(0)
+            })?;
+        Ok(rows.collect::<Result<HashSet<_>, _>>()?)
     }
 
     /// Drops the note on `path`. True when there was one to drop, so a caller can tell "cleared"

@@ -107,6 +107,47 @@ void FamListModel::refreshTags() {
     emit dataChanged(index(m_first), index(last), {TagsRole});
 }
 
+void FamListModel::setNoteFetcher(NoteFetcher fetch) {
+    m_noteFetch = std::move(fetch);
+    m_noteDirty = true;
+}
+
+void FamListModel::invalidateNotes() {
+    m_noteDirty = true;
+}
+
+void FamListModel::refreshNotes() {
+    if (m_noteFetch == nullptr || m_first < 0 || m_rows.isEmpty() || m_total == 0) {
+        return;
+    }
+    QStringList paths;
+    paths.reserve(m_rows.size());
+    for (int row = m_first; row < m_first + int(m_rows.size()); ++row) {
+        paths.append(pathAt(row));
+    }
+    const bool moved = paths != m_notedPaths;
+    if (!moved && !m_noteDirty) {
+        if (m_noteDue > 0) {
+            --m_noteDue;
+            return;
+        }
+    }
+    QSet<QString> answer;
+    QString error;
+    if (!m_noteFetch(paths, &answer, &error)) {
+        return;
+    }
+    m_notedPaths = std::move(paths);
+    m_noteDirty = false;
+    m_noteDue = kTagRefreshBeats;
+    if (answer == m_notes) {
+        return;
+    }
+    m_notes = std::move(answer);
+    const int last = qMin(m_first + int(m_notedPaths.size()) - 1, int(m_total) - 1);
+    emit dataChanged(index(m_first), index(last), {HasNoteRole});
+}
+
 int FamListModel::rowCount(const QModelIndex &parent) const {
     return parent.isValid() ? 0 : int(m_total);
 }
@@ -248,6 +289,8 @@ QVariant FamListModel::data(const QModelIndex &index, int role) const {
          * would reach it once per row per frame. Rows the beat has not read yet answer empty, which
          * is why the delegate reserves no room for tags it does not have. */
         return m_tags.value(pathAt(index.row()));
+    case HasNoteRole:
+        return m_notes.contains(pathAt(index.row()));
     default:
         return {};
     }
@@ -262,6 +305,7 @@ QHash<int, QByteArray> FamListModel::roleNames() const {
         {PathRole, "path"},
         {DirectoryRole, "directory"},
         {TagsRole, "tags"},
+        {HasNoteRole, "hasNote"},
     };
 }
 
@@ -299,6 +343,15 @@ QMimeData *FamListModel::mimeData(const QModelIndexList &indexes) const {
     /* Null rather than an empty payload: `QAbstractItemViewPrivate::startDrag` stops when the model
      * hands back nothing, which is the right answer for a selection of rows the core could not name. */
     return paths.isEmpty() ? nullptr : FileView::mimeDataForPaths(paths);
+}
+
+int FamListModel::findRowOfPath(const QString &path) const {
+    for (int index = 0; index < m_rows.size(); ++index) {
+        if (pathAt(index) == path) {
+            return index;
+        }
+    }
+    return -1;
 }
 
 QString FamListModel::pathAt(int index) const {

@@ -13,13 +13,14 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use fam_core::{Cancellation, Config, Item, Kind, Order, PathKey, Prune, SearchRequest, SortKey};
 use fam_svc_audit::{Actor, AuditLog, Draft, Op, Options as AuditOptions};
 use fam_svc_auth::{Token, TokenStore, Verb};
 use fam_svc_index::{Collection, DirIndex, SearchRouter};
+use fam_svc_store::TagSearch;
 use serde_json::{json, Value};
 
 use crate::gate::Gate;
@@ -82,7 +83,7 @@ pub struct Server {
     gate: Gate,
     index: DirIndex,
     router: Arc<SearchRouter>,
-    tags: fam_svc_store::TagStore,
+    tags: Arc<Mutex<fam_svc_store::TagStore>>,
     /// A fingerprint of the credential file as it was read at startup. A change makes every later
     /// call refuse, because serving on a table that may have lost a revoke is the one thing this
     /// layer is not allowed to do.
@@ -113,8 +114,16 @@ impl Server {
         })?;
         let credentials = fingerprint(&config.mcp_token_file);
         let index = DirIndex::with_budget_bytes(config.cache_budget_bytes());
-        let router = Arc::new(SearchRouter::from_config(&config));
-        let tags = fam_svc_store::TagStore::open(&config.database_path)?;
+        // The store first, because one of the router's backends is a reader of it: a search that
+        // names a tag is answered by the library, under the same scope rules and the same gate as a
+        // name search - the router's own `Scope` drops any hit outside the configured roots.
+        let tags = Arc::new(Mutex::new(fam_svc_store::TagStore::open(
+            &config.database_path,
+        )?));
+        let router = Arc::new(
+            SearchRouter::from_config(&config)
+                .with_provider(Box::new(TagSearch::new(Arc::clone(&tags)))),
+        );
         let gate = Gate::new(
             &config.search_roots,
             Prune::from_config(&config),
@@ -142,8 +151,13 @@ impl Server {
     }
 
     /// The tag and note store, for the sibling module that implements the tools that change it.
-    pub(crate) fn tags(&self) -> &fam_svc_store::TagStore {
-        &self.tags
+    /// Shared with the search backend, which reads it on the router's thread; a poisoned mutex is
+    /// recovered the way the core recovers its own, because a panic in one tool call must not take
+    /// the store away from every later one.
+    pub(crate) fn tags(&self) -> std::sync::MutexGuard<'_, fam_svc_store::TagStore> {
+        self.tags
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// One line in, one line out. `None` means nothing is written - which is correct for a
@@ -329,6 +343,14 @@ impl Server {
             .map_err(|refusal| refusal.message())
     }
 
+    /// The one question a no-path verb can still be asked. Same sentence as `admit`'s first
+    /// refusal, because it is the same question.
+    pub(crate) fn admit_verb(&self, verb: Verb) -> Result<(), String> {
+        self.gate
+            .admit_verb(&self.token, verb)
+            .map_err(|refusal| refusal.message())
+    }
+
     fn dispatch(&mut self, verb: Verb, request: &Request) -> ToolAnswer {
         match verb {
             Verb::WhoAmI => self.whoami(),
@@ -370,6 +392,7 @@ impl Server {
                     Err(error) => ToolAnswer::error(error),
                 }
             }),
+            Verb::TagsMerge => self.tags_merge(request),
             Verb::NoteSet => self.arg_path(request, "path", |server, path| {
                 match request.string_param("body") {
                     Ok(body) => server.note_set(&path, &body),
@@ -658,6 +681,7 @@ fn operation(verb: Verb) -> Option<Op> {
         Verb::TagsGet => Op::McpTagsGet,
         Verb::TagsSet => Op::McpTagsSet,
         Verb::TagsRemove => Op::McpTagsRemove,
+        Verb::TagsMerge => Op::McpTagsMerge,
         Verb::NoteGet => Op::McpNoteGet,
         Verb::NoteSet => Op::McpNoteSet,
         Verb::NoteClear => Op::McpNoteClear,
@@ -723,6 +747,19 @@ fn args_of(verb: Verb, request: &Request) -> String {
                 .get("body")
                 .and_then(Value::as_str)
                 .map(str::len)
+                .unwrap_or_default()
+        ),
+        Verb::TagsMerge => format!(
+            "from={} into={}",
+            request
+                .params
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            request
+                .params
+                .get("into")
+                .and_then(Value::as_str)
                 .unwrap_or_default()
         ),
         Verb::TagsSet | Verb::TagsRemove => format!(

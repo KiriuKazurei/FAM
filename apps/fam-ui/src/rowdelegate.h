@@ -3,6 +3,7 @@
 
 #include <QStyledItemDelegate>
 #include <QStringList>
+#include <QVector>
 
 #include "theme.h"
 
@@ -21,6 +22,7 @@ struct RowRoles {
     int size;
     int directory;
     int tags;
+    int hasNote;
     QString (*formatSize)(quint64);
 };
 
@@ -59,6 +61,23 @@ public:
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
                const QModelIndex &index) const override;
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override;
+    /* A click on a chip is a gesture about that label, and the delegate is the only place that
+     * knows where it painted each one - so the hit test lives here, beside the packing it must
+     * agree with. `QStyledItemDelegate::editorEvent` forwards releases here; one that lands on a
+     * chip is consumed (the view's selection and double-click machinery never see it), and one
+     * that lands anywhere else is the row's ordinary business. */
+    bool editorEvent(QEvent *event, QAbstractItemModel *model, const QStyleOptionViewItem &option,
+                     const QModelIndex &index) override;
+
+    /* The tag whose chip sits under `pos`, or an empty string when the point is on none of them.
+     * The `+N` counter answers nothing: it is a count, not a label. */
+    QString tagAt(const QStyleOptionViewItem &option, const QModelIndex &index,
+                  const QPoint &pos) const;
+
+signals:
+    /* A chip was clicked on this row. The model index travels so the receiver can say which file
+     * it was - the delegate serves two models and knows neither's path role. */
+    void tagClicked(const QModelIndex &index, const QString &tag);
 
 private:
     /* The 16px box the icon (or its absence) occupies, given a row's inner rect. */
@@ -86,6 +105,25 @@ private:
      * chips. */
     int paintTags(QPainter *painter, const QRect &row, const QStringList &tags, int left,
                   int right) const;
+
+    /* The row's shape, decided once and read twice: the painter lays the row out with this, and the
+     * hit test lays it out again with the same inputs - so where a chip can be clicked is exactly
+     * where a chip was painted, by construction rather than by two copies agreeing. */
+    struct Layout {
+        int cursor;    /* where the name (and the band's left bound) starts */
+        int right;     /* what the band right-aligns against, kind and size already taken out */
+        int kept;      /* how many chips fit; the rest fold into the counter */
+        bool showKind;
+        bool showSize;
+        bool showNote; /* the has-a-note dot, the first field to give its room up */
+    };
+    Layout layoutRow(const QRect &ground, const QStringList &tags, const QString &kind,
+                     const QString &size, bool noted) const;
+    /* The dot at the right end of the row. Returns where the next field to its left may end. */
+    int paintNoteMark(QPainter *painter, const QRect &row, int right) const;
+    /* The strings a row's ladder is computed from, read off the model once for both readers. */
+    QString kindOf(const QModelIndex &index, bool directory) const;
+    QString sizeOf(const QModelIndex &index, bool directory) const;
 
     const Theme *m_theme;
     RowRoles m_roles;

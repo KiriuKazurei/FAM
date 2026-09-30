@@ -127,6 +127,34 @@
       "errors": 0,
       "entries_per_s": 12215
     },
+    "tags_search": {
+      "id": "tags_search",
+      "corpus": "synthetic: 2000 tagged files",
+      "note": "a tag carried by every one of 2000 files, answered up to the 500-row default",
+      "samples": 300,
+      "p50_us": 11894,
+      "p95_us": 13625,
+      "min_us": 11377,
+      "max_us": 18946,
+      "entries": 2000,
+      "dirs": 1,
+      "errors": 0,
+      "entries_per_s": 164870
+    },
+    "tags_vocabulary": {
+      "id": "tags_vocabulary",
+      "corpus": "synthetic: 2000 tagged files",
+      "note": "the whole vocabulary - one row per distinct name, files counted - over 2000 files",
+      "samples": 300,
+      "p50_us": 1261,
+      "p95_us": 1456,
+      "min_us": 1237,
+      "max_us": 2356,
+      "entries": 2000,
+      "dirs": 1,
+      "errors": 0,
+      "entries_per_s": 1541672
+    },
     "viewport_from_cache": {
       "id": "viewport_from_cache",
       "corpus": "D:/Applications/Qt/6.11/6.11.2/mingw_64/bin",

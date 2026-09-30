@@ -44,6 +44,13 @@ pub enum Mode {
     TagsPerRow,
     /// The same window's tags fetched by one query over all its paths.
     TagsBatch,
+    /// A `tag:` search as the store answers it: every file carrying one common name, up to the
+    /// default limit. This is the SQL a tag query is - the hydration that turns its rows into
+    /// `SearchHit`s is a filesystem read on top and is deliberately not priced here.
+    TagSearch,
+    /// The whole-vocabulary read the filter bar is drawn from: one row per distinct name with the
+    /// count of files carrying it.
+    TagVocabulary,
 }
 
 pub struct Case {
@@ -215,6 +222,29 @@ impl Case {
                 mode: Mode::TagsBatch,
                 note: "the same 128-row window's tags, fetched by one query over the paths",
             },
+            Case {
+                id: "tags_search",
+                env_var: "",
+                default_corpus: "",
+                // The default limit is what a caller that names no number gets, so the shape is
+                // "a tag lots of files carry, answered up to 500 rows" - the worst ordinary case
+                // of a tag query, not a cherry-picked rare one.
+                iterations: 300,
+                entry_cap: 2_000,
+                window: 0,
+                mode: Mode::TagSearch,
+                note: "a tag carried by every one of 2000 files, answered up to the 500-row default",
+            },
+            Case {
+                id: "tags_vocabulary",
+                env_var: "",
+                default_corpus: "",
+                iterations: 300,
+                entry_cap: 2_000,
+                window: 0,
+                mode: Mode::TagVocabulary,
+                note: "the whole vocabulary - one row per distinct name, files counted - over 2000 files",
+            },
         ]
     }
 
@@ -258,6 +288,8 @@ impl Case {
                 | Mode::AuditAppend
                 | Mode::TagsPerRow
                 | Mode::TagsBatch
+                | Mode::TagSearch
+                | Mode::TagVocabulary
         );
         let corpus = self.corpus();
         if !synthetic && !corpus.is_dir() {
@@ -275,6 +307,8 @@ impl Case {
             Mode::AuditAppend => measure_audit_append(rounds),
             Mode::TagsPerRow => measure_tags(rounds, self.entry_cap, true),
             Mode::TagsBatch => measure_tags(rounds, self.entry_cap, false),
+            Mode::TagSearch => measure_tag_queries(rounds, self.entry_cap, false),
+            Mode::TagVocabulary => measure_tag_queries(rounds, self.entry_cap, true),
         };
         samples.durations.sort_unstable();
 
@@ -285,7 +319,7 @@ impl Case {
             corpus: if synthetic {
                 match self.mode {
                     Mode::AuditAppend => "synthetic: one log left open".to_string(),
-                    Mode::TagsPerRow | Mode::TagsBatch => {
+                    Mode::TagsPerRow | Mode::TagsBatch | Mode::TagSearch | Mode::TagVocabulary => {
                         format!("synthetic: {} tagged files", self.entry_cap)
                     }
                     _ => format!("synthetic: {} rows", self.entry_cap),
@@ -615,6 +649,54 @@ fn measure_tags(rounds: usize, rows: usize, per_row: bool) -> Samples {
         samples.entries = rows as u64;
         samples.dirs = 1;
         samples.errors = u64::from(found != rows * 2);
+    }
+    samples
+}
+
+/// A tag query and the vocabulary read, against one library: 2000 files, every one carrying the
+/// common name `contract`, and one of twenty cycling names besides - so a search answers 500 rows
+/// under the default limit and the vocabulary holds 21 names. `errors` is the same self-check the
+/// tags cases carry: a query that comes back with the wrong row count means the measurement
+/// measured nothing.
+fn measure_tag_queries(rounds: usize, rows: usize, vocabulary: bool) -> Samples {
+    use fam_svc_store::SearchRequest as TagRequest;
+
+    let (_scratch, store, _paths) = tagged_store(rows);
+    // One more name per file, cycling over twenty: the library this builds is what a real one
+    // looks like - some names on everything, most on a fraction.
+    let extras: Vec<String> = (0..rows)
+        .map(|index| format!("bucket-{}", index % 20))
+        .collect();
+    {
+        use fam_svc_store::NewTag;
+        for (index, extra) in extras.iter().enumerate().take(rows) {
+            let path = _scratch.path().join(format!("file-{index:04}.txt"));
+            store
+                .add_tags(&path, &[NewTag::manual(extra)])
+                .expect("the extra tag is accepted");
+        }
+    }
+
+    let mut samples = new_samples(rounds);
+    for _ in 0..rounds {
+        let started = Instant::now();
+        let checked = if vocabulary {
+            // `contract` and `2024` from the seeder, plus the twenty cycling names.
+            let facets = store.vocabulary().map(|facets| facets.len()).unwrap_or(0);
+            u64::from(facets != 22)
+        } else {
+            let found = store
+                .search(&TagRequest::new(["contract"]).match_all().limit(500))
+                .map(|rows| rows.len())
+                .unwrap_or(0);
+            u64::from(found != 500)
+        };
+        let elapsed = started.elapsed();
+        samples.durations.push(elapsed.as_micros() as u64);
+        samples.total += elapsed;
+        samples.entries = rows as u64;
+        samples.dirs = 1;
+        samples.errors = checked;
     }
     samples
 }
