@@ -133,6 +133,10 @@ public:
      * then the move goes back - asserted on the disk, which is the only place "undone" is true. */
     void undoForSelfCheck();
 
+    /* The drop hover, entered and left with real drag events: the border property is the assertion,
+     * and the frame between them is the picture. */
+    void dropHoverForSelfCheck(const QString &imagePath);
+
     /* The note round trip on the probe file: none, written, read back, a blank save refused
      * without crossing the wire, cleared - and a second clear reporting there was nothing. Every
      * call goes through the dialog's own operations, which are the same ones a click reaches. */

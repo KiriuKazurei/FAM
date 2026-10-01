@@ -24,6 +24,18 @@ FileView::FileView(QWidget *parent) : QListView(parent) {
     setDropIndicatorShown(false);
 }
 
+void FileView::setDropHover(bool on) {
+    if (property("dropHover").toBool() == on) {
+        return;
+    }
+    setProperty("dropHover", on);
+    /* The sheet matches on properties, but only re-resolves a widget when told: unpolish/polish is
+     * what turns the change into a repaint. */
+    style()->unpolish(this);
+    style()->polish(this);
+    update();
+}
+
 void FileView::relayTagClick(const QModelIndex &index, const QString &tag) {
     const QString path = index.data(FamListModel::PathRole).toString();
     if (!path.isEmpty()) {
@@ -64,6 +76,7 @@ bool FileView::takes(const QMimeData *data) const {
 }
 
 void FileView::dragEnterEvent(QDragEnterEvent *event) {
+    setDropHover(takes(event->mimeData()));
     if (takes(event->mimeData())) {
         event->acceptProposedAction();
     } else {
@@ -71,11 +84,20 @@ void FileView::dragEnterEvent(QDragEnterEvent *event) {
     }
 }
 
+void FileView::dragLeaveEvent(QDragLeaveEvent *event) {
+    /* Cleared even when the view was never a target, for the same reason it is set conditionally:
+     * the property is the answer to "would this column take it", and a stale yes outlives the drag
+     * that asked. */
+    setDropHover(false);
+    event->accept();
+}
+
 void FileView::dragMoveEvent(QDragMoveEvent *event) {
     /* Answered again on every move rather than once at the border: a drag manager that gets no answer
      * mid-drag treats the cursor as being over a target that changed its mind, and shows the no-drop
      * cursor. `QDragMoveEvent` is a sibling of `QDragEnterEvent` rather than a derived class, so the
      * two answers are written out twice. */
+    setDropHover(takes(event->mimeData()));
     if (takes(event->mimeData())) {
         event->acceptProposedAction();
     } else {
@@ -84,6 +106,9 @@ void FileView::dragMoveEvent(QDragMoveEvent *event) {
 }
 
 void FileView::dropEvent(QDropEvent *event) {
+    /* The drag is over the moment something lands, accepted or not: the border says "would take it",
+     * and nothing is being taken any more. */
+    setDropHover(false);
     const QStringList paths = pathsOf(event->mimeData());
     if (m_folder.isEmpty() || paths.isEmpty()) {
         event->ignore();

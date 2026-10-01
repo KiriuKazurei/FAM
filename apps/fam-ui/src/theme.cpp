@@ -94,6 +94,14 @@ QListView#fileList, QListWidget {
     padding: {{xxs}}px 0px;
     outline: none;
 }
+/* The "this column will take it" answer: while one of our own payloads is over a column, its list
+ * grows the interaction colour as a border. The destination is the column's folder, not a row -
+ * which is why the indicator is on the whole list and why the drop indicator line stayed off
+ * (increment 14): a line between two rows says "lands here", and nothing lands between rows. */
+QListView#fileList[dropHover="true"] {
+    border: 1px solid {{primary}};
+    border-radius: {{radiusLG}}px;
+}
 
 /* ---- rows ------------------------------------------------------------
    The file rows are painted by RowDelegate, which owns their ground, inset and radius: a delegate
@@ -593,6 +601,10 @@ QVector<Theme::ContrastPair> Theme::contrastPairs() const {
         /* The has-a-note dot, quoted at its worst ground (see above). A UI component that carries
          * information, so the non-text 3:1 floor applies rather than the decorative exemption. */
         {"备注点 / 最不利行底", t.accentText, worstNoteGround, 3.0, false},
+        /* The drop hover's border against the container it sits on: an indicator that says "this
+         * column will take it", which is information - so 3:1, gated, unlike the input border it
+         * sits beside in the exempt list. */
+        {"拖放描边 / 容器", t.primary, t.bgContainer, 3.0, false},
     };
     QVector<ContrastPair> pairs;
     for (const Raw &entry : raw) {

@@ -1211,6 +1211,47 @@ bool MainWindow::grabNoteDialogForSelfCheck(const QString &imagePath) {
     return saved;
 }
 
+/* The drop hover, driven by the two events a drag sends and the one it ends with: an enter from
+ * our own payload lights the column's border (the property the style sheet reads is the assertion),
+ * a leave puts it out. The frame between the two events is the only picture of a state that exists
+ * for exactly one drag - which is why it is taken here, mid-drag, rather than composed later. */
+void MainWindow::dropHoverForSelfCheck(const QString &imagePath) {
+    if (!m_healthy) {
+        qWarning("self-check drop-hover step asked for without a working core");
+        return;
+    }
+    Pane *pane = active();
+    FileView *view = pane->chain->deepestView();
+    if (view == nullptr || view->viewport() == nullptr) {
+        qWarning("self-check drop hover: no column to hover over");
+        return;
+    }
+    /* The payload is the drag file wherever the undo left it - the transfer steps remember both
+     * ends, and after the undos it is back at the copy's end. A missing file means this step runs
+     * in a configuration that never made one, and says so instead of carrying a payload of nothing. */
+    QString source = m_draggedFrom;
+    if (!QFile::exists(source)) {
+        source = m_draggedTo;
+    }
+    if (source.isEmpty() || !QFile::exists(source)) {
+        qWarning("self-check drop hover: no drag file to carry");
+        return;
+    }
+    const std::unique_ptr<QMimeData> data(FileView::mimeDataForPaths(QStringList{source}));
+    const QPoint middle(view->viewport()->width() / 2, view->viewport()->height() / 2);
+    QDragEnterEvent enter(middle, Qt::MoveAction, data.get(), Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(view->viewport(), &enter);
+    QCoreApplication::processEvents();
+    const bool lit = view->property("dropHover").toBool();
+    const bool saved = grab().save(imagePath);
+    qInfo("self-check drop hover: entered=1 lit=%d shot=%s", lit ? 1 : 0,
+          saved ? qUtf8Printable(QDir::toNativeSeparators(imagePath)) : "FAILED");
+    QDragLeaveEvent leave;
+    QCoreApplication::sendEvent(view->viewport(), &leave);
+    QCoreApplication::processEvents();
+    qInfo("self-check drop hover left: lit=%d", view->property("dropHover").toBool() ? 1 : 0);
+}
+
 /* The undo, driven the way a hand drives it: a real Ctrl+Z sent to the window, twice. The stack
  * after the three drop steps holds the copy first, then the move - so the first key removes the
  * duplicate, the second moves the file back to where the drag picked it up, and every claim is

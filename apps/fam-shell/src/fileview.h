@@ -50,6 +50,10 @@ public:
      * turns it into the view's `tagActivated` by reading the path off its own model. Called from
      * the two places a row delegate is installed (the column chain and the pane's results). */
     void relayTagClick(const QModelIndex &index, const QString &tag);
+    /* The "this column will take it" answer, as a property the style sheet reads. Set while one of
+     * our own payloads is over the view, cleared the moment it leaves or lands - the whole feedback
+     * is a border, because the destination is the column's folder, not a row. */
+    void setDropHover(bool on);
 
 signals:
     /* A drop this view took: `folder` is the one it owns, `paths` what the drag carried, `copy`
@@ -61,6 +65,7 @@ signals:
 
 protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragLeaveEvent(QDragLeaveEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 

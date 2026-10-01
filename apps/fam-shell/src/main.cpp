@@ -229,9 +229,16 @@ int main(int argc, char *argv[]) {
              * keys, asserted on the disk. The stack at this point is [move, copy], which is why
              * this step sits after the drop that transferred nothing. */
             QTimer::singleShot(10100, [&window]() { window.undoForSelfCheck(); });
+            /* The hover, between two real drag events - and before the probe goes away, because the
+             * payload it carries is the probe. */
+            QTimer::singleShot(10350, [&window, target]() {
+                const QFileInfo shot(target);
+                window.dropHoverForSelfCheck(shot.dir().filePath(
+                    shot.completeBaseName() + QStringLiteral(".drophover.png")));
+            });
             /* The same opt-in undo as the probe's, a beat after the copy has left a file at each end
              * of the tree, so the run finishes with nothing of its own in the watched folder. */
-            QTimer::singleShot(10500, [&window]() { window.removeSelfCheckProbe(); });
+            QTimer::singleShot(10800, [&window]() { window.removeSelfCheckProbe(); });
         }
         /* The depth cap is only crossed by going deep, and crossing it is what drops a column from
          * the front of the chain - the one structural change that makes every captured position
@@ -246,7 +253,7 @@ int main(int argc, char *argv[]) {
                                [&window]() { window.clickHeaderForSelfCheck(); });
         }
         const int grabAt =
-            std::max({2500, mutate ? 11000 : 0, deep > 0 ? 2800 + deep * 300 : 0});
+            std::max({2500, mutate ? 11300 : 0, deep > 0 ? 2800 + deep * 300 : 0});
         QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so
