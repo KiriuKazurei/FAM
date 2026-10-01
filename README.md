@@ -22,7 +22,7 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 | `crates/fam-svc-index` | 懒目录索引（定长表 + 缓存 + 按目录就地改行）、视图窗口，以及搜索后端的路由与范围规则 |
 | `crates/fam-svc-everything` | Everything 客户端：运行期绑定、状态探测、查询编译、按页取结果 |
 | `crates/fam-sched` | 监视事件 → 有界队列 → 批量合并的行变更 |
-| `crates/fam-ffi` | 对 C++ 暴露的 ABI（`famcore.dll`）：行是定长缓冲 + 窗口化，控制载荷（stats、标签、备注、配置）是 JSON，批量读（行上的标签芯片与备注记号的心跳）也在其上。v1 的视图与监视入口已在增量 9 删除，无人调用的 `fam_find` 已在增量 17d 收回 |
+| `crates/fam-ffi` | 对 C++ 暴露的 ABI（`famcore.dll`，33 个导出）：行是定长缓冲 + 窗口化，控制载荷（stats、标签、备注、配置、传输任务）是 JSON，批量读（行上的标签芯片与备注记号的心跳）也在其上。v1 的视图与监视入口已在增量 9 删除，无人调用的 `fam_find` 已在增量 17d 收回 |
 | `crates/fam-bench` | 度量台与地板门槛 |
 | `apps/fam-cli` | `fam` 命令行（无头测试台） |
 | `apps/fam-mcp` | MCP stdio 服务器进程：读一行答一行，凭据只从 `FAM_MCP_TOKEN` 环境变量来 |
@@ -222,7 +222,9 @@ Debug 产物的体积记在账里：壳 125MB / 23 个文件，其中 `famcore.d
 - `docs/legacy-specs.md` —— 迁移必读，旧栈中仅存在于代码里的规格已提取于此
 - `docs/notes/` —— 重建期的问题分析记录，每篇按"描述问题 / 分析问题 / 解决方式 /
   效果评估"四层写，含当时未解决的风险；写作约定见 `docs/notes/README.md`
-- `docs/sqlDesign.md`、`docs/代码辅助器.md` —— 仍部分适用
+- `docs/sqlDesign.md` —— 旧栈的设计意图记录（PostgreSQL 形状从未实现），文首已标注；
+  现行 schema 见 `crates/fam-svc-store`
+- `docs/代码辅助器.md` —— 仍部分适用
 - `docs/history/` —— 已作废的旧栈设计文档，仅作意图追溯，**不要按它实现**
 
 旧栈代码可从归档标签 `archive/pre-rust-migration` 取回；迁移前的完整工作区快照是 `84342b5`，

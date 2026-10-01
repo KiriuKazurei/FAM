@@ -1,3 +1,12 @@
+> **本文档是旧栈（Go 时期）的设计意图记录，不是现行实现。**
+> 其中 PostgreSQL 的 `images`/`tags`/`image_tag` 表从未在 Rust 重建中按此实现；
+> 现行的标签与备注存储是 `crates/fam-svc-store` 的 SQLite（`files`/`tags`/`notes` 三张表，
+> `SCHEMA_VERSION = 3`，含 `(tag, path_norm)` 覆盖索引与 `(path_norm, tag, source)` 唯一约束），
+> 以 `fam-svc-store/src/store.rs` 里的 DDL 为准。检索也不走数据库全文/数组查询，
+> 而是懒目录索引 + Everything/遍历路由。设计意图本身（标签独立成表、命名唯一、
+> 关系可扩展）在重建里以别的形状兑现——读这份文档当作意图追溯，不要按它实现。
+>
+
 ``` sql
 CREATE TABLE images (
     id SERIAL PRIMARY KEY,
