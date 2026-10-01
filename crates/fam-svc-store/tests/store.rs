@@ -194,16 +194,54 @@ fn search_matches_all_versus_any_tag() {
         .add_tags(Path::new("D:/docs/only-year.pdf"), &tags(&["2026"]))
         .unwrap();
 
+    /* Required names are an AND list - both must be carried. */
     let all = store
-        .search(&SearchRequest::new(["invoice", "2026"]).match_all())
-        .unwrap();
-    let any = store
         .search(&SearchRequest::new(["invoice", "2026"]))
         .unwrap();
-
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].path, Path::new("D:/docs/both.pdf"));
+
+    /* An OR group: at least one of its names carried. The `tag:` grammar spells this with `||`. */
+    let any = store
+        .search(&SearchRequest {
+            groups: vec![vec!["invoice".into(), "2026".into()]],
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(any.len(), 3);
+
+    /* Exclusion: files carrying the name are out even when they carry a wanted one too - and
+     * files with no tags at all were never in the candidate set to begin with. */
+    let not_invoice = store
+        .search(&SearchRequest {
+            tags_not: vec!["invoice".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(not_invoice.len(), 1);
+    assert_eq!(not_invoice[0].path, Path::new("D:/docs/only-year.pdf"));
+
+    /* Required plus excluded: carries `invoice`, must not carry `2026`. */
+    let mixed = store
+        .search(&SearchRequest {
+            tags: vec!["invoice".into()],
+            tags_not: vec!["2026".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(mixed.len(), 1);
+    assert_eq!(mixed[0].path, Path::new("D:/docs/only-invoice.pdf"));
+
+    /* Required AND an OR group: `invoice` must be carried, plus at least one of `2026`/`kept`. */
+    let required_with_group = store
+        .search(&SearchRequest {
+            tags: vec!["invoice".into()],
+            groups: vec![vec!["2026".into(), "kept".into()]],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(required_with_group.len(), 1);
+    assert_eq!(required_with_group[0].path, Path::new("D:/docs/both.pdf"));
 }
 
 #[test]

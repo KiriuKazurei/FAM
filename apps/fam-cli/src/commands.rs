@@ -318,13 +318,26 @@ pub fn find(
         bail!("at least one --tag is required");
     }
     let source = source.map(Source::parse).transpose()?;
-    let request = SearchRequest {
-        tags: tags.to_vec(),
-        match_all: all,
-        source,
-        within,
-        limit,
-        offset,
+    /* `--all` makes the names a required AND list; the default is one OR group - the same two
+     * shapes the `tag:` grammar spells with a comma and with `||`. */
+    let request = if all {
+        SearchRequest {
+            tags: tags.to_vec(),
+            source,
+            within,
+            limit,
+            offset,
+            ..Default::default()
+        }
+    } else {
+        SearchRequest {
+            groups: vec![tags.to_vec()],
+            source,
+            within,
+            limit,
+            offset,
+            ..Default::default()
+        }
     };
     let store = TagStore::open(&config.database_path)?;
     let hits = store.search(&request)?;

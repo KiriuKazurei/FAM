@@ -82,8 +82,10 @@ pub const TOOLS: &[ToolSpec] = &[
         description: "Search file names. Routed between the installed index and a recursive walk the \
                       same way the shell routes it, and the answer says which backend answered and \
                       whether the answer is complete - a partial result is reported as partial. A \
-                      word prefixed `tag:` names a label instead of part of a name; several of them \
-                      mean all of them, and they combine with name words. Tags are matched exactly, \
+                      word prefixed `tag:` names a label instead of part of a name; inside the value \
+                      `,` is AND (all must be carried), `||` is OR (one of them suffices, the comma \
+                      binds tighter), and a leading `!` excludes the name - all half-width ASCII; the \
+                      full-width `，｜｜！` are ordinary tag-name characters. Tags are matched exactly, \
                       so the case must be the one that was set.",
         schema: r#"{
   "type": "object",

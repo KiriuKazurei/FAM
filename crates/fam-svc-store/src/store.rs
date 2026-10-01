@@ -127,6 +127,108 @@ pub struct TagStore {
     conn: Connection,
 }
 
+/// Builds the tag-search query: required names (AND), OR groups (each must contribute at least
+/// one carried name), excluded names (a file carrying any of them is out), source, scope. The
+/// exclusion filters the *file* set - exclusion is a property of the file, not of a tag row -
+/// which is also why it is `NOT IN` over a subquery rather than a join condition.
+fn build_tag_query(
+    request: &SearchRequest,
+    next: &mut usize,
+    args: &mut Vec<Box<dyn ToSql>>,
+) -> String {
+    /* The wanted names: everything the request could match on - required names and every member
+     * of every OR group. The join restricts tag rows to these; the HAVING clauses then decide
+     * which of the joined files actually qualify. */
+    let mut wanted: Vec<String> = request.tags.clone();
+    for group in &request.groups {
+        wanted.extend(group.iter().cloned());
+    }
+    let mut sql = String::from(
+        "SELECT f.path_norm, f.path FROM tags t JOIN files f ON f.path_norm = t.path_norm",
+    );
+    let mut clauses: Vec<String> = Vec::new();
+    if !wanted.is_empty() {
+        let mut placeholders = Vec::with_capacity(wanted.len());
+        for tag in &wanted {
+            placeholders.push(format!("?{next}"));
+            *next += 1;
+            args.push(Box::new(tag.clone()));
+        }
+        clauses.push(format!("t.tag IN ({})", placeholders.join(",")));
+    }
+    if let Some(source) = request.source {
+        clauses.push(format!("t.source = ?{next}"));
+        *next += 1;
+        args.push(Box::new(source.as_str().to_string()));
+    }
+    if let Some(within) = &request.within {
+        let key = path_key(within);
+        if let Some((lower, upper)) = descendant_range(&key) {
+            clauses.push(format!(
+                "(f.path_norm = ?{next} OR (f.path_norm >= ?{} AND f.path_norm < ?{}))",
+                *next + 1,
+                *next + 2
+            ));
+            args.push(Box::new(key));
+            args.push(Box::new(lower));
+            args.push(Box::new(upper));
+            *next += 3;
+        }
+    }
+    if !request.tags_not.is_empty() {
+        let mut not_placeholders = Vec::with_capacity(request.tags_not.len());
+        for tag in &request.tags_not {
+            not_placeholders.push(format!("?{next}"));
+            *next += 1;
+            args.push(Box::new(tag.clone()));
+        }
+        clauses.push(format!(
+            "f.path_norm NOT IN (SELECT path_norm FROM tags WHERE tag IN ({}))",
+            not_placeholders.join(",")
+        ));
+    }
+    if !clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clauses.join(" AND "));
+    }
+    sql.push_str(" GROUP BY t.path_norm");
+    let mut having: Vec<String> = Vec::new();
+    if !request.tags.is_empty() {
+        /* Required names: the distinct count over just those rows must reach the whole list -
+         * the AND of the request. With groups present this clause and the per-group ones are
+         * ANDed: required names all carried, and every group satisfied. */
+        let mut req_placeholders = Vec::with_capacity(request.tags.len());
+        for tag in &request.tags {
+            req_placeholders.push(format!("?{next}"));
+            *next += 1;
+            args.push(Box::new(tag.clone()));
+        }
+        having.push(format!(
+            "COUNT(DISTINCT CASE WHEN t.tag IN ({}) THEN t.tag END) = ?{next}",
+            req_placeholders.join(",")
+        ));
+        args.push(Box::new(request.tags.len() as i64));
+        *next += 1;
+    }
+    for group in &request.groups {
+        let mut group_placeholders = Vec::with_capacity(group.len());
+        for tag in group {
+            group_placeholders.push(format!("?{next}"));
+            *next += 1;
+            args.push(Box::new(tag.clone()));
+        }
+        having.push(format!(
+            "SUM(CASE WHEN t.tag IN ({}) THEN 1 ELSE 0 END) >= 1",
+            group_placeholders.join(",")
+        ));
+    }
+    if !having.is_empty() {
+        sql.push_str(" HAVING ");
+        sql.push_str(&having.join(" AND "));
+    }
+    sql
+}
+
 impl TagStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         if let Some(parent) = path.parent() {
@@ -419,44 +521,7 @@ impl TagStore {
         request.validate()?;
         let mut args: Vec<Box<dyn ToSql>> = Vec::new();
         let mut next = 1usize;
-        let mut sql = String::from(
-            "SELECT f.path_norm, f.path FROM tags t JOIN files f ON f.path_norm = t.path_norm \
-             WHERE t.tag IN (",
-        );
-        let mut placeholders = Vec::with_capacity(request.tags.len());
-        for tag in &request.tags {
-            placeholders.push(format!("?{next}"));
-            next += 1;
-            args.push(Box::new(tag.clone()));
-        }
-        sql.push_str(&placeholders.join(","));
-        sql.push(')');
-
-        if let Some(source) = request.source {
-            sql.push_str(&format!(" AND t.source = ?{next}"));
-            args.push(Box::new(source.as_str().to_string()));
-            next += 1;
-        }
-        if let Some(within) = &request.within {
-            let key = path_key(within);
-            if let Some((lower, upper)) = descendant_range(&key) {
-                sql.push_str(&format!(
-                    " AND (f.path_norm = ?{next} OR (f.path_norm >= ?{} AND f.path_norm < ?{}))",
-                    next + 1,
-                    next + 2
-                ));
-                args.push(Box::new(key));
-                args.push(Box::new(lower));
-                args.push(Box::new(upper));
-                next += 3;
-            }
-        }
-        sql.push_str(" GROUP BY t.path_norm");
-        if request.match_all {
-            sql.push_str(&format!(" HAVING COUNT(DISTINCT t.tag) = ?{next}"));
-            args.push(Box::new(request.tags.len() as i64));
-            next += 1;
-        }
+        let mut sql = build_tag_query(request, &mut next, &mut args);
         sql.push_str(" ORDER BY f.path");
         let limit = request.limit.unwrap_or(DEFAULT_SEARCH_LIMIT as usize) as i64;
         sql.push_str(&format!(" LIMIT ?{next}"));

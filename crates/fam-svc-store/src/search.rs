@@ -86,7 +86,9 @@ impl SearchProvider for TagSearch {
         let asked = request.limit.max(1);
         let candidates = {
             let store = self.locked();
-            let mut query = TagRequest::new(request.tags.clone()).match_all();
+            let mut query = TagRequest::new(request.tags.clone());
+            query.groups = request.tag_groups.clone();
+            query.tags_not = request.tags_not.clone();
             if let Some(scope) = &request.scope {
                 query = query.within(scope);
             }

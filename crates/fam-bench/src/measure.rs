@@ -686,7 +686,7 @@ fn measure_tag_queries(rounds: usize, rows: usize, vocabulary: bool) -> Samples 
             u64::from(facets != 22)
         } else {
             let found = store
-                .search(&TagRequest::new(["contract"]).match_all().limit(500))
+                .search(&TagRequest::new(["contract"]).limit(500))
                 .map(|rows| rows.len())
                 .unwrap_or(0);
             u64::from(found != 500)

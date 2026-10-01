@@ -174,8 +174,15 @@ pub struct TagFacet {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchRequest {
+    /// Tag names the file must carry, **all of them** (AND). Populated by the parser for plain
+    /// `tag:a` tokens and for comma groups (`tag:a,b`); separate tokens AND across.
     pub tags: Vec<String>,
-    pub match_all: bool,
+    /// OR groups: the file must carry **at least one** name of each group. Populated by
+    /// `tag:a||b` and by `tag:a,b||c` (the comma binds tighter: `(a AND b) OR c`).
+    pub groups: Vec<Vec<String>>,
+    /// Tag names the file must **not** carry - exclusion wins over every inclusion, and files
+    /// without the wanted tags simply stay out of the answer (nothing is invented for them).
+    pub tags_not: Vec<String>,
     pub source: Option<Source>,
     pub within: Option<PathBuf>,
     pub limit: Option<usize>,
@@ -188,11 +195,6 @@ impl SearchRequest {
             tags: tags.into_iter().map(Into::into).collect(),
             ..Default::default()
         }
-    }
-
-    pub fn match_all(mut self) -> Self {
-        self.match_all = true;
-        self
     }
 
     pub fn within(mut self, dir: impl AsRef<Path>) -> Self {
@@ -211,12 +213,27 @@ impl SearchRequest {
     }
 
     pub fn validate(&self) -> Result<(), StoreError> {
-        if self.tags.is_empty() {
+        if self.tags.is_empty() && self.groups.is_empty() && self.tags_not.is_empty() {
+            /* An entirely empty request asks for nothing and is refused; an exclusion-only one is
+             * not empty - "every tagged file except these names" is a real question. */
             return Err(StoreError::InvalidSearch(
                 "at least one tag is required".into(),
             ));
         }
         for tag in &self.tags {
+            validate_tag(tag)?;
+        }
+        for group in &self.groups {
+            if group.is_empty() {
+                return Err(StoreError::InvalidSearch(
+                    "a tag group cannot be empty".into(),
+                ));
+            }
+            for tag in group {
+                validate_tag(tag)?;
+            }
+        }
+        for tag in &self.tags_not {
             validate_tag(tag)?;
         }
         Ok(())

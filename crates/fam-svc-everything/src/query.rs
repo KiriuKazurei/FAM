@@ -143,6 +143,8 @@ mod tests {
         assert_eq!(compile(&SearchRequest::new("\"")), None);
         // A scope alone would be "everything under here", which is a listing, not a search.
         let scope_only = SearchRequest {
+            tag_groups: Vec::new(),
+            tags_not: Vec::new(),
             terms: Vec::new(),
             tags: Vec::new(),
             scope: Some(PathBuf::from("D:/Docs")),
