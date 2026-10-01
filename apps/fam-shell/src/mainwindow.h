@@ -209,6 +209,7 @@ private:
      * ones the drop would have hit. A failed undo stays on the stack, retryable once whatever
      * blocked it is moved out of the way. */
     void undoLastTransfer();
+    void redoLastTransfer();
     void setActivePane(Pane *pane);
     /* The same call with the pane named. `openFolder` opens in whichever pane is active, which is
      * right for a person and wrong for a gate that wants two folders side by side on purpose. */
@@ -308,6 +309,10 @@ private:
         bool copy;
     };
     QVector<TransferUndo> m_undoable;
+    /* The inverse half of the undo stack: an undone transfer lands here, and Ctrl+Shift+Z (or
+     * Ctrl+Y) re-runs the forward transfer and puts the entry back on the undo stack. Cleared when
+     * a new transfer is made - the usual linear-history rule. */
+    QVector<TransferUndo> m_redoable;
     /* The armed half of the two-step delete: which path a second Delete would remove. Cleared by
      * anything that changes the subject - a different path re-arms, Esc disarms. */
     bool m_deleteArmed = false;
@@ -324,6 +329,7 @@ private:
         /* The drag's own folder and verb, for the completion sentence to share with the queue one. */
         QString folder;
         bool undo = false;
+        bool redo = false;
         TransferUndo entry;
     };
     QVector<PendingTransfer> m_pending;

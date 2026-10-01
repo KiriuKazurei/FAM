@@ -431,27 +431,51 @@ MainWindow::Settled MainWindow::pollTransfers() {
             continue;
         }
         m_pending.removeAt(index);
-        if (pending.undo) {
-            /* The job was an undo. Done is the sentence; anything else puts the entry back on the
-             * retryable stack - and never pushes a NEW entry, or Ctrl+Z would undo the undo. */
+        if (pending.undo || pending.redo) {
+            /* The job was an undo or a redo. Done is the sentence plus the stack it feeds; anything
+             * else puts the entry back on the stack it came from - and neither branch pushes a NEW
+             * entry, or Ctrl+Z would undo the undo (or redo the redo). */
+            const bool wasUndo = pending.undo;
             if (state == QStringLiteral("done")) {
                 ++settled.done;
-                setStatus(QStringLiteral("undone: moved %1 back to %2")
-                              .arg(QDir::toNativeSeparators(pending.from),
-                                   QDir::toNativeSeparators(pending.to)));
-                qInfo("undo job: moved %s back to %s",
+                if (wasUndo) {
+                    m_redoable.append(pending.entry);
+                    setStatus(QStringLiteral("undone: moved %1 back to %2")
+                                  .arg(QDir::toNativeSeparators(pending.from),
+                                       QDir::toNativeSeparators(pending.to)));
+                } else {
+                    m_undoable.append(pending.entry);
+                    setStatus(QStringLiteral("redone: moved %1 to %2")
+                                  .arg(QDir::toNativeSeparators(pending.from),
+                                       QDir::toNativeSeparators(pending.to)));
+                }
+                qInfo("%s job: moved %s -> %s", qUtf8Printable(wasUndo
+                      ? QStringLiteral("undo") : QStringLiteral("redo")),
                       qUtf8Printable(QDir::toNativeSeparators(pending.from)),
                       qUtf8Printable(QDir::toNativeSeparators(pending.to)));
             } else if (state == QStringLiteral("cancelled")) {
                 ++settled.cancelled;
-                m_undoable.append(pending.entry);
-                qInfo("undo job: cancelled, the entry stays retryable");
+                if (wasUndo) {
+                    m_undoable.append(pending.entry);
+                } else {
+                    m_redoable.append(pending.entry);
+                }
+                qInfo("%s job: cancelled, the entry stays retryable",
+                      qUtf8Printable(wasUndo ? QStringLiteral("undo")
+                                             : QStringLiteral("redo")));
             } else {
                 ++settled.failed;
-                m_undoable.append(pending.entry);
+                if (wasUndo) {
+                    m_undoable.append(pending.entry);
+                } else {
+                    m_redoable.append(pending.entry);
+                }
                 const QString why = answer.value(QStringLiteral("error")).toString();
                 settled.errors.append(why);
-                qInfo("undo job: failed: %s", qUtf8Printable(why));
+                qInfo("%s job: failed: %s",
+                      qUtf8Printable(wasUndo ? QStringLiteral("undo")
+                                             : QStringLiteral("redo")),
+                      qUtf8Printable(why));
             }
             continue;
         }
@@ -512,6 +536,7 @@ void MainWindow::undoLastTransfer() {
             setStatus(error);
             return;
         }
+        m_redoable.append(last);
         setStatus(QStringLiteral("undone: removed the copy at %1")
                       .arg(QDir::toNativeSeparators(last.to)));
         return;
@@ -526,7 +551,31 @@ void MainWindow::undoLastTransfer() {
         return;
     }
     m_pending.append({result.toObject().value(QStringLiteral("job")).toVariant().toULongLong(),
-                      last.to, last.from, false, QString(), true, last});
+                      last.to, last.from, false, QString(), true, false, last});
+}
+
+/* The forward half of the undo stack: re-run the transfer the last undo inverted. A move re-runs
+ * as a move, a copy re-runs as a copy from the original source - whose current bytes are what a
+ * person re-copying by hand would carry, too. The entry goes back on the undo stack when the job
+ * settles, and a failure puts it back on the redo stack. */
+void MainWindow::redoLastTransfer() {
+    if (!m_healthy) {
+        return;
+    }
+    if (m_redoable.isEmpty()) {
+        setStatus(QStringLiteral("nothing to redo"));
+        return;
+    }
+    const TransferUndo entry = m_redoable.takeLast();
+    QJsonValue result;
+    QString error;
+    if (!m_bridge->transferBegin(entry.from, entry.to, entry.copy, &result, &error)) {
+        m_redoable.append(entry);
+        setStatus(error);
+        return;
+    }
+    m_pending.append({result.toObject().value(QStringLiteral("job")).toVariant().toULongLong(),
+                      entry.from, entry.to, entry.copy, QString(), false, true, entry});
 }
 
 void MainWindow::toggleSplit() { m_split->click(); }
@@ -628,20 +677,23 @@ void MainWindow::deleteRequested(const QString &path) {
     if (!m_deleteArmed || m_pendingDelete != path) {
         m_deleteArmed = true;
         m_pendingDelete = path;
-        setStatus(QStringLiteral("press Delete again to remove %1 - this cannot be undone")
+        setStatus(QStringLiteral("press Delete again to move %1 to the recycle bin")
                       .arg(QDir::toNativeSeparators(path)));
         return;
     }
     m_deleteArmed = false;
     m_pendingDelete.clear();
-    QJsonValue result;
-    QString error;
-    if (!m_bridge->pathDelete(path, &result, &error)) {
-        setStatus(error);
+    QString trashPath;
+    if (!QFile::moveToTrash(path, &trashPath)) {
+        setStatus(QStringLiteral("could not move %1 to the recycle bin")
+                      .arg(QDir::toNativeSeparators(path)));
         return;
     }
-    const QString kind = result.toObject().value(QStringLiteral("kind")).toString();
-    setStatus(QStringLiteral("removed %1 (%2)").arg(QDir::toNativeSeparators(path), kind));
+    /* Recoverable by the platform's own restore - which is why this delete never joins the
+     * transfer undo stack: the bin is the undo, and it is the operating system's to run. The
+     * sentence names the path the person deleted, not the bin's internal address for it. */
+    setStatus(QStringLiteral("moved %1 to the recycle bin")
+                  .arg(QDir::toNativeSeparators(path)));
 }
 
 bool MainWindow::applyRename(const QString &path, const QString &newName, QString *error) {
@@ -681,10 +733,10 @@ void MainWindow::openRequested(const QString &path) {
         QUrl::fromLocalFile(QDir::toNativeSeparators(path)));
     qInfo("open %s: %s", qUtf8Printable(QDir::toNativeSeparators(path)),
           opened ? "handed to the platform" : "no association claimed it");
-    if (!opened) {
-        setStatus(QStringLiteral("no application is associated with %1")
-                      .arg(QFileInfo(path).fileName()));
-    }
+    setStatus(opened ? QStringLiteral("opened %1 with the platform")
+                           .arg(QFileInfo(path).fileName())
+                     : QStringLiteral("no application is associated with %1")
+                           .arg(QFileInfo(path).fileName()));
 }
 
 void MainWindow::runSearch() {
@@ -981,8 +1033,12 @@ void MainWindow::handleDrop(const QString &folder, const QStringList &paths, boo
          * that used to arrive here (never overwrites, parent gone) arrive at the poll with the
          * sentences they always had, which is why the queue line says "queued" rather than "moved". */
         if (m_bridge->transferBegin(source, QDir(folder).filePath(name), copy, &result, &error)) {
+            /* A new transfer truncates the redo half of the history: after undoing to an earlier
+             * world and acting in it, the undone futures are gone - the usual linear-history rule.
+             * The undo half stays. */
+            m_redoable.clear();
             m_pending.append({result.toObject().value(QStringLiteral("job")).toVariant().toULongLong(),
-                              source, QDir(folder).filePath(name), copy, folder, false, {}});
+                              source, QDir(folder).filePath(name), copy, folder, false, false, {}});
             ++queued;
         } else {
             refused.append(error);
@@ -1012,6 +1068,10 @@ void MainWindow::handleDrop(const QString &folder, const QStringList &paths, boo
 void MainWindow::keyPressEvent(QKeyEvent *event) {
     if (event->matches(QKeySequence::Undo)) {
         undoLastTransfer();
+        return;
+    }
+    if (event->matches(QKeySequence::Redo)) {
+        redoLastTransfer();
         return;
     }
     if (event->key() == Qt::Key_Escape) {
@@ -1389,16 +1449,20 @@ void MainWindow::fileCommandsForSelfCheck() {
     }
     const QString probe = m_probe;
     const QString probeName = QFileInfo(probe).fileName();
-    const int row = model->findRowOfPath(probe);
-    if (row < 0) {
-        qWarning("self-check file commands: %s is not in the deepest column", qUtf8Printable(probeName));
-        return;
-    }
-    view->selectionModel()->setCurrentIndex(model->index(row),
-                                            QItemSelectionModel::ClearAndSelect
-                                                | QItemSelectionModel::Rows);
-    view->setFocus();
-    QCoreApplication::processEvents();
+    /* The renames below move the row the selection sits on: every reconcile may land the current
+     * index somewhere else, so each round re-selects its row before the keys fly. */
+    auto selectProbe = [&]() -> bool {
+        const int row = model->findRowOfPath(probe);
+        if (row < 0) {
+            return false;
+        }
+        view->selectionModel()->setCurrentIndex(model->index(row),
+                                                QItemSelectionModel::ClearAndSelect
+                                                    | QItemSelectionModel::Rows);
+        view->setFocus();
+        QCoreApplication::processEvents();
+        return true;
+    };
     auto pressKey = [view](Qt::Key key) {
         QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier);
         QCoreApplication::sendEvent(view, &press);
@@ -1408,35 +1472,45 @@ void MainWindow::fileCommandsForSelfCheck() {
     /* Rename through the dialog's operation, there and back - two moves, two undo entries, and
      * the disk back where it started. */
     QString error;
+    if (!selectProbe()) {
+        qWarning("self-check file commands: %s is not in the deepest column",
+                 qUtf8Printable(probeName));
+        return;
+    }
     const QString renamedPath = QDir(probe).filePath(QStringLiteral("../renamed-probe.txt"));
     const bool renamed = applyRename(probe, QStringLiteral("renamed-probe.txt"), &error);
     const bool renamedGone = renamed && !QFile::exists(probe);
+    const bool reselected = selectProbe();
     const bool renamedBack =
-        renamed ? applyRename(renamedPath, probeName, &error) : false;
+        renamed && reselected ? applyRename(renamedPath, probeName, &error) : false;
     const bool restored = QFile::exists(probe);
-    /* Open, LAST: the announcement itself is the assertion (the view emitted and the window
-     * answered), and the platform's half is whatever the association table does. */
+
+    /* Open: the announcement itself is the assertion (the view emitted and the window answered),
+     * and the platform's half is whatever the association table does. */
+    if (!selectProbe()) {
+        qWarning("self-check file commands: the probe row vanished before the open");
+        return;
+    }
     pressKey(Qt::Key_Return);
-    const bool openAnnounced = status().startsWith(QStringLiteral("no application"))
-        || status().contains(probeName)
-        || true; /* the qInfo line is the record; the status may not change on success */
-    Q_UNUSED(openAnnounced);
-    /* Delete twice: the first arms - the assertion is the armed pair, not the file's existence,
-     * which a stray timer could change - the second removes, and the sentence the handler wrote is
-     * the proof it was this path and no other. */
+    const QString openStatus = status();
+
+    /* Delete, LAST: the two-step from the keyboard. The arm assertion is the armed pair - the
+     * removal's proof is the status sentence, and the file's absence is the disk half. */
+    if (!selectProbe()) {
+        qWarning("self-check file commands: the probe row vanished before the delete");
+        return;
+    }
     pressKey(Qt::Key_Delete);
     const bool armed = m_deleteArmed && m_pendingDelete == probe;
     pressKey(Qt::Key_Delete);
     const bool deleted = !m_deleteArmed && status().contains(probeName)
-        && status().startsWith(QStringLiteral("removed"));
-
-    const QString openSentence = status();
-
-    qInfo("self-check file commands on %s: delete: armed=%d removed-sentence=%d rename: "
-          "applied=%d old-gone=%d back=%d restored=%d error=[%s] open: sent=%d",
-          qUtf8Printable(probeName), armed ? 1 : 0, deleted ? 1 : 0, renamed ? 1 : 0,
-          renamedGone ? 1 : 0, renamedBack ? 1 : 0, restored ? 1 : 0,
-          qUtf8Printable(error), renamed ? 1 : 0);
+        && status().contains(QStringLiteral("recycle bin")) && !QFile::exists(probe);
+    qInfo("self-check file commands on %s: rename: applied=%d old-gone=%d back=%d restored=%d "
+          "error=[%s] open: sent=%d status=[%s] delete: armed=%d removed-sentence=%d gone=%d",
+          qUtf8Printable(probeName), renamed ? 1 : 0, renamedGone ? 1 : 0,
+          renamedBack ? 1 : 0, restored ? 1 : 0, qUtf8Printable(error),
+          openStatus.contains(probeName) ? 1 : 0, qUtf8Printable(openStatus),
+          armed ? 1 : 0, deleted ? 1 : 0, !QFile::exists(probe) ? 1 : 0);
 }
 
 /* The undo, driven the way a hand drives it: a real Ctrl+Z sent to the window, twice./* The undo, driven the way a hand drives it: a real Ctrl+Z sent to the window, twice. The stack
@@ -1464,8 +1538,23 @@ void MainWindow::undoForSelfCheck() {
      * copy did); the disk claim waits for it to settle. */
     waitForTransfersForSelfCheck();
     const bool moveUndone = QFile::exists(atDest) && !QFile::exists(origin);
-    qInfo("self-check undo: copy-undone=%d (origin=1 copy=0) move-undone=%d (origin=0 dest=1)",
-          copyUndone ? 1 : 0, moveUndone ? 1 : 0);
+    /* The redo: the same two entries re-run forward, from the keyboard. After both, the disk is
+     * where the two drops left it - the file at the far end and the copy beside it - which is the
+     * round trip an undo/redo pair owes. */
+    auto pressRedo = [this]() {
+        QKeyEvent redo(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QCoreApplication::sendEvent(this, &redo);
+        QCoreApplication::processEvents();
+    };
+    pressRedo();
+    waitForTransfersForSelfCheck();
+    const bool moveRedone = QFile::exists(origin) && !QFile::exists(atDest);
+    pressRedo();
+    waitForTransfersForSelfCheck();
+    const bool copyRedone = QFile::exists(atDest) && QFile::exists(origin);
+    qInfo("self-check undo: copy-undone=%d (origin=1 copy=0) move-undone=%d (origin=0 dest=1) "
+          "redo: move=%d (origin=1 dest=0) copy=%d (both=1)",
+          copyUndone ? 1 : 0, moveUndone ? 1 : 0, moveRedone ? 1 : 0, copyRedone ? 1 : 0);
 }
 
 /* The chip on a row is the third way to search a label, and the only one a run with no hands has to
