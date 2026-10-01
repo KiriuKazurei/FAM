@@ -691,9 +691,12 @@ void MainWindow::deleteRequested(const QString &path) {
     }
     /* Recoverable by the platform's own restore - which is why this delete never joins the
      * transfer undo stack: the bin is the undo, and it is the operating system's to run. The
-     * sentence names the path the person deleted, not the bin's internal address for it. */
+     * sentence names the path the person deleted, not the bin's internal address for it; the
+     * bin-side address goes to the log, where a "where did it go" question is answerable. */
     setStatus(QStringLiteral("moved %1 to the recycle bin")
                   .arg(QDir::toNativeSeparators(path)));
+    qInfo("recycle bin: %s -> %s", qUtf8Printable(QDir::toNativeSeparators(path)),
+          qUtf8Printable(QDir::toNativeSeparators(trashPath)));
 }
 
 bool MainWindow::applyRename(const QString &path, const QString &newName, QString *error) {
@@ -1505,6 +1508,37 @@ void MainWindow::fileCommandsForSelfCheck() {
     pressKey(Qt::Key_Delete);
     const bool deleted = !m_deleteArmed && status().contains(probeName)
         && status().contains(QStringLiteral("recycle bin")) && !QFile::exists(probe);
+
+    /* A directory goes to the bin with its contents - the person's expectation of Delete, and the
+     * one case the hard-delete primitive refuses. Built here, trashed here, asserted on the disk:
+     * the folder and its inner file are both gone from the tree. */
+    const QString dir = QDir(m_watch).filePath(QStringLiteral("fam-self-check-dir"));
+    QDir().mkpath(dir);
+    QFile(dir + QStringLiteral("/inner.txt"))
+        .open(QIODevice::WriteOnly | QIODevice::Truncate);
+    /* The new directory arrives through the watch + reconcile pipeline, which is asynchronous:
+     * pump the loop until its row is listed, bounded like every other wait. */
+    QElapsedTimer dirWait;
+    dirWait.start();
+    int dirRow = model->findRowOfPath(dir);
+    while (dirRow < 0 && dirWait.elapsed() < 2000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        dirRow = model->findRowOfPath(dir);
+    }
+    if (dirRow < 0) {
+        qWarning("self-check file commands: the directory row is not listed yet");
+        return;
+    }
+    view->selectionModel()->setCurrentIndex(model->index(dirRow),
+                                            QItemSelectionModel::ClearAndSelect
+                                                | QItemSelectionModel::Rows);
+    QCoreApplication::processEvents();
+    pressKey(Qt::Key_Delete);
+    const bool dirArmed = m_deleteArmed && m_pendingDelete == dir;
+    pressKey(Qt::Key_Delete);
+    const bool dirGone = !QFile::exists(dir) && !QFile::exists(dir + QStringLiteral("/inner.txt"));
+    qInfo("self-check dir trash: armed=%d gone=%d (inner file gone with it)",
+          dirArmed ? 1 : 0, dirGone ? 1 : 0);
     qInfo("self-check file commands on %s: rename: applied=%d old-gone=%d back=%d restored=%d "
           "error=[%s] open: sent=%d status=[%s] delete: armed=%d removed-sentence=%d gone=%d",
           qUtf8Printable(probeName), renamed ? 1 : 0, renamedGone ? 1 : 0,
