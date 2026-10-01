@@ -314,7 +314,8 @@ private:
     QString m_pendingDelete;
     /* The jobs this window queued and has not seen settle. One entry per dropped file; the beat
      * polls each, reports progress, and turns a terminal state into either an undo entry (done) or
-     * a sentence (cancelled, failed). */
+     * a sentence (cancelled, failed) - except when `undo` is set: the job IS an undo, its
+     * completion is the sentence, and a failure puts the entry back on the retryable stack. */
     struct PendingTransfer {
         quint64 job;
         QString from;
@@ -322,6 +323,8 @@ private:
         bool copy;
         /* The drag's own folder and verb, for the completion sentence to share with the queue one. */
         QString folder;
+        bool undo = false;
+        TransferUndo entry;
     };
     QVector<PendingTransfer> m_pending;
     /* Drains the pending jobs once: polls each, retires the terminal ones (undo entry for `done`,

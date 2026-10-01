@@ -431,6 +431,30 @@ MainWindow::Settled MainWindow::pollTransfers() {
             continue;
         }
         m_pending.removeAt(index);
+        if (pending.undo) {
+            /* The job was an undo. Done is the sentence; anything else puts the entry back on the
+             * retryable stack - and never pushes a NEW entry, or Ctrl+Z would undo the undo. */
+            if (state == QStringLiteral("done")) {
+                ++settled.done;
+                setStatus(QStringLiteral("undone: moved %1 back to %2")
+                              .arg(QDir::toNativeSeparators(pending.from),
+                                   QDir::toNativeSeparators(pending.to)));
+                qInfo("undo job: moved %s back to %s",
+                      qUtf8Printable(QDir::toNativeSeparators(pending.from)),
+                      qUtf8Printable(QDir::toNativeSeparators(pending.to)));
+            } else if (state == QStringLiteral("cancelled")) {
+                ++settled.cancelled;
+                m_undoable.append(pending.entry);
+                qInfo("undo job: cancelled, the entry stays retryable");
+            } else {
+                ++settled.failed;
+                m_undoable.append(pending.entry);
+                const QString why = answer.value(QStringLiteral("error")).toString();
+                settled.errors.append(why);
+                qInfo("undo job: failed: %s", qUtf8Printable(why));
+            }
+            continue;
+        }
         if (state == QStringLiteral("done")) {
             ++settled.done;
             /* The undo entry, and only now: an undo of something still running would be an undo
@@ -481,6 +505,8 @@ void MainWindow::undoLastTransfer() {
     QJsonValue result;
     QString error;
     if (last.copy) {
+        /* Removing a duplicate is one unlink - there is no middle to show and nothing to wait out,
+         * so this half stays synchronous. */
         if (!m_bridge->pathDelete(last.to, &result, &error)) {
             m_undoable.append(last);
             setStatus(error);
@@ -488,16 +514,19 @@ void MainWindow::undoLastTransfer() {
         }
         setStatus(QStringLiteral("undone: removed the copy at %1")
                       .arg(QDir::toNativeSeparators(last.to)));
-    } else {
-        if (!m_bridge->pathOp(last.to, last.from, false, &result, &error)) {
-            m_undoable.append(last);
-            setStatus(error);
-            return;
-        }
-        setStatus(QStringLiteral("undone: moved %1 back to %2")
-                      .arg(QDir::toNativeSeparators(last.to),
-                           QDir::toNativeSeparators(last.from)));
+        return;
     }
+    /* Moving back is a transfer like any other - a cross-volume undo of a large file takes as long
+     * as the copy did, and it runs as a job on the same beat. The popped entry rides inside the
+     * pending job: done means the undo is the sentence, failed or cancelled means the entry goes
+     * back on the retryable stack, because "blocked" and "forgotten" are still two facts. */
+    if (!m_bridge->transferBegin(last.to, last.from, false, &result, &error)) {
+        m_undoable.append(last);
+        setStatus(error);
+        return;
+    }
+    m_pending.append({result.toObject().value(QStringLiteral("job")).toVariant().toULongLong(),
+                      last.to, last.from, false, QString(), true, last});
 }
 
 void MainWindow::toggleSplit() { m_split->click(); }
@@ -953,7 +982,7 @@ void MainWindow::handleDrop(const QString &folder, const QStringList &paths, boo
          * sentences they always had, which is why the queue line says "queued" rather than "moved". */
         if (m_bridge->transferBegin(source, QDir(folder).filePath(name), copy, &result, &error)) {
             m_pending.append({result.toObject().value(QStringLiteral("job")).toVariant().toULongLong(),
-                              source, QDir(folder).filePath(name), copy, folder});
+                              source, QDir(folder).filePath(name), copy, folder, false, {}});
             ++queued;
         } else {
             refused.append(error);
@@ -1431,6 +1460,9 @@ void MainWindow::undoForSelfCheck() {
     pressUndo();
     const bool copyUndone = QFile::exists(origin) && !QFile::exists(atDest);
     pressUndo();
+    /* The move-back is a job on the beat (a cross-volume undo of a large file takes as long as the
+     * copy did); the disk claim waits for it to settle. */
+    waitForTransfersForSelfCheck();
     const bool moveUndone = QFile::exists(atDest) && !QFile::exists(origin);
     qInfo("self-check undo: copy-undone=%d (origin=1 copy=0) move-undone=%d (origin=0 dest=1)",
           copyUndone ? 1 : 0, moveUndone ? 1 : 0);
