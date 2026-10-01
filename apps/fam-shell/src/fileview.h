@@ -50,6 +50,8 @@ public:
      * turns it into the view's `tagActivated` by reading the path off its own model. Called from
      * the two places a row delegate is installed (the column chain and the pane's results). */
     void relayTagClick(const QModelIndex &index, const QString &tag);
+    /* The keyboard's file commands, answered by whichever row is current. The window owns what they
+     * do (delete is two-step, rename opens a dialog); the view only knows which row the keys mean. */
     /* The "this column will take it" answer, as a property the style sheet reads. Set while one of
      * our own payloads is over the view, cleared the moment it leaves or lands - the whole feedback
      * is a border, because the destination is the column's folder, not a row. */
@@ -62,10 +64,19 @@ signals:
     /* A tag chip on one of this view's rows was clicked. `path` is the row's own, resolved here
      * because the delegate knows the model index but not which model it came from. */
     void tagActivated(const QString &path, const QString &tag);
+    /* The keyboard's file commands, answered by whichever row is current. The window owns what
+     * they do (delete is two-step, rename opens a dialog); the view only knows the row. */
+    void deleteRequested(const QString &path);
+    void renameRequested(const QString &path);
+    /* A file the person asked to open (double-click or Enter). Folders never emit this: their
+     * opening is the selection's own act, one click earlier. */
+    void openRequested(const QString &path);
 
 protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragLeaveEvent(QDragLeaveEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 

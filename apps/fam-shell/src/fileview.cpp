@@ -105,6 +105,45 @@ void FileView::dragMoveEvent(QDragMoveEvent *event) {
     }
 }
 
+void FileView::keyPressEvent(QKeyEvent *event) {
+    const QModelIndex current = currentIndex();
+    const QString path = current.isValid()
+        ? current.data(FamListModel::PathRole).toString()
+        : QString();
+    if (event->key() == Qt::Key_Delete && !path.isEmpty()) {
+        emit deleteRequested(path);
+        return;
+    }
+    if (event->key() == Qt::Key_F2 && !path.isEmpty()) {
+        emit renameRequested(path);
+        return;
+    }
+    /* Enter and double-click say the same thing: open this. A folder's opening already happened -
+     * its selection change is what drove the chain one click ago - so only a file is announced. */
+    if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
+        && !path.isEmpty()
+        && !current.data(FamListModel::DirectoryRole).toBool()) {
+        emit openRequested(path);
+        return;
+    }
+    QListView::keyPressEvent(event);
+}
+
+void FileView::mouseDoubleClickEvent(QMouseEvent *event) {
+    /* The base class routes this to the edit machinery the rows do not have, and a folder is
+     * already open by the click that selected it; the only new fact a double-click carries is
+     * "open this file". */
+    const QModelIndex index = indexAt(event->position().toPoint());
+    if (index.isValid() && !index.data(FamListModel::DirectoryRole).toBool()) {
+        const QString path = index.data(FamListModel::PathRole).toString();
+        if (!path.isEmpty()) {
+            emit openRequested(path);
+            return;
+        }
+    }
+    QListView::mouseDoubleClickEvent(event);
+}
+
 void FileView::dropEvent(QDropEvent *event) {
     /* The drag is over the moment something lands, accepted or not: the border says "would take it",
      * and nothing is being taken any more. */

@@ -203,7 +203,7 @@ int main(int argc, char *argv[]) {
              * until then and the shot has room to breathe. */
             /* Last, because it replaces the chain: a drive pick is the sidebar doing its only job,
              * and the frame after it shows what the reader would see. */
-            QTimer::singleShot(6700, [&window]() { window.pickFirstDriveForSelfCheck(); });
+            QTimer::singleShot(6950, [&window]() { window.pickFirstDriveForSelfCheck(); });
             /* Then the split, because the frame it produces is the one worth looking at: two panes,
              * each on its own folder, each with its own chain. Collapsing it again is the same button
              * doing the other half of its job, and the collapsed frame is the one a person who never
@@ -228,17 +228,23 @@ int main(int argc, char *argv[]) {
             /* The undo, twice: the copy's duplicate goes, then the move goes back - real Ctrl+Z
              * keys, asserted on the disk. The stack at this point is [move, copy], which is why
              * this step sits after the drop that transferred nothing. */
-            QTimer::singleShot(10100, [&window]() { window.undoForSelfCheck(); });
+            QTimer::singleShot(10400, [&window]() { window.undoForSelfCheck(); });
             /* The hover, between two real drag events - and before the probe goes away, because the
              * payload it carries is the probe. */
-            QTimer::singleShot(10350, [&window, target]() {
+            QTimer::singleShot(10700, [&window, target]() {
                 const QFileInfo shot(target);
                 window.dropHoverForSelfCheck(shot.dir().filePath(
                     shot.completeBaseName() + QStringLiteral(".drophover.png")));
             });
             /* The same opt-in undo as the probe's, a beat after the copy has left a file at each end
              * of the tree, so the run finishes with nothing of its own in the watched folder. */
-            QTimer::singleShot(10800, [&window]() { window.removeSelfCheckProbe(); });
+            /* The keyboard's file commands, before the undo and cleanup steps can interact with
+             * the probe: delete's two steps, a rename there and back, Enter's open announcement
+             * LAST (the platform hand-off pumps the loop internally). */
+            /* Before the drive pick replaces the chain this step acts in: its view pointer is
+             * captured for the whole step, and a chain cleared mid-step would be a use-after-free. */
+            QTimer::singleShot(6150, [&window]() { window.fileCommandsForSelfCheck(); });
+            QTimer::singleShot(11900, [&window]() { window.removeSelfCheckProbe(); });
         }
         /* The depth cap is only crossed by going deep, and crossing it is what drops a column from
          * the front of the chain - the one structural change that makes every captured position
@@ -253,7 +259,7 @@ int main(int argc, char *argv[]) {
                                [&window]() { window.clickHeaderForSelfCheck(); });
         }
         const int grabAt =
-            std::max({2500, mutate ? 11300 : 0, deep > 0 ? 2800 + deep * 300 : 0});
+            std::max({2500, mutate ? 12400 : 0, deep > 0 ? 2800 + deep * 300 : 0});
         QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so

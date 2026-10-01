@@ -82,6 +82,9 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     column->view->setDropFolder(path);
     QObject::connect(column->view, &FileView::dropped, this, &ColumnChain::dropped);
     QObject::connect(column->view, &FileView::tagActivated, this, &ColumnChain::tagActivated);
+    QObject::connect(column->view, &FileView::deleteRequested, this, &ColumnChain::deleteRequested);
+    QObject::connect(column->view, &FileView::renameRequested, this, &ColumnChain::renameRequested);
+    QObject::connect(column->view, &FileView::openRequested, this, &ColumnChain::openRequested);
     /* Hover is a row state the delegate reads, and a view only tracks it when asked. */
     column->view->setMouseTracking(true);
     column->view->viewport()->setAttribute(Qt::WA_Hover, true);

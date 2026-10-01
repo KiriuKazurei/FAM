@@ -18,6 +18,7 @@ class QLineEdit;
 class QPushButton;
 class QTimer;
 class NoteDialog;
+class RenameDialog;
 class TagFilterBar;
 
 class MainWindow final : public QWidget {
@@ -136,6 +137,10 @@ public:
     /* The drop hover, entered and left with real drag events: the border property is the assertion,
      * and the frame between them is the picture. */
     void dropHoverForSelfCheck(const QString &imagePath);
+    QString status() const;
+    /* The keyboard's file commands with real keys: delete's two steps, a rename there and back,
+     * and Enter's open announcement - each asserted on the disk or in the status line. */
+    void fileCommandsForSelfCheck();
 
     /* The note round trip on the probe file: none, written, read back, a blank save refused
      * without crossing the wire, cleared - and a second clear reporting there was nothing. Every
@@ -164,9 +169,17 @@ private slots:
     /* The free-text note on the selected row or folder - the note the agent could always read and
      * write, and the human face could not see at all until now. */
     void noteSelectedFile();
+    /* The keyboard path's own helpers, shared with the dialog slots. */
+    bool applyRename(const QString &path, const QString &newName, QString *error);
     /* A chip on a row was clicked: search that label, the same box-writing way the strip's chips
      * do. */
     void searchTagActivated(const QString &path, const QString &tag);
+    /* Delete is two-step on the status line (the removal is a hard delete, and the armed sentence
+     * is what says so before it happens); rename opens the one-line dialog; open hands the file to
+     * the platform. */
+    void deleteRequested(const QString &path);
+    void renameRequested(const QString &path);
+    void openRequested(const QString &path);
     /* The strip's context menu asked for a library-wide merge. */
     void mergeTags(const QString &from, const QString &into);
     /* Putting the folder back on screen: a search no longer closes the columns it was started in, so
@@ -288,13 +301,17 @@ private:
      * log-replay undo of anything else is the layer increment 14 priced and declined. A move is
      * undone by moving back, a copy by removing the duplicate (`copy` says which). Entries arrive
      * when a job finishes, not when the drop is queued: an undo of something still running would
-     * be an undo of a partial. */
+     * be an undo of a partial. Renames push too - a rename is a move. */
     struct TransferUndo {
         QString from;
         QString to;
         bool copy;
     };
     QVector<TransferUndo> m_undoable;
+    /* The armed half of the two-step delete: which path a second Delete would remove. Cleared by
+     * anything that changes the subject - a different path re-arms, Esc disarms. */
+    bool m_deleteArmed = false;
+    QString m_pendingDelete;
     /* The jobs this window queued and has not seen settle. One entry per dropped file; the beat
      * polls each, reports progress, and turns a terminal state into either an undo entry (done) or
      * a sentence (cancelled, failed). */

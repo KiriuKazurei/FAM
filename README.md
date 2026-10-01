@@ -27,7 +27,7 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 | `apps/fam-cli` | `fam` 命令行（无头测试台） |
 | `apps/fam-mcp` | MCP stdio 服务器进程：读一行答一行，凭据只从 `FAM_MCP_TOKEN` 环境变量来 |
 | `apps/fam-ui` | 设计系统的**唯一一份**：Ant Design 5 的 token → QSS，以及那张手绘的文件行；只链 `Qt6::Widgets`，不链 `famcore` |
-| `apps/fam-shell` | Qt6 Widgets 界面（产品面）。吃 `apps/fam-ui` 的主题，渲染走 Fusion，`--theme light\|dark\|system` |
+| `apps/fam-shell` | Qt6 Widgets 界面（产品面）。吃 `apps/fam-ui` 的主题，渲染走 Fusion，`--theme light\|dark\|system`；键盘 Delete/F2/Enter 与拖放、撤销、传输任务齐全 |
 | `apps/fam-design` | Ant Design 5 的**设计基准**：与壳共用 `apps/fam-ui`，只链 Qt；`--shot`/`--theme` 出图并把实测对比度表打到 stdout。产品功能不再长在这里 |
 
 工程处于**资源管理器重建**之中：浏览与搜索都已改为懒目录索引 + 流式虚拟化，
@@ -43,6 +43,9 @@ FAM 是一个通用资源管理器，用于应对多数量、大体积文件的�
 **拖错了有一步可回**：Ctrl+Z 撤销本会话最近的一次传输——移动的撤回是移回去，复制的
 撤回是删掉那份重复（走 agent 的 `fs_delete` 同一条删除原语，非空目录按名拒绝，
 `path.delete` 照样记账）；被"永不覆盖"挡住的撤销留在栈上可重试。
+**键盘会编辑了**：选中行上 Delete 两段式删除（第一下在状态行写明不可撤销，第二下才删；
+硬删除，无回收站），F2 打开改名对话框（改名是一次移动，成功进撤销栈），双击或 Enter 把
+文件交给平台打开（无关联时说"no application is associated with"，不沉默）。
 **拖悬有反馈**：我们自己的载荷悬在哪一列，那一列的边框亮起品牌蓝（外来载荷不亮）——
 落点是列的文件夹，所以反馈给整列，不是 14 关掉的那条行间插入线。
 **把一行拖到另一列就是真的搬文件**：直接拖 = 移动，按住 Ctrl 拖 = 复制，
@@ -192,7 +195,8 @@ Debug 产物的体积记在账里：壳 125MB / 23 个文件，其中 `famcore.d
 如实说没有**，行上的备注点随同一步**亮起又熄灭**（`marker: shown=1 gone=1`），撤销步用
 两发**真的 Ctrl+Z**把复制撤成删除、把移动撤回原位（`copy-undone`/`move-undone`，断言在
 磁盘上，且传输步先等队列清空），拖悬步发**真的 enter 与 leave**、边框亮起与熄灭各有
-断言并当场抓一张 `x.drophover.png`——这些读数全 1 才算过。
+断言并当场抓一张 `x.drophover.png`，键盘步用**真的 Delete/Return 键**走完删除的两段式、
+改名的去与回（磁盘断言）与打开的交接——这些读数全 1 才算过。
 最后把图标提取/销毁计数与 IPC 调用计数打进日志，这两个计数就是"无 HICON 泄漏"和"轮询不贵"的读数形式。
 **进程中途被杀时这两个文件会留在你指给它的那棵树里**，名字都是 `fam-self-check-*.txt`。
 

@@ -109,6 +109,10 @@ signals:
     /* A tag chip on one of the columns' rows was clicked; straight up to the pane, which relays
      * it with the results list's own. */
     void tagActivated(const QString &path, const QString &tag);
+    /* The keyboard's file commands, relayed straight up with the row's path. */
+    void deleteRequested(const QString &path);
+    void renameRequested(const QString &path);
+    void openRequested(const QString &path);
 
 private:
     struct Column {

@@ -71,6 +71,9 @@ signals:
     /* A tag chip was clicked on this pane - in a column or in the results list. The window hears
      * it once per pane, whichever half it came from. */
     void tagActivated(const QString &path, const QString &tag);
+    void deleteRequested(const QString &path);
+    void renameRequested(const QString &path);
+    void openRequested(const QString &path);
 
 protected:
     /* Child views and their viewports swallow the press before a parent widget would see it, so the

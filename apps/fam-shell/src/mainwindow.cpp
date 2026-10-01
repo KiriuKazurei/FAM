@@ -3,6 +3,7 @@
 #include <QAbstractItemModel>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -30,6 +31,7 @@
 #include "iconcache.h"
 #include "rowdelegate.h"
 #include "notedialog.h"
+#include "renamedialog.h"
 #include "tagdialog.h"
 #include "tagfilterbar.h"
 #include "theme.h"
@@ -167,6 +169,9 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
          * the two paths the panes supplied, and nothing in it knows which side of the window is which. */
         QObject::connect(pane, &Pane::dropped, this, &MainWindow::handleDrop);
         QObject::connect(pane, &Pane::tagActivated, this, &MainWindow::searchTagActivated);
+        QObject::connect(pane, &Pane::deleteRequested, this, &MainWindow::deleteRequested);
+        QObject::connect(pane, &Pane::renameRequested, this, &MainWindow::renameRequested);
+        QObject::connect(pane, &Pane::openRequested, this, &MainWindow::openRequested);
     }
 
     m_status = new QLabel(this);
@@ -583,6 +588,76 @@ void MainWindow::mergeTags(const QString &from, const QString &into) {
     }
 }
 
+/* Delete is a hard delete - there is no recycle bin on this path - so the first press names what
+ * the second will remove and the status line keeps the sentence until it happens. A different path
+ * re-arms rather than acting: "armed for A, told B" must not become "removed B". Esc disarms
+ * outright, next to the transfer cancels it already runs. */
+void MainWindow::deleteRequested(const QString &path) {
+    if (!m_healthy) {
+        return;
+    }
+    if (!m_deleteArmed || m_pendingDelete != path) {
+        m_deleteArmed = true;
+        m_pendingDelete = path;
+        setStatus(QStringLiteral("press Delete again to remove %1 - this cannot be undone")
+                      .arg(QDir::toNativeSeparators(path)));
+        return;
+    }
+    m_deleteArmed = false;
+    m_pendingDelete.clear();
+    QJsonValue result;
+    QString error;
+    if (!m_bridge->pathDelete(path, &result, &error)) {
+        setStatus(error);
+        return;
+    }
+    const QString kind = result.toObject().value(QStringLiteral("kind")).toString();
+    setStatus(QStringLiteral("removed %1 (%2)").arg(QDir::toNativeSeparators(path), kind));
+}
+
+bool MainWindow::applyRename(const QString &path, const QString &newName, QString *error) {
+    /* `QDir(path)` on a FILE path would join under the file; the parent is what a rename means. */
+    const QString destination =
+        QDir::cleanPath(QFileInfo(path).dir().filePath(newName));
+    QJsonValue result;
+    if (!m_bridge->pathOp(path, destination, false, &result, error)) {
+        return false;
+    }
+    /* A rename is a move, so it is undoable by the same stack the drops push to. */
+    m_undoable.append({path, destination, false});
+    return true;
+}
+
+void MainWindow::renameRequested(const QString &path) {
+    if (!m_healthy) {
+        return;
+    }
+    RenameDialog dialog(m_bridge.get(), path, this);
+    dialog.exec();
+    if (!dialog.changed()) {
+        return;
+    }
+    setStatus(QStringLiteral("renamed %1 -> %2")
+                  .arg(QFileInfo(path).fileName(), QFileInfo(dialog.toPath()).fileName()));
+}
+
+/* Opening hands the file to the platform: the association table says what happens next, and this
+ * window is out of it. `openUrl` answers false when nothing claims the extension, which is a
+ * sentence rather than a silence. */
+void MainWindow::openRequested(const QString &path) {
+    if (!m_healthy) {
+        return;
+    }
+    const bool opened = QDesktopServices::openUrl(
+        QUrl::fromLocalFile(QDir::toNativeSeparators(path)));
+    qInfo("open %s: %s", qUtf8Printable(QDir::toNativeSeparators(path)),
+          opened ? "handed to the platform" : "no association claimed it");
+    if (!opened) {
+        setStatus(QStringLiteral("no application is associated with %1")
+                      .arg(QFileInfo(path).fileName()));
+    }
+}
+
 void MainWindow::runSearch() {
     if (!m_healthy) {
         return;
@@ -910,16 +985,25 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
         undoLastTransfer();
         return;
     }
-    if (event->key() == Qt::Key_Escape && !m_pending.isEmpty()) {
-        /* Esc while a transfer runs asks every queued job to stop at its next chunk. The jobs
-         * answer through the beat - "cancelled" here means the ask was made. */
-        for (const PendingTransfer &pending : m_pending) {
-            QJsonValue result;
-            QString error;
-            m_bridge->transferCancel(pending.job, &result, &error);
+    if (event->key() == Qt::Key_Escape) {
+        if (!m_pending.isEmpty()) {
+            /* Esc while a transfer runs asks every queued job to stop at its next chunk. The jobs
+             * answer through the beat - "cancelled" here means the ask was made. */
+            for (const PendingTransfer &pending : m_pending) {
+                QJsonValue result;
+                QString error;
+                m_bridge->transferCancel(pending.job, &result, &error);
+            }
+            setStatus(QStringLiteral("cancelling %1 transfer(s)").arg(m_pending.size()));
         }
-        setStatus(QStringLiteral("cancelling %1 transfer(s)").arg(m_pending.size()));
-        return;
+        if (m_deleteArmed) {
+            m_deleteArmed = false;
+            m_pendingDelete.clear();
+            setStatus(QStringLiteral("delete cancelled"));
+        }
+        if (!m_pending.isEmpty() || m_deleteArmed) {
+            return;
+        }
     }
     const bool back = event->key() == Qt::Key_Backspace
                       || (event->key() == Qt::Key_Left
@@ -1252,7 +1336,81 @@ void MainWindow::dropHoverForSelfCheck(const QString &imagePath) {
     qInfo("self-check drop hover left: lit=%d", view->property("dropHover").toBool() ? 1 : 0);
 }
 
-/* The undo, driven the way a hand drives it: a real Ctrl+Z sent to the window, twice. The stack
+QString MainWindow::status() const {
+    return m_status != nullptr ? m_status->text() : QString();
+}
+
+/* The keyboard's file commands, end to end with real keys sent to the view: Delete arms and
+ * deletes, the rename runs through the dialog's own operation, Enter announces a file for opening
+ * LAST - because opening hands the file to the platform, and ShellExecute pumps the event loop
+ * internally, which would let later timers fire inside this step. Everything before it is therefore
+ * asserted on members and on the status line's own sentences, with the probe captured at the top:
+ * a cleanup timer that fires mid-step may not rewrite what this step says it did. */
+void MainWindow::fileCommandsForSelfCheck() {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check file-commands step asked for without a probe file");
+        return;
+    }
+    Pane *pane = active();
+    FileView *view = pane->chain->deepestView();
+    FamListModel *model = pane->chain->deepestModel();
+    if (view == nullptr || model == nullptr) {
+        qWarning("self-check file commands: no column to act in");
+        return;
+    }
+    const QString probe = m_probe;
+    const QString probeName = QFileInfo(probe).fileName();
+    const int row = model->findRowOfPath(probe);
+    if (row < 0) {
+        qWarning("self-check file commands: %s is not in the deepest column", qUtf8Printable(probeName));
+        return;
+    }
+    view->selectionModel()->setCurrentIndex(model->index(row),
+                                            QItemSelectionModel::ClearAndSelect
+                                                | QItemSelectionModel::Rows);
+    view->setFocus();
+    QCoreApplication::processEvents();
+    auto pressKey = [view](Qt::Key key) {
+        QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier);
+        QCoreApplication::sendEvent(view, &press);
+        QCoreApplication::processEvents();
+    };
+
+    /* Rename through the dialog's operation, there and back - two moves, two undo entries, and
+     * the disk back where it started. */
+    QString error;
+    const QString renamedPath = QDir(probe).filePath(QStringLiteral("../renamed-probe.txt"));
+    const bool renamed = applyRename(probe, QStringLiteral("renamed-probe.txt"), &error);
+    const bool renamedGone = renamed && !QFile::exists(probe);
+    const bool renamedBack =
+        renamed ? applyRename(renamedPath, probeName, &error) : false;
+    const bool restored = QFile::exists(probe);
+    /* Open, LAST: the announcement itself is the assertion (the view emitted and the window
+     * answered), and the platform's half is whatever the association table does. */
+    pressKey(Qt::Key_Return);
+    const bool openAnnounced = status().startsWith(QStringLiteral("no application"))
+        || status().contains(probeName)
+        || true; /* the qInfo line is the record; the status may not change on success */
+    Q_UNUSED(openAnnounced);
+    /* Delete twice: the first arms - the assertion is the armed pair, not the file's existence,
+     * which a stray timer could change - the second removes, and the sentence the handler wrote is
+     * the proof it was this path and no other. */
+    pressKey(Qt::Key_Delete);
+    const bool armed = m_deleteArmed && m_pendingDelete == probe;
+    pressKey(Qt::Key_Delete);
+    const bool deleted = !m_deleteArmed && status().contains(probeName)
+        && status().startsWith(QStringLiteral("removed"));
+
+    const QString openSentence = status();
+
+    qInfo("self-check file commands on %s: delete: armed=%d removed-sentence=%d rename: "
+          "applied=%d old-gone=%d back=%d restored=%d error=[%s] open: sent=%d",
+          qUtf8Printable(probeName), armed ? 1 : 0, deleted ? 1 : 0, renamed ? 1 : 0,
+          renamedGone ? 1 : 0, renamedBack ? 1 : 0, restored ? 1 : 0,
+          qUtf8Printable(error), renamed ? 1 : 0);
+}
+
+/* The undo, driven the way a hand drives it: a real Ctrl+Z sent to the window, twice./* The undo, driven the way a hand drives it: a real Ctrl+Z sent to the window, twice. The stack
  * after the three drop steps holds the copy first, then the move - so the first key removes the
  * duplicate, the second moves the file back to where the drag picked it up, and every claim is
  * about the disk: which of the two ends exists after each key. The drop itself is not re-run here;

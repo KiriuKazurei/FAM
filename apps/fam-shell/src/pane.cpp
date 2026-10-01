@@ -53,6 +53,12 @@ Pane::Pane(FamBridge *bridge, IconCache *icons, const QStringList &kinds, QWidge
     QObject::connect(chain, &ColumnChain::dropped, this, &Pane::dropped);
     QObject::connect(chain, &ColumnChain::tagActivated, this, &Pane::tagActivated);
     QObject::connect(results, &FileView::tagActivated, this, &Pane::tagActivated);
+    QObject::connect(chain, &ColumnChain::deleteRequested, this, &Pane::deleteRequested);
+    QObject::connect(chain, &ColumnChain::renameRequested, this, &Pane::renameRequested);
+    QObject::connect(chain, &ColumnChain::openRequested, this, &Pane::openRequested);
+    QObject::connect(results, &FileView::deleteRequested, this, &Pane::deleteRequested);
+    QObject::connect(results, &FileView::renameRequested, this, &Pane::renameRequested);
+    QObject::connect(results, &FileView::openRequested, this, &Pane::openRequested);
 
     /* The pane needs a layout of its own. Without one, `pages` is a child that keeps whatever
      * geometry it was born with, and the window can hand this pane half the screen while the listing
