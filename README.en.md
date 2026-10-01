@@ -232,11 +232,31 @@ workspace snapshot is `84342b5`, which is the line-number baseline for `docs/leg
 
 #### Installation
 
-1.  Not available yet
+Build the core and the shell (see **Build** above), then install into a self-contained folder:
+
+```bash
+cmake --install apps/fam-shell/build --prefix dist/fam-shell
+cmake --install apps/fam-design/build --prefix dist/fam-design
+```
+
+The installed folder runs with nothing but the Windows system directories on PATH - that is the
+whole point, and the acceptance: point the config at a tree, strip PATH, run the self-check gate,
+and expect exit 0 with every assertion at 1.
 
 #### Instructions
 
-1.  Not available yet
+1.  Hand `fam-shell.exe` a configuration file (`--config <config.toml>`) naming the database, the
+    search roots, the audit directory and the token file - a minimal example lives in the CLI tests;
+    `--watch <dir>` opens a tree at start-up, `--theme light|dark|system` picks the scheme.
+2.  Browse with the Miller columns; type terms in the box (or click a tag chip) and press Search;
+    `tag:name` searches the library; select a row for `Tags…` and `Note…`.
+3.  Keyboard: Delete removes (twice - the first press names what the second will remove), F2
+    renames, double-click or Enter hands a file to the platform, Ctrl+Z undoes the last transfer,
+    Esc cancels running transfers or a delete confirmation.
+4.  Drag a row onto another column to move it, with Ctrl to copy; the destination is the folder
+    that column shows.
+5.  For agents: issue a credential with `fam mcp token add` and run `fam-mcp.exe` over stdio - see
+    **Build** above.
 
 #### Contribution
 
