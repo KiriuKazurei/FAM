@@ -180,8 +180,6 @@ private slots:
     void deleteRequested(const QString &path);
     void renameRequested(const QString &path);
     void openRequested(const QString &path);
-    /* The strip's context menu asked for a library-wide merge. */
-    void mergeTags(const QString &from, const QString &into);
     /* Putting the folder back on screen: a search no longer closes the columns it was started in, so
      * clearing the box is what returns to them. */
     void showFolder();

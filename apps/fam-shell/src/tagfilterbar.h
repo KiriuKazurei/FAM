@@ -29,25 +29,32 @@ class TagFilterBar final : public QWidget {
     Q_OBJECT
 
 public:
+    /* A chip has three states. Neutral says nothing; include searches FOR the label; exclude
+     * searches for everything NOT carrying it. Left-click toggles include, right-click toggles
+     * exclude, and each verb clears the other - a chip cannot both demand and refuse. */
+    enum class State { Neutral, Include, Exclude };
+
+public:
     explicit TagFilterBar(FamBridge *bridge, QWidget *parent = nullptr);
 
     /* Re-reads the vocabulary and rebuilds the strip, keeping the marks `query` implies - the same
      * derivation `applyQuery` does, so a rebuild mid-search does not lose the state the box already
-     * describes. Hides the bar when the read comes back empty or fails - a broken store makes for no
-     * strip, not an empty one that looks like a promise nothing answered. */
-    void refresh(const QString &query = QString());
+     * describes. With `dir` non-empty the vocabulary is the directory's own (tags whose files live
+     * in its subtree); empty falls back to the whole library. Hides the bar when the read comes
+     * back empty or fails - a broken store makes for no strip, not an empty one that looks like a
+     * promise nothing answered. */
+    void refresh(const QString &query = QString(), const QString &dir = QString());
 
-    /* Checks the chip of every `tag:name` token in `query` and unchecks the rest. */
+    /* Derives every chip's state from `query`: `tag:name` includes, `tag:!name` excludes, names
+     * absent from the query return to neutral. */
     void applyQuery(const QString &query);
 
-    /* The one gesture, driven by name: flips the named chip and announces it through the same
-     * `toggled` path a hand's click would take, so the headless step drives this surface through the
-     * wiring a person drives it through rather than around it. False when no chip bears the name. */
+    /* The gestures, driven by name for the headless steps: include flips the named chip into the
+     * include state through the same `toggled` path a hand's left-click takes; exclude sets the
+     * exclusion state silently (the right-click verb has no search to run). Both false when no
+     * chip bears the name. */
     bool toggle(const QString &name);
-
-    /* The same flip without the announcement - a mark for the camera in the headless shot, not a
-     * hand: the checked state is the thing the frame proves, not the search it would run. */
-    bool markSilently(const QString &name, bool down);
+    bool setExcluded(const QString &name, bool excluded);
 
     /* The tags whose chips are checked, in the vocabulary's own order (most used first). */
     QStringList checkedTags() const;
@@ -60,27 +67,21 @@ public:
     int chipCount() const { return m_chips.size(); }
 
 signals:
-    /* A chip was toggled. The owner recomposes the query and runs (or clears) the search. */
+    /* A chip changed state (left- or right-click). The owner recomposes the query - include and
+     * exclude tokens - and runs (or clears) the search. */
     void filterChanged();
-    /* A chip's context menu named a merge: move every row of `from` onto `into`. The bar only asks -
-     * the bridge call, the status line and the refreshes belong to the window, because they reach
-     * far past this strip. */
-    void mergeRequested(const QString &from, const QString &into);
-
-private slots:
-    /* One chip's context menu, built from the vocabulary this strip already holds: every *other*
-     * name, and picking one is the merge. Built per open rather than kept, because the vocabulary
-     * can change under a menu that stays open. */
-    void chipMenu();
 
 private:
+    /* The state machine behind the three looks: writes the property the style sheet matches,
+     * mirrors it into the checkable flag, and repaints. */
+    void applyChipState(QPushButton *chip, State state);
+    static State stateOf(const QPushButton *chip);
+
     /* Drops every chip. `refresh` is a rebuild rather than a diff because the vocabulary is small
      * and the moment is an interaction, not a beat - a diff would be state to get wrong. */
     void clearChips();
 
     FamBridge *m_bridge;
-    /* The chip a context menu was opened for, so the menu's answer can name the `from`. */
-    QString m_menuTag;
     QHBoxLayout *m_chipsLayout;
     QVector<QPushButton *> m_chips;
     /* The facet counts, kept beside the chips so a rebuilt strip can relabel from the same read the

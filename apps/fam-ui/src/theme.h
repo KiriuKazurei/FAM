@@ -66,6 +66,12 @@ struct Tokens {
      * was a tag". Ant Design's own Table does exactly that, and the light value is its published
      * `colorPrimaryBorder` (blue 3). */
     QColor tagBorder;
+    /* The exclusion trio, for a filter chip whose name is being *excluded*: Ant Design's
+     * colorError family. The text takes the darker red (the plain error red fails 4.5:1 as 12px
+     * text on the bg); the ground and border are the published errorBg/errorBorder. */
+    QColor errorText;
+    QColor errorBg;
+    QColor errorBorder;
     /* The inverse of the spotlight: Ant Design's dark tooltip is a *light* bubble, so the text on it
      * is dark, and hard-coding white here is how a tooltip becomes unreadable in exactly the scheme
      * where nobody thought to look. */

@@ -1676,6 +1676,57 @@ pub unsafe extern "C" fn fam_notes_for_paths(
     })
 }
 
+/// [`fam_tag_vocabulary`] scoped to one directory: tags whose files live in the subtree,
+/// counted over the files in it. A browsing page shows "the tags of where I am" - a view that
+/// changes with every descent, which is why this is a heartbeat-family read like the windowed
+/// tag fetch, not a whole-table ask.
+#[no_mangle]
+pub unsafe extern "C" fn fam_tag_vocabulary_within(
+    core: *mut FamCore,
+    path: *const c_char,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, Call::new(Op::TagFetch), out, err, |borrow, call| {
+        let path = required_str(path, "path")?;
+        call.names(path);
+        let facets = borrow
+            .store()
+            .vocabulary_within(Path::new(path))
+            .map_err(|error| error.to_string())?;
+        let out_json: Vec<VocabularyOut> = facets
+            .into_iter()
+            .map(|facet| VocabularyOut {
+                tag: facet.tag,
+                files: facet.files,
+            })
+            .collect();
+        serde_json::to_string(&out_json).map_err(|error| error.to_string())
+    })
+}
+
+/// Removes every row named `tag` across all files and both sources. The tag manager's delete:
+/// a name that is wrong or duplicated everywhere is edited here rather than file by file. The
+/// answer counts the rows that went - zero says the name was not in the library, which the
+/// caller reports instead of celebrating.
+#[no_mangle]
+pub unsafe extern "C" fn fam_tag_delete(
+    core: *mut FamCore,
+    name: *const c_char,
+    out: *mut *mut c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    with_core(core, Call::new(Op::TagDelete), out, err, |borrow, call| {
+        let name = required_str(name, "name")?;
+        call.says(format!("name={name}"));
+        let removed = borrow
+            .store()
+            .delete_tags(name)
+            .map_err(|error| error.to_string())?;
+        Ok(format!("{{\"removed\":{removed}}}"))
+    })
+}
+
 /// Removes one path - a file, an empty directory, or a symlink as the link itself. A directory
 /// that still has entries is refused by name; the recursive delete is the one irreversible call
 /// there is, and this surface does not make it quietly. This is the inverse half of a copied

@@ -578,6 +578,50 @@ impl TagStore {
     ///
     /// Unbounded by design: a vocabulary is small, and a cap here would silently hide a tag the
     /// person can see on a row, which is worse than a long list.
+    /// The vocabulary as seen from one directory: tags whose files live in the subtree, counted
+    /// over the files **in** the subtree. A browsing page that shows "the tags of where I am"
+    /// asks this; the library-wide [`TagStore::vocabulary`] answers a different question.
+    pub fn vocabulary_within(&self, within: &Path) -> Result<Vec<TagFacet>, StoreError> {
+        let key = path_key(within);
+        let mut sql = String::from("SELECT t.tag, COUNT(DISTINCT t.path_norm) FROM tags t WHERE ");
+        let mut args: Vec<Box<dyn ToSql>> = Vec::new();
+        match descendant_range(&key) {
+            Some((lower, upper)) => {
+                sql.push_str("(t.path_norm = ?1 OR (t.path_norm >= ?2 AND t.path_norm < ?3))");
+                args.push(Box::new(key.clone()));
+                args.push(Box::new(lower));
+                args.push(Box::new(upper));
+            }
+            None => {
+                sql.push_str("t.path_norm = ?1");
+                args.push(Box::new(key));
+            }
+        }
+        sql.push_str(
+            " GROUP BY t.tag ORDER BY COUNT(DISTINCT t.path_norm) DESC, t.tag COLLATE NOCASE",
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(sql_refs(&args)), |row| {
+            Ok(TagFacet {
+                tag: row.get(0)?,
+                files: row.get::<_, i64>(1)? as usize,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Removes every row named `tag` across all files and both sources - the tag manager's
+    /// delete. The name is validated like any tag text (the manager cannot delete a malformed
+    /// name that the store would never have accepted), and the answer counts the rows that went,
+    /// both sources separately per the wire's own row semantics. Zero means the name was not in
+    /// the library, which the caller reports rather than celebrating.
+    pub fn delete_tags(&self, tag: &str) -> Result<usize, StoreError> {
+        validate_tag(tag)?;
+        Ok(self
+            .conn
+            .execute("DELETE FROM tags WHERE tag = ?1", params![tag])?)
+    }
+
     pub fn vocabulary(&self) -> Result<Vec<TagFacet>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT tag, COUNT(DISTINCT path_norm) FROM tags GROUP BY tag \

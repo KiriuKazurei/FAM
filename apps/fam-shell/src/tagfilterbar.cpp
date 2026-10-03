@@ -2,6 +2,7 @@
 
 #include <QHBoxLayout>
 #include <QMenu>
+#include <QStyle>
 #include <QPushButton>
 #include <QScrollArea>
 
@@ -45,10 +46,13 @@ void TagFilterBar::clearChips() {
     m_chips.clear();
 }
 
-void TagFilterBar::refresh(const QString &query) {
+void TagFilterBar::refresh(const QString &query, const QString &dir) {
     clearChips();
     QString error;
-    if (!m_bridge->tagVocabulary(&m_facets, &error) || m_facets.isEmpty()) {
+    const bool read = dir.isEmpty()
+        ? m_bridge->tagVocabulary(&m_facets, &error)
+        : m_bridge->tagVocabularyWithin(dir, &m_facets, &error);
+    if (!read || m_facets.isEmpty()) {
         hide();
         return;
     }
@@ -61,15 +65,22 @@ void TagFilterBar::refresh(const QString &query) {
         chip->setCursor(Qt::PointingHandCursor);
         chip->setToolTip(QStringLiteral("%1 file(s) carry this tag · click to search it")
                              .arg(facet.files));
-        connect(chip, &QPushButton::toggled, this, [this](bool) { emit filterChanged(); });
-        /* The merge gesture lives on the chip's context menu: a click searches, a right-click
-         * consolidates. The menu is built when it opens, from the facets this read brought back. */
+        /* Left-click toggles include; right-click toggles exclude. The two states are mutually
+         * exclusive by construction - including clears an exclusion, excluding clears an inclusion
+         * - and each writes its own token into the box through filterChanged. */
+        connect(chip, &QPushButton::clicked, this, [this, chip]() {
+            const bool exclude = chip->property("chipState").toString()
+                                 == QStringLiteral("exclude");
+            applyChipState(chip, exclude ? State::Neutral : State::Include);
+            emit filterChanged();
+        });
         chip->setContextMenuPolicy(Qt::CustomContextMenu);
-        connect(chip, &QWidget::customContextMenuRequested, this,
-                [this, chip](const QPoint &at) {
-                    m_menuTag = chip->property("tagName").toString();
-                    chipMenu();
-                });
+        connect(chip, &QWidget::customContextMenuRequested, this, [this, chip](const QPoint &) {
+            const bool exclude = chip->property("chipState").toString()
+                                 == QStringLiteral("exclude");
+            applyChipState(chip, exclude ? State::Neutral : State::Exclude);
+            emit filterChanged();
+        });
         m_chipsLayout->insertWidget(m_chipsLayout->count() - 1, chip);
         m_chips.append(chip);
     }
@@ -78,50 +89,45 @@ void TagFilterBar::refresh(const QString &query) {
     applyQuery(query);
 }
 
-void TagFilterBar::chipMenu() {
-    if (m_menuTag.isEmpty()) {
+void TagFilterBar::applyChipState(QPushButton *chip, State state) {
+    const QString name = QStringLiteral("%1").arg(static_cast<int>(state));
+    if (chip->property("chipState").toString() == name) {
         return;
     }
-    QMenu menu(this);
-    menu.setObjectName(QString::fromLatin1(Theme::tagChipMenuName()));
-    auto *title = menu.addAction(QStringLiteral("Merge '%1' into…").arg(m_menuTag));
-    title->setEnabled(false);
-    menu.addSeparator();
-    bool others = false;
-    for (const TagFacet &facet : std::as_const(m_facets)) {
-        if (facet.tag == m_menuTag) {
-            continue;
-        }
-        others = true;
-        const QString target = facet.tag;
-        connect(menu.addAction(QStringLiteral("%1 · %2").arg(facet.tag).arg(facet.files)),
-                &QAction::triggered, this, [this, target] { emit mergeRequested(m_menuTag, target); });
+    chip->setProperty("chipState", name);
+    chip->setChecked(state == State::Include);
+    /* The style sheet matches on properties, but only re-resolves a widget when told. */
+    style()->unpolish(chip);
+    style()->polish(chip);
+    chip->update();
+}
+
+TagFilterBar::State TagFilterBar::stateOf(const QPushButton *chip) {
+    const QString text = chip->property("chipState").toString();
+    if (text == QStringLiteral("include")) {
+        return State::Include;
     }
-    if (!others) {
-        menu.addAction(QStringLiteral("(no other tag in the library)"))->setEnabled(false);
+    if (text == QStringLiteral("exclude")) {
+        return State::Exclude;
     }
-    menu.exec(QCursor::pos());
-    m_menuTag.clear();
+    return State::Neutral;
 }
 
 bool TagFilterBar::toggle(const QString &name) {
     for (QPushButton *chip : std::as_const(m_chips)) {
         if (chip->property("tagName").toString() == name) {
-            chip->setChecked(!chip->isChecked());
+            applyChipState(chip, stateOf(chip) == State::Include ? State::Neutral
+                                                                 : State::Include);
             return true;
         }
     }
     return false;
 }
 
-bool TagFilterBar::markSilently(const QString &name, bool down) {
+bool TagFilterBar::setExcluded(const QString &name, bool excluded) {
     for (QPushButton *chip : std::as_const(m_chips)) {
         if (chip->property("tagName").toString() == name) {
-            if (chip->isChecked() != down) {
-                chip->blockSignals(true);
-                chip->setChecked(down);
-                chip->blockSignals(false);
-            }
+            applyChipState(chip, excluded ? State::Exclude : State::Neutral);
             return true;
         }
     }
@@ -130,25 +136,28 @@ bool TagFilterBar::markSilently(const QString &name, bool down) {
 
 void TagFilterBar::applyQuery(const QString &query) {
     const QStringList tokens = query.split(QChar(u' '), Qt::SkipEmptyParts);
+    const QString includeMark = QStringLiteral("tag:");
+    const QString excludeMark = QStringLiteral("tag:!");
     for (QPushButton *chip : std::as_const(m_chips)) {
-        const QString wanted = QStringLiteral("tag:") + chip->property("tagName").toString();
-        const bool marks = tokens.contains(wanted);
-        if (chip->isChecked() != marks) {
-            /* Silent, because the query is the thing that moved: the toggled signal is for a hand
-             * on a chip, and this is the strip agreeing with a box - or with a rebuild - that it
-             * itself is following. Letting it fire here would turn "rebuild and re-mark" into
-             * "filterChanged → search → rebuild", and the run would chase its own tail. */
-            chip->blockSignals(true);
-            chip->setChecked(marks);
-            chip->blockSignals(false);
+        const QString name = chip->property("tagName").toString();
+        State state = State::Neutral;
+        if (tokens.contains(includeMark + name)) {
+            state = State::Include;
+        } else if (tokens.contains(excludeMark + name)) {
+            state = State::Exclude;
         }
+        /* Silent and signal-free: the query is the thing that moved, and the strip is agreeing
+         * with a box - or with a rebuild - that it itself is following. Letting a click's signal
+         * fire here would turn "rebuild and re-mark" into "filterChanged → search → rebuild",
+         * and the run would chase its own tail. */
+        applyChipState(chip, state);
     }
 }
 
 QStringList TagFilterBar::checkedTags() const {
     QStringList names;
     for (const QPushButton *chip : std::as_const(m_chips)) {
-        if (chip->isChecked()) {
+        if (chip->property("chipState").toString() == QStringLiteral("include")) {
             names.append(chip->property("tagName").toString());
         }
     }

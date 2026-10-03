@@ -261,6 +261,34 @@ bool FamBridge::tagsForPaths(const QStringList &paths, QHash<QString, QStringLis
     return true;
 }
 
+bool FamBridge::tagVocabularyWithin(const QString &dir, QVector<TagFacet> *facets,
+                                    QString *error) {
+    const QByteArray utf8Dir = dir.toUtf8();
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_tag_vocabulary_within(m_core, utf8Dir.constData(), &out, &err);
+    ++m_ipc.tagReads;
+    QJsonValue result;
+    if (!invoke(code, out, err, &result, error)) {
+        return false;
+    }
+    facets->clear();
+    for (const QJsonValue &value : result.toArray()) {
+        const QJsonObject object = value.toObject();
+        facets->append({object.value(QStringLiteral("tag")).toString(),
+                        object.value(QStringLiteral("files")).toInt()});
+    }
+    return true;
+}
+
+bool FamBridge::tagDelete(const QString &tag, QJsonValue *result, QString *error) {
+    const QByteArray utf8Tag = tag.toUtf8();
+    char *out = nullptr;
+    char *err = nullptr;
+    const int code = fam_tag_delete(m_core, utf8Tag.constData(), &out, &err);
+    return invoke(code, out, err, result, error);
+}
+
 bool FamBridge::tagVocabulary(QVector<TagFacet> *facets, QString *error) {
     facets->clear();
     char *out = nullptr;

@@ -46,6 +46,7 @@ pub enum Op {
     TagRemove,
     TagMerge,
     TagRename,
+    TagDelete,
     PathDelete,
     PathTransferBegin,
     PathTransferEnd,
@@ -132,6 +133,7 @@ impl Op {
             Self::TagRemove => "tag.remove",
             Self::TagMerge => "tag.merge",
             Self::TagRename => "tag.rename",
+            Self::TagDelete => "tag.delete",
             Self::PathDelete => "path.delete",
             Self::PathTransferBegin => "path.transfer.begin",
             Self::PathTransferEnd => "path.transfer.end",
@@ -323,6 +325,7 @@ mod tests {
     fn the_tag_reads_are_split_by_how_often_they_happen() {
         assert_eq!(Op::TagMerge.name(), "tag.merge");
         assert_eq!(Op::TagRename.name(), "tag.rename");
+        assert_eq!(Op::TagDelete.name(), "tag.delete");
         assert_eq!(Op::PathDelete.name(), "path.delete");
         assert_eq!(Op::PathTransferBegin.name(), "path.transfer.begin");
         assert_eq!(Op::PathTransferEnd.name(), "path.transfer.end");

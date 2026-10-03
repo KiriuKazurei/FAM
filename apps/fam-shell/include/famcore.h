@@ -240,6 +240,15 @@ int fam_notes_for_paths(FamCore *core, const char *paths_json, char **out, char 
  * again when something you did changed the answer, rather than on every beat. */
 int fam_tag_vocabulary(FamCore *core, char **out, char **err);
 
+/* The same vocabulary seen from one directory: tags whose files live in the subtree, counted over
+ * the files in it. A browsing page that shows "the tags of where I am" asks this; the answer's
+ * shape is `fam_tag_vocabulary`'s exactly. */
+int fam_tag_vocabulary_within(FamCore *core, const char *path, char **out, char **err);
+
+/* The tags of the whole library by name - used by the tag manager, which shows every label even
+ * when the browsed directory carries none of them. */
+int fam_tag_delete(FamCore *core, const char *name, char **out, char **err);
+
 /* --- moving a file -------------------------------------------------------------------------------
  *
  * The first entry point on this surface that changes what is on disk. Everything above it reads.

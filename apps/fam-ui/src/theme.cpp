@@ -241,6 +241,16 @@ QPushButton#tagChip:checked {
     color: {{accentText}};
     font-weight: 500;
 }
+/* Exclude: the error family with a strike - "files carrying this are out". Read as a state, not
+ * as a broken chip: the strike is the visual verb. */
+QPushButton#tagChip[chipState="exclude"] {
+    background: {{errorBg}};
+    border-color: {{errorBorder}};
+    color: {{errorText}};
+    font-weight: 500;
+    text-decoration: line-through;
+}
+QPushButton#tagChip[chipState="exclude"]:hover { border-color: {{errorText}}; }
 QPushButton#primaryButton {
     background: {{primarySolid}};
     border-color: {{primarySolid}};
@@ -390,6 +400,11 @@ Theme::Theme(Scheme scheme) {
          * row a chip's ground and its row are the same colour, and the hairline is the only thing
          * left saying where the chip ends. */
         t.tagBorder = QColor(QStringLiteral("#91caff"));
+        /* Ant Design 5's error family: colorErrorBorder #ffccc7, colorErrorBg #fff2f0; the text
+         * takes red-7 #d4380d because plain #ff4d4f measures ~3.4:1 as 12px text on the bg. */
+        t.errorText = QColor(QStringLiteral("#c5221f"));
+        t.errorBg = QColor(QStringLiteral("#fff2f0"));
+        t.errorBorder = QColor(QStringLiteral("#ffccc7"));
         t.onPrimary = QColor(QStringLiteral("#ffffff"));
         t.onSpotlight = QColor(QStringLiteral("#ffffff"));
 
@@ -436,6 +451,12 @@ Theme::Theme(Scheme scheme) {
          * near-black), so the hairline takes blue 4 at an alpha that puts it about two to one against
          * the chip's own ground - present, and not the loudest thing in the row. */
         t.tagBorder = alpha(blue4, 0.45);
+        /* The dark error family: published errorBg #2c1618 flattened over the container, border
+         * #5b2526 flattened likewise; the text takes the lighter error red because the dark
+         * #dc4446 fails 4.5:1 at 12px. */
+        t.errorText = QColor(QStringLiteral("#ff7875"));
+        t.errorBg = flattenOnto(QColor(QStringLiteral("#2c1618")), t.bgContainer);
+        t.errorBorder = flattenOnto(QColor(QStringLiteral("#5b2526")), t.bgContainer);
         t.onPrimary = alpha(QColor(Qt::black), 0.88);
         t.onSpotlight = alpha(QColor(Qt::black), 0.88);
 
@@ -530,6 +551,9 @@ QString Theme::buildSheet() const {
         {QStringLiteral("primarySolidHover"), css(t.primarySolidHover)},
         {QStringLiteral("primarySolidActive"), css(t.primarySolidActive)},
         {QStringLiteral("tagBorder"), css(t.tagBorder)},
+        {QStringLiteral("errorText"), css(t.errorText)},
+        {QStringLiteral("errorBg"), css(t.errorBg)},
+        {QStringLiteral("errorBorder"), css(t.errorBorder)},
         {QStringLiteral("onPrimary"), css(t.onPrimary)},
         {QStringLiteral("onSpotlight"), css(t.onSpotlight)},
         {QStringLiteral("scrollbar"), css(t.scrollbar)},
@@ -605,6 +629,9 @@ QVector<Theme::ContrastPair> Theme::contrastPairs() const {
          * column will take it", which is information - so 3:1, gated, unlike the input border it
          * sits beside in the exempt list. */
         {"拖放描边 / 容器", t.primary, t.bgContainer, 3.0, false},
+        /* The exclusion chip's two readable pairs, on the error ground the chip fills. */
+        {"排除文字 / 排除底", t.errorText, flattenOnto(t.errorBg, t.bgContainer), 4.5, false},
+        {"排除描边 / 排除底", t.errorBorder, flattenOnto(t.errorBg, t.bgContainer), 3.0, true},
     };
     QVector<ContrastPair> pairs;
     for (const Raw &entry : raw) {

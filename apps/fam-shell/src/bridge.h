@@ -165,6 +165,11 @@ public:
     bool notesForPaths(const QStringList &paths, QSet<QString> *noted, QString *error);
     /* Every tag name in the store, most used first. */
     bool tagVocabulary(QVector<TagFacet> *facets, QString *error);
+    /* The scoped read: tags whose files live under `dir`, counted over the files in it. */
+    bool tagVocabularyWithin(const QString &dir, QVector<TagFacet> *facets, QString *error);
+    /* Removes every row named `tag` across all files - the tag manager's delete. The answer says
+     * how many rows went (both sources count separately, per the wire's own row semantics). */
+    bool tagDelete(const QString &tag, QJsonValue *result, QString *error);
 
     /* Move `from` onto `to` - a full destination path, name included - or copy it when `copy` is
      * set. This is the first call on the bridge that changes what is on disk, so the rules that

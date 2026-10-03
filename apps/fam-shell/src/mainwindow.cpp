@@ -212,7 +212,6 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
         }
     });
     connect(m_tagBar, &TagFilterBar::filterChanged, this, &MainWindow::applyTagFilter);
-    connect(m_tagBar, &TagFilterBar::mergeRequested, this, &MainWindow::mergeTags);
     connect(openButton, &QPushButton::clicked, this, &MainWindow::openFolderDialog);
     connect(tagButton, &QPushButton::clicked, this, &MainWindow::tagSelectedFile);
     connect(noteButton, &QPushButton::clicked, this, &MainWindow::noteSelectedFile);
@@ -636,34 +635,6 @@ void MainWindow::searchTagActivated(const QString &path, const QString &tag) {
     const QString text = parts.join(QChar(u' '));
     m_search->setText(text);
     runSearch();
-}
-
-void MainWindow::mergeTags(const QString &from, const QString &into) {
-    if (!m_healthy) {
-        return;
-    }
-    QJsonValue result;
-    QString error;
-    if (!m_bridge->tagMerge(from, into, &result, &error)) {
-        setStatus(error);
-        return;
-    }
-    const QJsonObject outcome = result.toObject();
-    setStatus(QStringLiteral("merged %1 into %2: %3 row(s) moved, %4 collapsed, %5 file(s) carry %2")
-                  .arg(from, into)
-                  .arg(outcome.value(QStringLiteral("moved")).toInt())
-                  .arg(outcome.value(QStringLiteral("collapsed")).toInt())
-                  .arg(outcome.value(QStringLiteral("files")).toInt()));
-    /* Names moved, so every surface that shows them is one read behind: the strip's vocabulary,
-     * the rows' chips - and a results list keeps its rows, whose tags just changed under it. */
-    m_tagBar->refresh(m_search->text());
-    for (Pane *pane : {m_left, m_right}) {
-        pane->invalidateTags();
-    }
-    if (active()->showingResults()) {
-        active()->model->refreshTags();
-        active()->model->refreshNotes();
-    }
 }
 
 /* Delete is a hard delete - there is no recycle bin on this path - so the first press names what
@@ -1808,28 +1779,12 @@ void MainWindow::tagSearchForSelfCheck() {
     const bool folderBack = !pane->showingResults();
     m_bridge->tagRemove(m_probe, {QStringLiteral("self-check")}, &ignored, &error);
 
-    /* The merge, from the strip's own signal to the store and back to a rebuilt strip: two names
-     * on two files, one merge call, and the strip is the one that changes shape. The context menu
-     * that produces the signal needs a hand a headless run does not have, so this drives the slot
-     * the menu ends at - the wiring above that point is one `emit`. */
-    const QString other = QDir(m_probe).filePath(QStringLiteral("../报告.docx"));
-    const bool seededA = m_bridge->tagAdd(m_probe, {QStringLiteral("merge-b")}, QStringLiteral("manual"), 0, &ignored, &error);
-    const bool seededB = m_bridge->tagAdd(other, {QStringLiteral("merge-a")}, QStringLiteral("manual"), 0, &ignored, &error);
-    m_bridge->tagAdd(other, {QStringLiteral("merge-b")}, QStringLiteral("manual"), 0, &ignored, &error);
-    m_tagBar->refresh(m_search->text());
-    const bool chipsBefore = m_tagBar->hasChip(QStringLiteral("merge-a")) && m_tagBar->hasChip(QStringLiteral("merge-b"));
-    mergeTags(QStringLiteral("merge-b"), QStringLiteral("merge-a"));
-    const bool mergedOk = !m_tagBar->hasChip(QStringLiteral("merge-b"))
-        && m_tagBar->hasChip(QStringLiteral("merge-a"));
-    m_bridge->tagRemove(m_probe, {QStringLiteral("merge-a")}, &ignored, &error);
-    m_bridge->tagRemove(other, {QStringLiteral("merge-a")}, &ignored, &error);
     m_tagBar->refresh(m_search->text());
     qInfo("self-check tag filter on %s: seeded=%d chip=%d clicked=%d settled=%d hit=%d "
-          "second-click=%d folder-back=%d chip-gone=%d strip-hidden=%d merge: before=%d gone=%d",
+          "second-click=%d folder-back=%d chip-gone=%d strip-hidden=%d",
           qUtf8Printable(QFileInfo(m_probe).fileName()), seeded ? 1 : 0, chip ? 1 : 0,
           clicked ? 1 : 0, settled ? 1 : 0, hit ? 1 : 0, second ? 1 : 0, folderBack ? 1 : 0,
-          !m_tagBar->hasChip(QStringLiteral("self-check")) ? 1 : 0, m_tagBar->isHidden() ? 1 : 0,
-          chipsBefore ? 1 : 0, mergedOk ? 1 : 0);
+          !m_tagBar->hasChip(QStringLiteral("self-check")) ? 1 : 0, m_tagBar->isHidden() ? 1 : 0);
 }
 
 /* The strip as a picture: two chips, one checked and one not, because a checkable control's two
@@ -1850,7 +1805,7 @@ bool MainWindow::grabTagFilterForSelfCheck(const QString &imagePath) {
     m_tagBar->refresh(m_search->text());
     /* The checked chip is checked silently - `toggle` would run the search and leave the window on
      * a result set, and the frame this shot is for is about the two chip states, not the rows. */
-    const bool marked = m_tagBar->markSilently(QStringLiteral("自检查-筛选"), true);
+    const bool marked = m_tagBar->setExcluded(QStringLiteral("自检查-筛选"), true);
     QCoreApplication::processEvents();
     const bool saved = grab().save(imagePath);
     qInfo("self-check wrote the filter strip to %s: seeded=%d chips=%d checked=%d %s",
