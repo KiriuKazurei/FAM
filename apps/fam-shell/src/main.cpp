@@ -203,7 +203,7 @@ int main(int argc, char *argv[]) {
              * until then and the shot has room to breathe. */
             /* Last, because it replaces the chain: a drive pick is the sidebar doing its only job,
              * and the frame after it shows what the reader would see. */
-            QTimer::singleShot(6950, [&window]() { window.pickFirstDriveForSelfCheck(); });
+            QTimer::singleShot(7300, [&window]() { window.pickFirstDriveForSelfCheck(); });
             /* Then the split, because the frame it produces is the one worth looking at: two panes,
              * each on its own folder, each with its own chain. Collapsing it again is the same button
              * doing the other half of its job, and the collapsed frame is the one a person who never
@@ -218,20 +218,20 @@ int main(int argc, char *argv[]) {
              * do at all: the two panes are pointed at two folders of the watched tree, a file is
              * written into one of them, and a real drop event is posted at the other one's column -
              * once with no modifier, which is a move, and once with Ctrl, which is a copy. */
-            QTimer::singleShot(8500, [&window]() { window.prepareTransferForSelfCheck(); });
-            QTimer::singleShot(8900, [&window]() { window.moveAcrossPanesForSelfCheck(); });
-            QTimer::singleShot(9500, [&window]() { window.copyBackAcrossPanesForSelfCheck(); });
+            QTimer::singleShot(8850, [&window]() { window.prepareTransferForSelfCheck(); });
+            QTimer::singleShot(9250, [&window]() { window.moveAcrossPanesForSelfCheck(); });
+            QTimer::singleShot(9850, [&window]() { window.copyBackAcrossPanesForSelfCheck(); });
             /* And the drop that is not a transfer: back into the folder the file is already in. A
              * person does this by accident, and the difference between "nothing to do" and "the core
              * refused it" is only visible in the sentence the window prints. */
-            QTimer::singleShot(9800, [&window]() { window.dropInPlaceForSelfCheck(); });
+            QTimer::singleShot(10150, [&window]() { window.dropInPlaceForSelfCheck(); });
             /* The undo, twice: the copy's duplicate goes, then the move goes back - real Ctrl+Z
              * keys, asserted on the disk. The stack at this point is [move, copy], which is why
              * this step sits after the drop that transferred nothing. */
-            QTimer::singleShot(10400, [&window]() { window.undoForSelfCheck(); });
+            QTimer::singleShot(10750, [&window]() { window.undoForSelfCheck(); });
             /* The hover, between two real drag events - and before the probe goes away, because the
              * payload it carries is the probe. */
-            QTimer::singleShot(10700, [&window, target]() {
+            QTimer::singleShot(11100, [&window, target]() {
                 const QFileInfo shot(target);
                 window.dropHoverForSelfCheck(shot.dir().filePath(
                     shot.completeBaseName() + QStringLiteral(".drophover.png")));
@@ -243,8 +243,14 @@ int main(int argc, char *argv[]) {
              * LAST (the platform hand-off pumps the loop internally). */
             /* Before the drive pick replaces the chain this step acts in: its view pointer is
              * captured for the whole step, and a chain cleared mid-step would be a use-after-free. */
+            /* The tag manager before the keyboard step: the manager seeds its own tags and the
+             * keyboard step's delete removes the probe after it. */
+            QTimer::singleShot(6125, [&window, target]() {
+                window.tagManagerForSelfCheck(
+                    target + QStringLiteral(".tagmgr.png"));
+            });
             QTimer::singleShot(6150, [&window]() { window.fileCommandsForSelfCheck(); });
-            QTimer::singleShot(11900, [&window]() { window.removeSelfCheckProbe(); });
+            QTimer::singleShot(12250, [&window]() { window.removeSelfCheckProbe(); });
         }
         /* The depth cap is only crossed by going deep, and crossing it is what drops a column from
          * the front of the chain - the one structural change that makes every captured position
@@ -259,7 +265,7 @@ int main(int argc, char *argv[]) {
                                [&window]() { window.clickHeaderForSelfCheck(); });
         }
         const int grabAt =
-            std::max({2500, mutate ? 12400 : 0, deep > 0 ? 2800 + deep * 300 : 0});
+            std::max({2500, mutate ? 12800 : 0, deep > 0 ? 2800 + deep * 300 : 0});
         QTimer::singleShot(grabAt, [&window, &app, &boot, target]() {
             if (window.icons() != nullptr) {
                 /* pending=0 is what makes the first two numbers a gate: the worker is idle, so

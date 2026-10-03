@@ -217,6 +217,8 @@ public:
     /* The menu a chip's right-click builds - a QMenu, which otherwise takes the desktop's colours
      * the same way an unnamed QDialog did. */
     static const char *tagChipMenuName() { return "tagChipMenu"; }
+    /* The gear at the strip's far end - a fixed 32px square, outside the chips' scroll. */
+    static const char *tagGearName() { return "tagGear"; }
     static const char *sidebarName() { return "sidebar"; }
     static const char *columnFrameName() { return "column"; }
     static const char *columnHeaderName() { return "columnHeader"; }

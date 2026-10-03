@@ -19,6 +19,7 @@ class QPushButton;
 class QTimer;
 class NoteDialog;
 class RenameDialog;
+class TagManagerDialog;
 class TagFilterBar;
 
 class MainWindow final : public QWidget {
@@ -137,6 +138,10 @@ public:
     /* The drop hover, entered and left with real drag events: the border property is the assertion,
      * and the frame between them is the picture. */
     void dropHoverForSelfCheck(const QString &imagePath);
+
+    /* The tag manager: opened on the browsed directory, a rename through the dialog's operation,
+     * a two-step delete - driven through the dialog's public ops. */
+    void tagManagerForSelfCheck(const QString &imagePath);
     QString status() const;
     /* The keyboard's file commands with real keys: delete's two steps, a rename there and back,
      * and Enter's open announcement - each asserted on the disk or in the status line. */
@@ -169,6 +174,8 @@ private slots:
     /* The free-text note on the selected row or folder - the note the agent could always read and
      * write, and the human face could not see at all until now. */
     void noteSelectedFile();
+    /* The tag manager, from the strip's gear: view, rename/merge, delete. */
+    void manageTags();
     /* The keyboard path's own helpers, shared with the dialog slots. */
     bool applyRename(const QString &path, const QString &newName, QString *error);
     /* A chip on a row was clicked: search that label, the same box-writing way the strip's chips
@@ -275,6 +282,7 @@ private:
     /* The library's vocabulary as clickable chips, under the toolbar controls. Absent while the
      * library holds no tags, which is why it is hidden at construction. */
     TagFilterBar *m_tagBar = nullptr;
+    QPushButton *m_tagGear = nullptr;
     QLabel *m_status = nullptr;
     QTimer *m_timer = nullptr;
     QStringList m_kinds;

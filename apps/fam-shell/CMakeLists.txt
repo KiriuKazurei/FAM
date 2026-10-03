@@ -41,6 +41,7 @@ add_executable(fam-shell WIN32
     src/tagdialog.cpp
     src/tagfilterbar.cpp
     src/notedialog.cpp
+    src/tagmanagerdialog.cpp
     src/renamedialog.cpp
     src/drivelist.cpp
     src/iconcache.cpp)

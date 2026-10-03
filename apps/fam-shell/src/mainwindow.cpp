@@ -32,6 +32,7 @@
 #include "rowdelegate.h"
 #include "notedialog.h"
 #include "renamedialog.h"
+#include "tagmanagerdialog.h"
 #include "tagdialog.h"
 #include "tagfilterbar.h"
 #include "theme.h"
@@ -153,6 +154,15 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     toolbarBox->addLayout(controls);
     m_tagBar = new TagFilterBar(m_bridge.get(), toolbar);
     toolbarBox->addWidget(m_tagBar);
+    /* The gear sits at the strip's far end, outside its scroll: the manager is one gesture away
+     * from wherever the chips have scrolled to. */
+    m_tagGear = new QPushButton(QStringLiteral("⚙"), toolbar);
+    m_tagGear->setObjectName(QString::fromLatin1(Theme::tagGearName()));
+    m_tagGear->setToolTip(QStringLiteral("Open the tag manager - every label in the library, with "
+                                         "rename, merge and delete"));
+    m_tagGear->setFixedSize(32, 32);
+    toolbarBox->addWidget(m_tagGear);
+    m_tagGear->hide();
 
     /* Two panes, built the same way, and only one of them on screen until the split button is
      * pressed. The right one is the pane that has always been there; the left one is the new
@@ -212,6 +222,7 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
         }
     });
     connect(m_tagBar, &TagFilterBar::filterChanged, this, &MainWindow::applyTagFilter);
+    connect(m_tagGear, &QPushButton::clicked, this, &MainWindow::manageTags);
     connect(openButton, &QPushButton::clicked, this, &MainWindow::openFolderDialog);
     connect(tagButton, &QPushButton::clicked, this, &MainWindow::tagSelectedFile);
     connect(noteButton, &QPushButton::clicked, this, &MainWindow::noteSelectedFile);
@@ -577,6 +588,32 @@ void MainWindow::redoLastTransfer() {
                       entry.from, entry.to, entry.copy, QString(), false, true, entry});
 }
 
+/* The tag manager, from the strip's gear. Modal like its siblings, with the browsed directory
+ * as the scope hint: the directory's own labels lead the list. */
+void MainWindow::manageTags() {
+    if (!m_healthy) {
+        return;
+    }
+    Pane *pane = active();
+    const QString dir = pane->showingResults() ? QString() : pane->chain->deepestPath();
+    TagManagerDialog dialog(m_bridge.get(), dir, this);
+    dialog.exec();
+    if (!dialog.changed()) {
+        return;
+    }
+    /* Names changed somewhere in the library: the strip's chips and every row's tag cache are
+     * one read behind, and a results list keeps its rows whose tags just moved. */
+    m_tagBar->refresh(m_search->text(),
+                      pane->showingResults() ? QString() : pane->chain->deepestPath());
+    for (Pane *p : {m_left, m_right}) {
+        p->invalidateTags();
+    }
+    if (pane->showingResults()) {
+        pane->model->refreshTags();
+        pane->model->refreshNotes();
+    }
+}
+
 void MainWindow::toggleSplit() { m_split->click(); }
 
 /* The strip's half of the one-place rule: the query lives in the box, and a hand on a chip rewrites
@@ -805,6 +842,8 @@ void MainWindow::pollChanges() {
             }
         }
     }
+    /* The gear is the strip's other half: visible exactly when the strip is. */
+    m_tagGear->setVisible(!m_tagBar->isHidden());
 
     for (Pane *pane : {m_left, m_right}) {
         const QString changed = pane->chain->poll();
@@ -1358,7 +1397,56 @@ bool MainWindow::grabNoteDialogForSelfCheck(const QString &imagePath) {
     return saved;
 }
 
-/* The drop hover, driven by the two events a drag sends and the one it ends with: an enter from
+/* The tag manager as a picture and as wire assertions: opened on the browsed directory (its own
+ * labels lead), a rename through the dialog's operation, a two-step delete - and the counts the
+ * strip shows afterwards. The ops are public, which is how the headless step drives them. */
+void MainWindow::tagManagerForSelfCheck(const QString &imagePath) {
+    if (!m_healthy || m_probe.isEmpty() || !QFile::exists(m_probe)) {
+        qWarning("self-check tag-manager step asked for without a probe file");
+        return;
+    }
+    const QString dir = active()->chain->deepestPath();
+    QJsonValue ignored;
+    QString error;
+    const bool seedHere = m_bridge->tagAdd(m_probe, {QStringLiteral("mgr-here")},
+                                           QStringLiteral("manual"), 0, &ignored, &error);
+    TagManagerDialog dialog(m_bridge.get(), dir, this);
+    dialog.reload();
+    const int started = dialog.tagNames().size();
+    if (!dialog.selectFirstRow()) {
+        qWarning("self-check tag manager: no row to select");
+        return;
+    }
+    const QString selected = dialog.selectedTag();
+    const QString target = selected + QStringLiteral("-renamed");
+    dialog.setEntryText(target);
+    const bool renamed = dialog.applyMerge(target, &error);
+    dialog.reload();
+    const bool renamedListed = renamed
+        && dialog.tagNames().join(QChar(u' ')).contains(target);
+    if (!dialog.selectFirstRow()) {
+        qWarning("self-check tag manager: no row for the delete");
+        return;
+    }
+    const bool armed = !dialog.deleteTag(&error)
+        && dialog.noteLine().contains(QStringLiteral("press again"));
+    const bool deleted = dialog.deleteTag(&error);
+    dialog.reload();
+    if (renamed) {
+        m_bridge->tagDelete(target, &ignored, &error);
+    }
+    if (seedHere) {
+        m_bridge->tagAdd(m_probe, {QStringLiteral("mgr-here")}, QStringLiteral("manual"), 0,
+                         &ignored, &error);
+    }
+    qInfo("self-check tag manager on %s: started=%d selected=[%s] renamed=%d listed=%d "
+          "delete: armed=%d deleted=%d final=%d names",
+          qUtf8Printable(QFileInfo(m_probe).fileName()), started, qUtf8Printable(selected),
+          renamed ? 1 : 0, renamedListed ? 1 : 0, armed ? 1 : 0, deleted ? 1 : 0,
+          dialog.tagNames().size());
+}
+
+/* The drop hover, driven by the two events/* The drop hover, driven by the two events a drag sends and the one it ends with: an enter from
  * our own payload lights the column's border (the property the style sheet reads is the assertion),
  * a leave puts it out. The frame between the two events is the only picture of a state that exists
  * for exactly one drag - which is why it is taken here, mid-drag, rather than composed later. */

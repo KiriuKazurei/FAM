@@ -251,6 +251,11 @@ QPushButton#tagChip[chipState="exclude"] {
     text-decoration: line-through;
 }
 QPushButton#tagChip[chipState="exclude"]:hover { border-color: {{errorText}}; }
+QPushButton#tagGear {
+    width: 32px;
+    height: 32px;
+    padding: 0px;
+}
 QPushButton#primaryButton {
     background: {{primarySolid}};
     border-color: {{primarySolid}};
