@@ -138,6 +138,32 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     });
 
 
+    /* A thin strip of property labels: Size and Type right-aligned, roughly matching the
+     * delegate's right-aligned fields. Tags has no fixed position (the band varies) - the
+     * chips themselves are the label. Name fills the left and needs no header. */
+    auto *propHeader = new QWidget(column->frame);
+    propHeader->setObjectName(QString::fromLatin1(Theme::columnPropName()));
+    auto *propLayout = new QHBoxLayout(propHeader);
+    const auto &pt = Theme::instance().tokens();
+    propLayout->setContentsMargins(pt.sm + 42, 0, pt.sm, 0);
+    propHeader->setFixedHeight(26);
+    propLayout->setSpacing(0);
+    auto *propName = new QLabel(QStringLiteral("Name"), propHeader);
+    propName->setObjectName(QString::fromLatin1(Theme::propLabelName()));
+    auto *propSize = new QLabel(QStringLiteral("Size"), propHeader);
+    propSize->setObjectName(QString::fromLatin1(Theme::propLabelName()));
+    propSize->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    propSize->setFixedWidth(72);
+    auto *propKind = new QLabel(QStringLiteral("Type"), propHeader);
+    propKind->setObjectName(QString::fromLatin1(Theme::propLabelName()));
+    propKind->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    propKind->setFixedWidth(80);
+
+    propLayout->addWidget(propName, 1);
+    propLayout->addWidget(propSize);
+    propLayout->addSpacing(14);
+    propLayout->addWidget(propKind);
+
     auto *box = new QVBoxLayout(column->frame);
     box->setContentsMargins(0, 0, 0, 0);
     box->setSpacing(0);
