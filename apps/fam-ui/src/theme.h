@@ -219,6 +219,11 @@ public:
     static const char *tagChipMenuName() { return "tagChipMenu"; }
     /* The gear at the strip's far end - a fixed 32px square, outside the chips' scroll. */
     static const char *tagGearName() { return "tagGear"; }
+    static const char *previewName() { return "previewPanel"; }
+    static const char *previewHeaderName() { return "previewHeader"; }
+    static const char *previewMetaName() { return "previewMeta"; }
+    static const char *previewListName() { return "previewList"; }
+    static const char *previewContentName() { return "previewContent"; }
     static const char *sidebarName() { return "sidebar"; }
     static const char *columnFrameName() { return "column"; }
     static const char *columnHeaderName() { return "columnHeader"; }

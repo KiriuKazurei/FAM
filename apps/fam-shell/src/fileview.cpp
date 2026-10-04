@@ -4,6 +4,8 @@
 #include "rowdelegate.h"
 
 #include <QDragEnterEvent>
+#include <QContextMenuEvent>
+#include <QMenu>
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QMimeData>
@@ -105,6 +107,21 @@ void FileView::dragMoveEvent(QDragMoveEvent *event) {
     }
 }
 
+/* The selection changed: the preview should follow. Emitted here rather than from the selection
+ * model's signal because the view knows both the path and the directory flag — the two things the
+ * preview panel needs. */
+void FileView::currentChanged(const QModelIndex &current, const QModelIndex &previous) {
+    QListView::currentChanged(current, previous);
+    if (!current.isValid()) {
+        return;
+    }
+    const QString path = current.data(FamListModel::PathRole).toString();
+    const bool isDirectory = current.data(FamListModel::DirectoryRole).toBool();
+    if (!path.isEmpty()) {
+        emit previewChanged(path, isDirectory);
+    }
+}
+
 void FileView::keyPressEvent(QKeyEvent *event) {
     const QModelIndex current = currentIndex();
     const QString path = current.isValid()
@@ -142,6 +159,35 @@ void FileView::mouseDoubleClickEvent(QMouseEvent *event) {
         }
     }
     QListView::mouseDoubleClickEvent(event);
+}
+
+void FileView::contextMenuEvent(QContextMenuEvent *event) {
+    const QModelIndex index = indexAt(event->pos());
+    if (!index.isValid()) {
+        event->ignore();
+        return;
+    }
+    const bool isDirectory = index.data(FamListModel::DirectoryRole).toBool();
+    const QString path = index.data(FamListModel::PathRole).toString();
+    if (path.isEmpty()) {
+        event->ignore();
+        return;
+    }
+    QMenu menu(this);
+    menu.setObjectName(QString::fromLatin1(Theme::tagChipMenuName()));
+    if (isDirectory) {
+        /* The one way to descend: right-click → "open in column". A click only previews. */
+        connect(menu.addAction(QStringLiteral("Open in column")), &QAction::triggered, this,
+                [this, path] { emit openInColumnRequested(path); });
+        menu.addSeparator();
+    }
+    connect(menu.addAction(QStringLiteral("Open")), &QAction::triggered, this,
+            [this, path] { emit openRequested(path); });
+    connect(menu.addAction(QStringLiteral("Rename")), &QAction::triggered, this,
+            [this, path] { emit renameRequested(path); });
+    connect(menu.addAction(QStringLiteral("Delete")), &QAction::triggered, this,
+            [this, path] { emit deleteRequested(path); });
+    menu.exec(event->globalPos());
 }
 
 void FileView::dropEvent(QDropEvent *event) {

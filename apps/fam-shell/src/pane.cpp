@@ -1,5 +1,7 @@
 #include "pane.h"
 
+#include "previewpanel.h"
+
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QListView>
@@ -59,15 +61,29 @@ Pane::Pane(FamBridge *bridge, IconCache *icons, const QStringList &kinds, QWidge
     QObject::connect(results, &FileView::deleteRequested, this, &Pane::deleteRequested);
     QObject::connect(results, &FileView::renameRequested, this, &Pane::renameRequested);
     QObject::connect(results, &FileView::openRequested, this, &Pane::openRequested);
+    QObject::connect(chain, &ColumnChain::openInColumnRequested, this, &Pane::openInColumnRequested);
+    QObject::connect(chain, &ColumnChain::previewChanged, this, &Pane::previewChanged);
+    QObject::connect(results, &FileView::previewChanged, this, &Pane::previewChanged);
 
     /* The pane needs a layout of its own. Without one, `pages` is a child that keeps whatever
      * geometry it was born with, and the window can hand this pane half the screen while the listing
      * inside it stays a 340px strip - which is exactly the "single column does not fill the window"
      * bug this pane caused on the way in. */
+    /* The preview panel sits to the right of the browsing area, inside this pane. It follows the
+     * selection (which no longer navigates), showing directory contents or file metadata. */
+    preview = new PreviewPanel(this);
+    preview->setObjectName(QString::fromLatin1(Theme::previewName()));
+
+    auto *body = new QHBoxLayout;
+    body->setContentsMargins(0, 0, 0, 0);
+    body->setSpacing(0);
+    body->addWidget(pages, 1);
+    body->addWidget(preview);
+
     auto *shell = new QHBoxLayout(this);
     shell->setContentsMargins(0, 0, 0, 0);
     shell->setSpacing(0);
-    shell->addWidget(pages);
+    shell->addLayout(body);
 
     watch(this);
     watch(results);

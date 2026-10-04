@@ -7,6 +7,7 @@
 #include "famlistmodel.h"
 
 class IconCache;
+class PreviewPanel;
 class QStackedWidget;
 
 /* One browsing pane: a chain of Miller columns, plus the search results that can cover them.
@@ -39,6 +40,7 @@ public:
      * reached, so it is a drag source and not a target. */
     FileView *results = nullptr;
     QStackedWidget *pages = nullptr;
+    PreviewPanel *preview = nullptr;
 
     /* The search this pane started, if one is still arriving. */
     quint64 searchToken = 0;
@@ -74,6 +76,8 @@ signals:
     void deleteRequested(const QString &path);
     void renameRequested(const QString &path);
     void openRequested(const QString &path);
+    void openInColumnRequested(const QString &path);
+    void previewChanged(const QString &path, bool isDirectory);
 
 protected:
     /* Child views and their viewports swallow the press before a parent widget would see it, so the

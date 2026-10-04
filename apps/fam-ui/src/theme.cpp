@@ -251,6 +251,46 @@ QPushButton#tagChip[chipState="exclude"] {
     text-decoration: line-through;
 }
 QPushButton#tagChip[chipState="exclude"]:hover { border-color: {{errorText}}; }
+QWidget#previewPanel {
+    background: {{bgContainer}};
+    border-left: 1px solid {{split}};
+    min-width: 240px;
+    max-width: 320px;
+}
+QLabel#previewHeader {
+    font-size: {{fontLG}}px;
+    font-weight: 600;
+    color: {{text}};
+    background: transparent;
+    padding: 0px;
+}
+QLabel#previewMeta {
+    font-size: {{fontSM}}px;
+    color: {{textTertiary}};
+    background: transparent;
+    padding: 0px;
+}
+QListWidget#previewList {
+    background: {{bgContainer}};
+    border: 1px solid {{split}};
+    border-radius: {{radius}}px;
+    padding: {{xxs}}px;
+    outline: none;
+}
+QListWidget#previewList::item {
+    padding: 4px 8px;
+    border-radius: {{radiusSM}}px;
+    color: {{text}};
+}
+QTextEdit#previewContent {
+    background: {{bgAlter}};
+    border: 1px solid {{split}};
+    border-radius: {{radius}}px;
+    padding: {{sm}}px;
+    color: {{text}};
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: {{fontSM}}px;
+}
 QPushButton#tagGear {
     width: 32px;
     height: 32px;
@@ -544,6 +584,7 @@ QString Theme::buildSheet() const {
         {QStringLiteral("fillSecondary"), css(t.fillSecondary)},
         {QStringLiteral("fillTertiary"), css(t.fillTertiary)},
         {QStringLiteral("fillAlter"), css(t.fillAlter)},
+        {QStringLiteral("bgAlter"), css(t.fillAlter)},
         {QStringLiteral("textSecondary"), css(t.textSecondary)},
         {QStringLiteral("textTertiary"), css(t.textTertiary)},
         {QStringLiteral("textQuaternary"), css(t.textQuaternary)},

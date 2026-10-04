@@ -32,6 +32,7 @@
 #include "rowdelegate.h"
 #include "notedialog.h"
 #include "renamedialog.h"
+#include "previewpanel.h"
 #include "tagmanagerdialog.h"
 #include "tagdialog.h"
 #include "tagfilterbar.h"
@@ -156,6 +157,7 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     toolbarBox->addWidget(m_tagBar);
     /* The gear sits at the strip's far end, outside its scroll: the manager is one gesture away
      * from wherever the chips have scrolled to. */
+    /* The preview panels are created by the Panes themselves in their layouts. */
     m_tagGear = new QPushButton(QStringLiteral("⚙"), toolbar);
     m_tagGear->setObjectName(QString::fromLatin1(Theme::tagGearName()));
     m_tagGear->setToolTip(QStringLiteral("Open the tag manager - every label in the library, with "
@@ -182,6 +184,9 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
         QObject::connect(pane, &Pane::deleteRequested, this, &MainWindow::deleteRequested);
         QObject::connect(pane, &Pane::renameRequested, this, &MainWindow::renameRequested);
         QObject::connect(pane, &Pane::openRequested, this, &MainWindow::openRequested);
+        QObject::connect(pane, &Pane::openInColumnRequested, this,
+                         &MainWindow::openInColumnRequested);
+        QObject::connect(pane, &Pane::previewChanged, this, &MainWindow::previewChanged);
     }
 
     m_status = new QLabel(this);
@@ -748,6 +753,30 @@ void MainWindow::openRequested(const QString &path) {
                            .arg(QFileInfo(path).fileName())
                      : QStringLiteral("no application is associated with %1")
                            .arg(QFileInfo(path).fileName()));
+}
+
+/* The one way to descend: the person right-clicked a directory and picked "open in column".
+ * The chain grows a column showing the directory's contents — the same open() that selection
+ * used to trigger, now behind an explicit gesture. */
+void MainWindow::openInColumnRequested(const QString &path) {
+    if (!m_healthy) {
+        return;
+    }
+    active()->chain->open(path);
+}
+
+/* The selection changed: the preview panel should show this item. The panel is a shell-side
+ * read (QDir/QFile) — the ABI's watching and audit are for the browsing columns, not for a
+ * passive preview that follows the cursor. */
+void MainWindow::previewChanged(const QString &path, bool isDirectory) {
+    if (m_preview == nullptr) {
+        return;
+    }
+    if (isDirectory) {
+        m_preview->showDirectory(path);
+    } else {
+        m_preview->showFile(path);
+    }
 }
 
 void MainWindow::runSearch() {

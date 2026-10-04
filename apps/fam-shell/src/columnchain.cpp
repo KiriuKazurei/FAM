@@ -85,6 +85,9 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
     QObject::connect(column->view, &FileView::deleteRequested, this, &ColumnChain::deleteRequested);
     QObject::connect(column->view, &FileView::renameRequested, this, &ColumnChain::renameRequested);
     QObject::connect(column->view, &FileView::openRequested, this, &ColumnChain::openRequested);
+    QObject::connect(column->view, &FileView::openInColumnRequested, this,
+                     &ColumnChain::openInColumnRequested);
+    QObject::connect(column->view, &FileView::previewChanged, this, &ColumnChain::previewChanged);
     /* Hover is a row state the delegate reads, and a view only tracks it when asked. */
     column->view->setMouseTracking(true);
     column->view->viewport()->setAttribute(Qt::WA_Hover, true);
@@ -276,10 +279,13 @@ bool ColumnChain::selectFirstFolder() {
             continue;
         }
         m_filling = false;
+        const QString folderPath = column.model->pathAt(row);
         column.view->selectionModel()->setCurrentIndex(
             index, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-        /* currentChanged fired, and the handler opened the folder - which is the whole point: this
-         * returns true only if a column actually appeared, so a caller can assert on the depth. */
+        /* Selection no longer auto-opens (increment 33) — the descend must be explicit. The
+         * caller asserts on the depth, which is why this opens directly rather than relying on
+         * the selection handler. */
+        open(folderPath);
         return m_columns.size() > 1;
     }
     return false;
@@ -445,17 +451,27 @@ void ColumnChain::onCurrentChanged(quint64 token, const QModelIndex &previous) {
     if (m_filling || !valid) {
         return;
     }
+    /* The selection no longer navigates — it previews. A directory's contents show in the preview
+     * panel; a file's metadata shows there too. To actually descend, the person right-clicks and
+     * picks "open in column" — which is the one path that grows the chain (increment 33). */
     if (isDirectory) {
-        m_filling = true;
-        open(path);
-        m_filling = false;
+        /* A file picked deeper stays deeper: anything past this column shows a folder nobody is
+         * looking at. Trim the tail so the chain ends at the browsed directory. */
+        const int position = indexOf(&column);
+        while (position >= 0 && m_columns.size() > position + 1) {
+            m_filling = true;
+            dropDeepest();
+            m_filling = false;
+        }
+        emit previewChanged(path, true);
         return;
     }
-    /* A file was picked: anything deeper than this column is showing a folder nobody asked for. */
-    m_filling = true;
+    /* A file was picked: trim deeper columns and show the file in the preview. */
     const int position = indexOf(&column);
     while (position >= 0 && m_columns.size() > position + 1) {
+        m_filling = true;
         dropDeepest();
+        m_filling = false;
     }
-    m_filling = false;
+    emit previewChanged(path, false);
 }

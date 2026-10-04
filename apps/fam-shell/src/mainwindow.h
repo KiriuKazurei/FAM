@@ -20,6 +20,7 @@ class QTimer;
 class NoteDialog;
 class RenameDialog;
 class TagManagerDialog;
+class PreviewPanel;
 class TagFilterBar;
 
 class MainWindow final : public QWidget {
@@ -187,6 +188,8 @@ private slots:
     void deleteRequested(const QString &path);
     void renameRequested(const QString &path);
     void openRequested(const QString &path);
+    void openInColumnRequested(const QString &path);
+    void previewChanged(const QString &path, bool isDirectory);
     /* Putting the folder back on screen: a search no longer closes the columns it was started in, so
      * clearing the box is what returns to them. */
     void showFolder();
@@ -283,6 +286,7 @@ private:
      * library holds no tags, which is why it is hidden at construction. */
     TagFilterBar *m_tagBar = nullptr;
     QPushButton *m_tagGear = nullptr;
+    PreviewPanel *m_preview = nullptr;
     QLabel *m_status = nullptr;
     QTimer *m_timer = nullptr;
     QStringList m_kinds;

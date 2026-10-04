@@ -71,12 +71,18 @@ signals:
     /* A file the person asked to open (double-click or Enter). Folders never emit this: their
      * opening is the selection's own act, one click earlier. */
     void openRequested(const QString &path);
+    /* Right-click on a directory row: the person asked for a new column. */
+    void openInColumnRequested(const QString &path);
+    /* The selected row changed — the preview should show this. */
+    void previewChanged(const QString &path, bool isDirectory);
 
 protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragLeaveEvent(QDragLeaveEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void currentChanged(const QModelIndex &current, const QModelIndex &previous) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 

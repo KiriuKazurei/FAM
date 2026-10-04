@@ -113,6 +113,11 @@ signals:
     void deleteRequested(const QString &path);
     void renameRequested(const QString &path);
     void openRequested(const QString &path);
+    /* The selected row changed: the preview should show this path. Emitted for directories and
+     * files alike — the receiver decides what to show. */
+    void previewChanged(const QString &path, bool isDirectory);
+    /* The person asked for a new column (right-click on a directory row). The chain opens it. */
+    void openInColumnRequested(const QString &path);
 
 private:
     struct Column {
