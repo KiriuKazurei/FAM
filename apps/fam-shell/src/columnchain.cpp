@@ -373,6 +373,16 @@ bool ColumnChain::clickDeepestHeader() {
     return true;
 }
 
+void ColumnChain::sortDeepestBy(const QString &key, const QString &order) {
+    if (m_columns.isEmpty()) {
+        return;
+    }
+    Column &column = *m_columns.last();
+    column.sort = key;
+    column.order = order;
+    applySortTo(column);
+}
+
 void ColumnChain::onHeaderClicked(Column &column) {
     /* The keys cycle in the order a reader expects from a file list, and the second click on the same
      * key flips the direction - so one control reaches every (key, order) pair the core accepts, in

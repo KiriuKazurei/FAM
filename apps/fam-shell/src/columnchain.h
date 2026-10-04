@@ -95,6 +95,8 @@ public:
      * sorted by afterwards - empty when there is no column. The gate clicks it because a sort control
      * nobody pressed is the same unfinished wire it was before this increment. */
     QString sortDeepest();
+    /* Sorts the deepest column by the named key in the named order — the dropdown's handler. */
+    void sortDeepestBy(const QString &key, const QString &order);
 
     /* Clicks the deepest column's header button for real, so the connected lambda runs the way a
      * person's click does. Calling the sort directly would skip the one path that resolves a column

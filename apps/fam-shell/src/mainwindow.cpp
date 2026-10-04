@@ -105,6 +105,29 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     /* Meaningless until a column is on screen, so it cannot disagree with what is showing. */
     m_scope->setEnabled(false);
 
+    m_sortCombo = new QComboBox(this);
+    m_sortCombo->setObjectName(QString::fromLatin1(Theme::sortComboName()));
+    m_sortCombo->addItem(QStringLiteral("Name ▲"), QStringLiteral("name:ascending"));
+    m_sortCombo->addItem(QStringLiteral("Name ▼"), QStringLiteral("name:descending"));
+    m_sortCombo->addItem(QStringLiteral("Size ▲"), QStringLiteral("size:ascending"));
+    m_sortCombo->addItem(QStringLiteral("Size ▼"), QStringLiteral("size:descending"));
+    m_sortCombo->addItem(QStringLiteral("Date ▲"), QStringLiteral("modified:ascending"));
+    m_sortCombo->addItem(QStringLiteral("Date ▼"), QStringLiteral("modified:descending"));
+    m_sortCombo->addItem(QStringLiteral("Type ▲"), QStringLiteral("kind:ascending"));
+    m_sortCombo->addItem(QStringLiteral("Type ▼"), QStringLiteral("kind:descending"));
+    m_sortCombo->setToolTip(QStringLiteral("Sort the deepest column"));
+    connect(m_sortCombo, &QComboBox::activated, this, [this](int index) {
+        if (!m_healthy) {
+            return;
+        }
+        const QString value = m_sortCombo->itemData(index).toString();
+        const int sep = value.indexOf(QLatin1Char(':'));
+        if (sep < 0) {
+            return;
+        }
+        active()->chain->sortDeepestBy(value.left(sep), value.mid(sep + 1));
+    });
+
     auto *searchButton = new QPushButton(QStringLiteral("Search"), this);
     searchButton->setObjectName(QString::fromLatin1(Theme::primaryButtonName()));
     auto *openButton = new QPushButton(QStringLiteral("Open folder…"), this);
@@ -147,6 +170,7 @@ MainWindow::MainWindow(const QString &configPath, const QString &initialQuery, Q
     controls->addWidget(m_search, 1);
     controls->addWidget(m_kind);
     controls->addWidget(m_scope);
+    controls->addWidget(m_sortCombo);
     controls->addWidget(searchButton);
     controls->addWidget(openButton);
     controls->addWidget(tagButton);

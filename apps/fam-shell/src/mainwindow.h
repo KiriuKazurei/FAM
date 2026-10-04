@@ -282,6 +282,7 @@ private:
      * "search here" would be the only thing a search could do once a folder was open - and the
      * previous build could only search everywhere, so either one alone is a regression. */
     QComboBox *m_scope = nullptr;
+    QComboBox *m_sortCombo = nullptr;
     /* The library's vocabulary as clickable chips, under the toolbar controls. Absent while the
      * library holds no tags, which is why it is hidden at construction. */
     TagFilterBar *m_tagBar = nullptr;

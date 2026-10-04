@@ -164,6 +164,7 @@ QLineEdit#searchInput {
     min-width: 260px;
 }
 QComboBox { padding-right: 26px; min-width: 96px; }
+QComboBox#sortCombo { min-width: 108px; }
 QComboBox::drop-down {
     subcontrol-origin: padding;
     subcontrol-position: center right;
