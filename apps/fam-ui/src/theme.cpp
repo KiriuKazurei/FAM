@@ -271,6 +271,17 @@ QLabel#previewMeta {
     background: transparent;
     padding: 0px;
 }
+QWidget#columnProp {
+    background: {{bgContainer}};
+    border-bottom: 1px solid {{split}};
+    padding: 0px;
+}
+QLabel#propLabel {
+    font-size: {{fontSM}}px;
+    color: {{textTertiary}};
+    background: transparent;
+    padding: 0px;
+}
 QListWidget#previewList {
     background: {{bgContainer}};
     border: 1px solid {{split}};

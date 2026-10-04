@@ -225,6 +225,8 @@ public:
     static const char *previewListName() { return "previewList"; }
     static const char *previewContentName() { return "previewContent"; }
     static const char *sortComboName() { return "sortCombo"; }
+    static const char *columnPropName() { return "columnProp"; }
+    static const char *propLabelName() { return "propLabel"; }
     static const char *sidebarName() { return "sidebar"; }
     static const char *columnFrameName() { return "column"; }
     static const char *columnHeaderName() { return "columnHeader"; }

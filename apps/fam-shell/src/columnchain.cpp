@@ -28,6 +28,9 @@ constexpr int kColumnMinWidth = 150;
  * looking at slivers. Going deeper than this drops the oldest column, the way Explorer scrolls. */
 constexpr int kMaxColumns = 5;
 
+constexpr int kIconSide = 16;
+constexpr int kIconGap = 10;
+
 const char *const kSortCycle[] = {"name", "size", "modified", "kind"};
 
 QString sortLabel(const QString &key) {
@@ -134,10 +137,12 @@ ColumnChain::Column *ColumnChain::addColumn(const QString &path, quint64 token) 
         }
     });
 
+
     auto *box = new QVBoxLayout(column->frame);
     box->setContentsMargins(0, 0, 0, 0);
     box->setSpacing(0);
     box->addWidget(header);
+    box->addWidget(propHeader);
     box->addWidget(column->view, 1);
     column->frame->setMinimumWidth(kColumnMinWidth);
     /* No maximum. A pane with one column open should show one column that fills the pane - capping
@@ -291,6 +296,10 @@ bool ColumnChain::selectFirstFolder() {
     return false;
 }
 
+/* A thin strip of property labels between the path/sort header and the file list. The labels sit
+ * at fixed offsets from the right edge, roughly matching where the delegate paints Size and Type.
+ * Tags has no fixed position (the band varies), so it is omitted — the chips themselves are the
+ * label. Name fills the left and needs no header. */
 QString ColumnChain::poll() {
     QString changed;
     for (Column *column : m_columns) {
